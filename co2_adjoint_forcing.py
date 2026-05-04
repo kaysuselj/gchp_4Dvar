@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
 Compute 3D adjoint forcing from OCO-2 xCO2 observations, binned to GCHP
-chemistry checkpoint times.  Output can be on a regular lat/lon grid or
-regridded to a GEOS-5 gnomonic cubed-sphere grid.
+chemistry checkpoint times.  One netCDF file is written per checkpoint time
+that contains at least one observation.  Output can be on a regular lat/lon
+grid or regridded to a GEOS-5 gnomonic cubed-sphere grid.
 
 Usage:
     # Regular lat/lon output (default)
-    python ./co2_adjoint_forcing.py gchp_file output_file \\
+    python ./co2_adjoint_forcing.py gchp_file output_dir \\
         --ts-chem 1200 \\
         --t-start 2015-01-01T00:00:00 --t-end 2015-01-31T23:59:59 \\
         --nlat 91 --nlon 144
 
     # Cubed-sphere output (C90)
-    python ./co2_adjoint_forcing.py gchp_file output_file \\
+    python ./co2_adjoint_forcing.py gchp_file output_dir \\
         --ts-chem 1200 \\
         --t-start 2015-01-01T00:00:00 --t-end 2015-01-31T23:59:59 \\
         --grid cubedsphere --cs-res 90 \\
@@ -20,7 +21,7 @@ Usage:
 
 Arguments:
     gchp_file    : GCHP sat-track netCDF file (GEOSChem.sat_track.*)
-    output_file  : output netCDF
+    output_dir   : output directory (created if absent); one file per checkpoint
 
     --ts-chem    : chemistry timestep [s] for checkpoint binning (required)
     --t-start    : start of assimilation window YYYY-MM-DDTHH:MM:SS (required)
@@ -38,6 +39,9 @@ Environment setup:
     The following file must be in the same directory:
         co2_sat_compare_monthly.py
 
+Output files:
+    CO2_adjoint_forcing_YYYYMMDD_HHMMz.nc4  (one per checkpoint with obs)
+
 Output variables:
     latlon output     : (time, lev, lat, lon)
     cubedsphere output: (time, lev, nf, Ydim, Xdim)  nf=6 faces
@@ -54,8 +58,12 @@ Notes:
     - The GEOS-5 gnomonic cubed sphere face orientation used here follows the
       Putman & Lin (2007) convention. Verify face 0 covers lon~[-45,45] at the
       equator against your GCHP output.
+    - OCO-2 data is stored by month so read_oco_monthly always reads all days
+      in the month; observations outside [t_start, t_end] are discarded in the
+      per-observation loop.
 """
 
+import os
 import sys
 import argparse
 import numpy as np
@@ -281,7 +289,7 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s, nlat, nlon):
     ds_gchp = xr.open_dataset(gchp_file)
     ds_gchp['time'] = pd.to_datetime(ds_gchp['time'].values).round('s')
 
-    nlev = ds_gchp.dims['lev']
+    nlev = ds_gchp.sizes['lev']
     levs = ds_gchp['lev'].values
 
     lats = np.linspace(-90,  90,  nlat)
@@ -303,8 +311,8 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s, nlat, nlon):
 
         mask_gchp = (times_gchp.year == year) & (times_gchp.month == month)
         ds_mod    = ds_gchp.isel(time=np.where(mask_gchp)[0])
-        co2_mod   = ds_mod['SpeciesConcVV_CO2'].values   # (nobs, nlev) v/v
-        prs_mod   = ds_mod['Met_PMIDDRY'].values          # (nobs, nlev) hPa
+        co2_mod   = ds_mod['SpeciesConcVV_CO2'].values   # (nobs, nlev) v/v, no units
+        prs_mod   = ds_mod['Met_PMIDDRY'].values          # (nobs, nlev) hPa, no units
 
         ds_obs = read_oco_monthly(year, month, FOLD_OBS)
         if ds_obs is None:
@@ -312,15 +320,16 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s, nlat, nlon):
             continue
 
         prs_mod_u = prs_mod * units.hPa
-        co2_mod_u = co2_mod * units.K
+        co2_mod_u = co2_mod * units.K   # fake unit required by interpolate_1d
         prs_obs_u = ds_obs['pressure'].values * units.hPa
         nobs, nlev_sat = prs_obs_u.shape
 
         co2_interp = np.empty((nobs, nlev_sat), dtype=np.float32)
         for i in range(nobs):
-            co2_interp[i] = interpolate_1d(prs_obs_u[i], prs_mod_u[i], co2_mod_u[i])
+            result = interpolate_1d(prs_obs_u[i], prs_mod_u[i], co2_mod_u[i])
+            co2_interp[i] = result.magnitude
             if np.isnan(co2_interp[i, 0]):
-                co2_interp[i, 0] = co2_mod_u[i, 0]
+                co2_interp[i, 0] = co2_mod[i, 0]   # plain array, no units
 
         co2_pert     = co2_interp - ds_obs['CO2-apriori'].values
         xco2_hat_all = (ds_obs['xCO2-apriori'].values
@@ -374,7 +383,7 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s, nlat, nlon):
 
 
 # ---------------------------------------------------------------------------
-# Write helpers
+# Write helpers  (one file per checkpoint)
 # ---------------------------------------------------------------------------
 
 FORCING_ATTRS = {
@@ -389,56 +398,63 @@ TIME_ENCODING = {'units': 'hours since 1900-01-01 00:00:00',
 FORCING_ENCODING = {'dtype': 'float32', 'zlib': True, 'complevel': 4}
 
 
-def write_latlon(output_file, times, forcing, n_obs, levs, lats, lons):
+def _checkpoint_filename(output_dir, t):
+    tstr = pd.Timestamp(t).strftime('%Y%m%d_%H%Mz')
+    return os.path.join(output_dir, f'CO2_adjoint_forcing_{tstr}.nc4')
+
+
+def write_latlon(output_path, t, forcing_t, n_obs_t, levs, lats, lons):
+    """Write a single checkpoint lat/lon forcing file."""
     ds = xr.Dataset(
         {
-            'forcing': (['time', 'lev', 'lat', 'lon'], forcing, FORCING_ATTRS),
-            'n_obs':   (['time', 'lat', 'lon'],         n_obs,   N_OBS_ATTRS),
+            'forcing': (['time', 'lev', 'lat', 'lon'], forcing_t[np.newaxis],  FORCING_ATTRS),
+            'n_obs':   (['time', 'lat', 'lon'],         n_obs_t[np.newaxis],    N_OBS_ATTRS),
         },
-        coords={'time': times, 'lev': levs, 'lat': lats, 'lon': lons},
+        coords={'time': [t], 'lev': levs, 'lat': lats, 'lon': lons},
     )
     ds['lat'].attrs = {'long_name': 'Latitude',  'units': 'degrees_north'}
     ds['lon'].attrs = {'long_name': 'Longitude', 'units': 'degrees_east'}
     ds['lev'].attrs = {'long_name': 'Model level (1=surface, LLPAR=TOA)'}
-    ds.to_netcdf(output_file,
+    ds.to_netcdf(output_path,
                  encoding={'time': TIME_ENCODING, 'forcing': FORCING_ENCODING})
-    print(f'Written {len(times)} lat/lon checkpoint fields to {output_file}')
+    print(f'  Written {output_path}')
 
 
-def write_cubedsphere(output_file, times, forcing, n_obs, levs, lats, lons, cs_res):
-    # Build lat/lon dataset then regrid
+def write_cubedsphere(output_path, t, forcing_t, n_obs_t, levs, lats, lons, cs_res):
+    """Write a single checkpoint cubed-sphere forcing file."""
     ds_ll = xr.Dataset(
         {
             'forcing': (['time', 'lev', 'lat', 'lon'],
-                        forcing.astype(np.float32), FORCING_ATTRS),
+                        forcing_t[np.newaxis].astype(np.float32), FORCING_ATTRS),
             'n_obs':   (['time', 'lat', 'lon'],
-                        n_obs.astype(np.float32),   N_OBS_ATTRS),
+                        n_obs_t[np.newaxis].astype(np.float32),   N_OBS_ATTRS),
         },
-        coords={'time': times, 'lev': levs, 'lat': lats, 'lon': lons},
+        coords={'time': [t], 'lev': levs, 'lat': lats, 'lon': lons},
     )
     ds_ll['lat'].attrs = {'units': 'degrees_north'}
     ds_ll['lon'].attrs = {'units': 'degrees_east'}
 
-    print(f'Regridding to C{cs_res} cubed sphere ...')
     ds_cs = regrid_latlon_to_cubedsphere(ds_ll, cs_res)
     ds_cs['lev'].attrs = {'long_name': 'Model level (1=surface, LLPAR=TOA)'}
     ds_cs['cs_lat'].attrs = {'long_name': 'Latitude of cubed-sphere cell centre',
                              'units': 'degrees_north'}
     ds_cs['cs_lon'].attrs = {'long_name': 'Longitude of cubed-sphere cell centre',
                              'units': 'degrees_east'}
-    ds_cs.to_netcdf(output_file,
+    ds_cs.to_netcdf(output_path,
                     encoding={'time': TIME_ENCODING, 'forcing': FORCING_ENCODING})
-    print(f'Written {len(times)} C{cs_res} cubed-sphere checkpoint fields to {output_file}')
+    print(f'  Written {output_path}')
 
 
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def co2_adjoint_forcing(gchp_file, output_file,
+def co2_adjoint_forcing(gchp_file, output_dir,
                         ts_chem_s, t_start, t_end,
                         nlat, nlon,
                         grid='latlon', cs_res=None):
+
+    os.makedirs(output_dir, exist_ok=True)
 
     active_times, active_forcing, active_n_obs, levs, lats, lons = \
         _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s, nlat, nlon)
@@ -447,12 +463,14 @@ def co2_adjoint_forcing(gchp_file, output_file,
         print('No observations matched any checkpoint — output not written.')
         return
 
-    if grid == 'latlon':
-        write_latlon(output_file, active_times, active_forcing,
-                     active_n_obs, levs, lats, lons)
-    else:
-        write_cubedsphere(output_file, active_times, active_forcing,
-                          active_n_obs, levs, lats, lons, cs_res)
+    print(f'Writing {len(active_times)} checkpoint file(s) to {output_dir}/')
+    for i, t in enumerate(active_times):
+        fpath = _checkpoint_filename(output_dir, t)
+        if grid == 'latlon':
+            write_latlon(fpath, t, active_forcing[i], active_n_obs[i], levs, lats, lons)
+        else:
+            write_cubedsphere(fpath, t, active_forcing[i], active_n_obs[i],
+                              levs, lats, lons, cs_res)
 
 
 # ---------------------------------------------------------------------------
@@ -465,7 +483,7 @@ if __name__ == '__main__':
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument('gchp_file',   help='GCHP sat-track netCDF file')
-    parser.add_argument('output_file', help='Output netCDF file')
+    parser.add_argument('output_dir',  help='Output directory (created if absent)')
     parser.add_argument('--ts-chem', type=int, required=True, dest='ts_chem_s',
                         help='Chemistry timestep in seconds')
     parser.add_argument('--t-start', required=True,
@@ -488,7 +506,7 @@ if __name__ == '__main__':
 
     co2_adjoint_forcing(
         gchp_file   = args.gchp_file,
-        output_file = args.output_file,
+        output_dir  = args.output_dir,
         ts_chem_s   = args.ts_chem_s,
         t_start     = pd.Timestamp(args.t_start),
         t_end       = pd.Timestamp(args.t_end),
