@@ -1,0 +1,26 @@
+oco2_Baker.f                         Satellite operator code from Junjie
+co2_sat_compare_monthly.py           Pythod code to apply satellite operator
+				     	            #--------------------------------------------------------------
+						    # Apply GOS observation operator
+        					    #
+        					    #   x_hat = x_a + A_k ( x_m - x_a ) 
+        					    #  
+        					    #  where  
+        					    #    x_hat = GC modeled column as seen by TES [vmr]
+        					    #    x_a   = GOS apriori column               [vmr]
+        					    #    x_m   = GC modeled column                [vmr]
+        					    #    A_k   = GOS averaging kernel 
+        					    #--------------------------------------------------------------
+
+HISTORY.rc                           HISTORY.rc with output at satellite time and location: 'sat_track' collection
+GCHP_LETKF_scale_factor.nc4          An example of scaling factor file for emission
+HEMCO_Config.rc                      An example of applying scaling factor for emission:
+				     		700 for Scalar_NOx as an example
+				     		0 CEDS_NO_AGR     $ROOT/CEDS/v2024-06/$YYYY/CEDS_NO_0.1x0.1_$YYYY.nc            NO_agr            1750-2019/1-12/1/0 C xy   kg/m2/s NO    2401/700            1 5
+				     		700 Scalar_NOx /nobackupp17/lwu5/LETKF/letkf_run/pleiades/latlon/run/1/GCHP_LETKF_scale_factor.nc4 Scalar_NOx 2018-2023/1-12/1-31/0-23 RF xy 1  1
+ExtData.rc			     An example of applying scaling factor for emission:
+				     		Scalar_NOx 1 N Y - none none Scalar_NOx /nobackupp17/lwu5/LETKF/letkf_run/pleiades/latlon/run/1/GCHP_LETKF_scale_factor.nc4
+
+
+Monthly OCO-2 satellite track data for GCHP: /nobackup/lwu5/Carbon/sat_track/
+OCO-2 Observation data: /nobackupp17/jliu7/OCO2/BAKER/B11.2_L2#/
