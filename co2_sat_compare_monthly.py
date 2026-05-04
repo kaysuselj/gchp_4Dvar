@@ -30,7 +30,7 @@ def read_oco_daily(date,main_fold):
             ds = xr.open_dataset(file_path) #xr.open_mfdataset crashes.
             # add source label variable
             ds = ds.assign(
-                source=("nSamples", [fold] * ds.dims["nSamples"])
+                source=("nSamples", [fold] * ds.sizes["nSamples"])
             )
             daily_datasets.append(ds)
         else:
@@ -78,7 +78,7 @@ def read_oco_monthly(year,month,fold):
             '_FillValue': np.nan,
         }
     }
-    combined['time'] = pd.to_datetime(combined['time'].values).round('S')
+    combined['time'] = pd.to_datetime(combined['time'].values).round('s')
     return combined
 
 def read_gchp_monthly(year,month,expname):
@@ -100,7 +100,7 @@ def read_gchp_monthly(year,month,expname):
         fname_gchp=glob.glob('/nobackupp17/lwu5/GCHP/GCHP_run/gchp_merra2_carbon_CO2/'+expname+'/OutputDir/GEOSChem.sat_track.'+f"{prev_year}{prev_month:02d}"+'*z.nc4')
     print(fname_gchp)
     ds_gchp=xr.open_dataset(fname_gchp[0])
-    ds_gchp['time'] = pd.to_datetime(ds_gchp['time'].values).round('S')
+    ds_gchp['time'] = pd.to_datetime(ds_gchp['time'].values).round('s')
     return ds_gchp
 
 #Read satellite and collocated GCHP xCO2 data
@@ -292,17 +292,18 @@ def plot_hist2d_1exp(expname,region,year):
 
 
 
-#expnames=['CO2C24_GridFED_smoothed','CO2C90_GridFED_smoothed','CO2C360_GridFED_smoothed','CO2C24_GridFED','CO2C90_GridFED','CO2C360_GridFED']
-#regions=['Global','Tropics','NH','SH']
-#expnames=['C24_GridFed','C90_GridFed','C360_GridFed','C24_GridFed_smooth','C90_GridFed_smooth','C360_GridFed_smooth']
-#expnames=['C90_4x5']
-#expnames=['CATRINE_C90_CO2','CATRINE_C180_CO2','CATRINE_C24_CO2']
-expnames=['CATRINE_C360_CO2']
-regions=['Global']
-year=2023
-for expname in expnames:
-    for region in regions:
-        plot_hist2d_1exp(expname,region,year)
+if __name__ == '__main__':
+    #expnames=['CO2C24_GridFED_smoothed','CO2C90_GridFED_smoothed','CO2C360_GridFED_smoothed','CO2C24_GridFED','CO2C90_GridFED','CO2C360_GridFED']
+    #regions=['Global','Tropics','NH','SH']
+    #expnames=['C24_GridFed','C90_GridFed','C360_GridFed','C24_GridFed_smooth','C90_GridFed_smooth','C360_GridFed_smooth']
+    #expnames=['C90_4x5']
+    #expnames=['CATRINE_C90_CO2','CATRINE_C180_CO2','CATRINE_C24_CO2']
+    expnames=['CATRINE_C360_CO2']
+    regions=['Global']
+    year=2023
+    for expname in expnames:
+        for region in regions:
+            plot_hist2d_1exp(expname,region,year)
 
 
 

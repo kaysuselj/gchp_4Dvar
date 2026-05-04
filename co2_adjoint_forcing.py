@@ -279,7 +279,7 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s, nlat, nlon):
     lats, lons     : 1-D coordinate arrays for the accumulation grid
     """
     ds_gchp = xr.open_dataset(gchp_file)
-    ds_gchp['time'] = pd.to_datetime(ds_gchp['time'].values).round('S')
+    ds_gchp['time'] = pd.to_datetime(ds_gchp['time'].values).round('s')
 
     nlev = ds_gchp.dims['lev']
     levs = ds_gchp['lev'].values

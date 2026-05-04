@@ -34,7 +34,7 @@ FOLD_OBS = '/nobackupp17/jliu7/OCO2/BAKER/B11.2_L2#/'
 
 def co2_biases(gchp_file, output_file):
     ds_gchp = xr.open_dataset(gchp_file)
-    ds_gchp['time'] = pd.to_datetime(ds_gchp['time'].values).round('S')
+    ds_gchp['time'] = pd.to_datetime(ds_gchp['time'].values).round('s')
 
     # Find all unique (year, month) combinations present in the GCHP file
     times = pd.DatetimeIndex(ds_gchp['time'].values)
