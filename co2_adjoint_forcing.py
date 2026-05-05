@@ -278,6 +278,10 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s, nlat, nlon):
     Load GCHP sat-track file, apply obs operator, and accumulate forcing
     on an intermediate regular lat/lon grid.
 
+    Each GCHP profile is matched to the nearest OCO-2 observation by time
+    (within OBS_MATCH_TOL).  This is robust when the GCHP file covers fewer
+    days than the full OCO-2 monthly file.
+
     Returns
     -------
     active_times   : pd.DatetimeIndex  checkpoint times with observations
@@ -286,6 +290,8 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s, nlat, nlon):
     levs           : model level coordinate array
     lats, lons     : 1-D coordinate arrays for the accumulation grid
     """
+    OBS_MATCH_TOL = pd.Timedelta(seconds=60)
+
     ds_gchp = xr.open_dataset(gchp_file)
     ds_gchp['time'] = pd.to_datetime(ds_gchp['time'].values).round('s')
 
@@ -300,40 +306,45 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s, nlat, nlon):
     checkpoints = make_checkpoint_grid(t_start, t_end, ts_chem_s)
     n_ckpt      = len(checkpoints)
     forcing     = np.zeros((n_ckpt, nlev, nlat, nlon), dtype=np.float64)
-    n_obs       = np.zeros((n_ckpt, nlat, nlon),        dtype=np.int32)
+    n_obs_arr   = np.zeros((n_ckpt, nlat, nlon),        dtype=np.int32)
 
+    # Restrict GCHP profiles to the assimilation window
     times_gchp  = pd.DatetimeIndex(ds_gchp['time'].values)
-    year_months = sorted(set(zip(times_gchp.year, times_gchp.month)))
-    total       = 0
+    window_mask = (times_gchp >= t_start) & (times_gchp <= t_end)
+    ds_window   = ds_gchp.isel(time=np.where(window_mask)[0])
+    times_win   = pd.DatetimeIndex(ds_window['time'].values)
+
+    if len(times_win) == 0:
+        print('No GCHP profiles within the assimilation window.')
+        empty = np.zeros(n_ckpt, dtype=bool)
+        return checkpoints[empty], forcing[:0], n_obs_arr[:0], levs, lats, lons
+
+    # Only read OCO-2 months that are actually needed
+    year_months = sorted(set(zip(times_win.year, times_win.month)))
+    total = 0
 
     for year, month in year_months:
         print(f'Processing {year}-{month:02d}')
 
-        mask_gchp = (times_gchp.year == year) & (times_gchp.month == month)
-        ds_mod    = ds_gchp.isel(time=np.where(mask_gchp)[0])
-        co2_mod   = ds_mod['SpeciesConcVV_CO2'].values   # (nobs, nlev) v/v, no units
-        prs_mod   = ds_mod['Met_PMIDDRY'].values          # (nobs, nlev) hPa, no units
+        # GCHP profiles for this month (already within window)
+        mask_month   = (times_win.year == year) & (times_win.month == month)
+        ds_mod       = ds_window.isel(time=np.where(mask_month)[0])
+        gchp_times_m = pd.DatetimeIndex(ds_mod['time'].values)
+        co2_mod      = ds_mod['SpeciesConcVV_CO2'].values  # (n_gchp, nlev), plain
+        prs_mod      = ds_mod['Met_PMIDDRY'].values         # (n_gchp, nlev), plain
 
         ds_obs = read_oco_monthly(year, month, FOLD_OBS)
         if ds_obs is None:
             print('  No OCO-2 data, skipping')
             continue
 
-        prs_mod_u = prs_mod * units.hPa
-        co2_mod_u = co2_mod * units.K   # fake unit required by interpolate_1d
-        prs_obs_u = ds_obs['pressure'].values * units.hPa
-        nobs, nlev_sat = prs_obs_u.shape
-
-        co2_interp = np.empty((nobs, nlev_sat), dtype=np.float32)
-        for i in range(nobs):
-            result = interpolate_1d(prs_obs_u[i], prs_mod_u[i], co2_mod_u[i])
-            co2_interp[i] = result.magnitude
-            if np.isnan(co2_interp[i, 0]):
-                co2_interp[i, 0] = co2_mod[i, 0]   # plain array, no units
-
-        co2_pert     = co2_interp - ds_obs['CO2-apriori'].values
-        xco2_hat_all = (ds_obs['xCO2-apriori'].values
-                        + np.sum(ds_obs['xCO2-averagingKernel'].values * co2_pert, axis=1))
+        obs_times    = pd.DatetimeIndex(ds_obs['time'].values)
+        obs_lats     = ds_obs['latitude'].values
+        obs_lons     = ds_obs['longitude'].values
+        prs_obs_all  = ds_obs['pressure'].values           # (n_obs, nlev_sat)
+        xAK_all      = ds_obs['xCO2-averagingKernel'].values
+        co2_apr_all  = ds_obs['CO2-apriori'].values
+        xco2_apr_all = ds_obs['xCO2-apriori'].values
         xco2_obs_all = ds_obs['xCO2'].values
 
         if 'xCO2-uncertainty' in ds_obs:
@@ -342,44 +353,59 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s, nlat, nlon):
             xco2_std_all = ds_obs['xstd'].values
         else:
             print('  WARNING: no uncertainty variable found, using 1 ppm')
-            xco2_std_all = np.ones(nobs)
+            xco2_std_all = np.ones(len(obs_times))
 
-        obs_times    = pd.DatetimeIndex(ds_obs['time'].values)
-        obs_lats     = ds_obs['latitude'].values
-        obs_lons     = ds_obs['longitude'].values
-        xAK_all      = ds_obs['xCO2-averagingKernel'].values
-        xco2_hat_ppm = xco2_hat_all * 1e6
-        xco2_obs_ppm = xco2_obs_all * 1e6
-        xco2_std_ppm = xco2_std_all * 1e6
-
-        for i in range(nobs):
-            t_obs = obs_times[i]
-            if t_obs < t_start or t_obs > t_end:
+        # Loop over GCHP profiles; match each to an OCO-2 obs by time
+        for j in range(len(gchp_times_m)):
+            t_gchp  = gchp_times_m[j]
+            deltas  = np.abs(obs_times - t_gchp)
+            idx_obs = int(deltas.argmin())
+            if deltas[idx_obs] > OBS_MATCH_TOL:
                 continue
-            ckpt_idx = nearest_checkpoint(t_obs, checkpoints, ts_chem_s)
+
+            prs_mod_j = prs_mod[j]            # (nlev,)
+            co2_mod_j = co2_mod[j]            # (nlev,)
+            prs_obs_j = prs_obs_all[idx_obs]  # (nlev_sat,)
+
+            # Interpolate model CO2 to satellite pressure levels
+            result     = interpolate_1d(prs_obs_j * units.hPa,
+                                        prs_mod_j * units.hPa,
+                                        co2_mod_j * units.K)
+            co2_interp = result.magnitude.copy()
+            if np.isnan(co2_interp[0]):
+                co2_interp[0] = co2_mod_j[0]
+
+            # Apply OCO-2 observation operator
+            co2_pert     = co2_interp - co2_apr_all[idx_obs]
+            xco2_hat     = xco2_apr_all[idx_obs] + np.sum(xAK_all[idx_obs] * co2_pert)
+            xco2_hat_ppm = float(xco2_hat)                 * 1e6
+            xco2_obs_ppm = float(xco2_obs_all[idx_obs])    * 1e6
+            xco2_std_ppm = float(xco2_std_all[idx_obs])    * 1e6
+
+            ckpt_idx = nearest_checkpoint(t_gchp, checkpoints, ts_chem_s)
             if ckpt_idx < 0:
                 continue
 
-            ilat = int(np.round((obs_lats[i] - lats[0]) / dlat))
-            ilon = int(np.round(((obs_lons[i] + 180) % 360 - 180 - lons[0]) / dlon))
+            ilat = int(np.round((obs_lats[idx_obs] - lats[0]) / dlat))
+            ilon = int(np.round(((obs_lons[idx_obs] + 180) % 360 - 180 - lons[0]) / dlon))
             ilat = np.clip(ilat, 0, nlat - 1)
             ilon = np.clip(ilon, 0, nlon - 1)
 
             force_model, _ = obs_forcing_profile(
-                prs_mod[i], ds_obs['pressure'].values[i],
-                xAK_all[i], xco2_hat_ppm[i], xco2_obs_ppm[i], xco2_std_ppm[i],
+                prs_mod_j, prs_obs_j,
+                xAK_all[idx_obs], xco2_hat_ppm, xco2_obs_ppm, xco2_std_ppm,
             )
             forcing[ckpt_idx, :, ilat, ilon] += force_model
-            n_obs[ckpt_idx, ilat, ilon]       += 1
+            n_obs_arr[ckpt_idx, ilat, ilon]  += 1
             total += 1
 
-    print(f'Total observations matched: {total}')
+    n_with_obs = int((n_obs_arr.sum(axis=(1, 2)) > 0).sum())
+    print(f'Total observations matched: {total}  '
+          f'({n_with_obs}/{n_ckpt} checkpoints have at least one obs)')
 
-    has_obs        = n_obs.sum(axis=(1, 2)) > 0
-    active_times   = checkpoints[has_obs]
-    active_forcing = forcing[has_obs]
-    active_n_obs   = n_obs[has_obs]
-    return active_times, active_forcing, active_n_obs, levs, lats, lons
+    # Return ALL checkpoints; those with no obs have forcing=0 and n_obs=0.
+    # The caller writes one file per checkpoint regardless.
+    return checkpoints, forcing, n_obs_arr, levs, lats, lons
 
 
 # ---------------------------------------------------------------------------
@@ -459,11 +485,8 @@ def co2_adjoint_forcing(gchp_file, output_dir,
     active_times, active_forcing, active_n_obs, levs, lats, lons = \
         _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s, nlat, nlon)
 
-    if not len(active_times):
-        print('No observations matched any checkpoint — output not written.')
-        return
-
-    print(f'Writing {len(active_times)} checkpoint file(s) to {output_dir}/')
+    print(f'Writing {len(active_times)} checkpoint file(s) to {output_dir}/ '
+          f'(zero-forcing files included for checkpoints with no obs)')
     for i, t in enumerate(active_times):
         fpath = _checkpoint_filename(output_dir, t)
         if grid == 'latlon':
