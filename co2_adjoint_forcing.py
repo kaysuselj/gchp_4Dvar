@@ -330,8 +330,8 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s, nlat, nlon):
         mask_month   = (times_win.year == year) & (times_win.month == month)
         ds_mod       = ds_window.isel(time=np.where(mask_month)[0])
         gchp_times_m = pd.DatetimeIndex(ds_mod['time'].values)
-        co2_mod      = ds_mod['SpeciesConcVV_CO2'].values  # (n_gchp, nlev), plain
-        prs_mod      = ds_mod['Met_PMIDDRY'].values         # (n_gchp, nlev), plain
+        co2_mod      = ds_mod['SpeciesConcVV_CO2'].transpose('time', 'lev').values  # (n_gchp, nlev)
+        prs_mod      = ds_mod['Met_PMIDDRY'].transpose('time', 'lev').values         # (n_gchp, nlev)
 
         ds_obs = read_oco_monthly(year, month, FOLD_OBS)
         if ds_obs is None:
