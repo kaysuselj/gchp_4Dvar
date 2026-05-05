@@ -1,23 +1,15 @@
 #!/usr/bin/env python3
 """
 Compute 3D adjoint forcing from OCO-2 xCO2 observations, binned to GCHP
-chemistry checkpoint times.  One netCDF file is written per checkpoint time
-that contains at least one observation.  Output can be on a regular lat/lon
-grid or regridded to a GEOS-5 gnomonic cubed-sphere grid.
+chemistry checkpoint times.  One netCDF file is written per checkpoint,
+including empty files (n_obs=0) so Fortran can distinguish 'no obs' from
+'file missing'.  Forcing is stored per-observation (sparse); Fortran does
+the cell assignment using State_Grid%{X,Y}{Min,Max} cell boundaries.
 
 Usage:
-    # Regular lat/lon output (default)
     python ./co2_adjoint_forcing.py gchp_file output_dir \\
         --ts-chem 1200 \\
-        --t-start 2015-01-01T00:00:00 --t-end 2015-01-31T23:59:59 \\
-        --nlat 91 --nlon 144
-
-    # Cubed-sphere output (C90)
-    python ./co2_adjoint_forcing.py gchp_file output_dir \\
-        --ts-chem 1200 \\
-        --t-start 2015-01-01T00:00:00 --t-end 2015-01-31T23:59:59 \\
-        --grid cubedsphere --cs-res 90 \\
-        --nlat 181 --nlon 360          # intermediate accumulation resolution
+        --t-start 2015-01-01T00:00:00 --t-end 2015-01-31T23:59:59
 
 Arguments:
     gchp_file    : GCHP sat-track netCDF file (GEOSChem.sat_track.*)
@@ -26,41 +18,29 @@ Arguments:
     --ts-chem    : chemistry timestep [s] for checkpoint binning (required)
     --t-start    : start of assimilation window YYYY-MM-DDTHH:MM:SS (required)
     --t-end      : end of assimilation window (required)
-    --grid       : latlon (default) or cubedsphere
-    --cs-res     : cubed-sphere resolution N for C{N} grid (required if cubedsphere)
-    --nlat       : intermediate lat/lon accumulation grid latitude points (default 181)
-    --nlon       : intermediate lat/lon accumulation grid longitude points (default 360)
 
 Environment setup:
     python -m venv gchp-env
     source gchp-env/bin/activate
-    pip install numpy pandas xarray netCDF4 metpy xesmf
+    pip install numpy pandas xarray netCDF4 metpy
 
     The following file must be in the same directory:
         co2_sat_compare_monthly.py
 
 Output files:
-    CO2_adjoint_forcing_YYYYMMDD_HHMMz.nc4  (one per checkpoint with obs)
+    CO2_adjoint_forcing_YYYYMMDD_HHMMz.nc4  (one per checkpoint, always)
 
-Output variables:
-    latlon output     : (time, lev, lat, lon)
-    cubedsphere output: (time, lev, nf, Ydim, Xdim)  nf=6 faces
-
-    forcing : adjoint forcing dJ/d(CO2_mmr) [1/(kg_CO2/kg_dry_air)], ready for SpeciesAdj
-    n_obs   : number of observations per cell per checkpoint [count]
+Output variables (sparse per-obs format):
+    lat_obs  : (obs,)      observation latitudes  [degrees_north]
+    lon_obs  : (obs,)      observation longitudes [-180, 180) [degrees_east]
+    forcing  : (obs, lev)  dJ/d(CO2_mmr) [1/(kg_CO2/kg_dry_air)]
 
 Notes:
-    - Accumulation always occurs on the intermediate lat/lon grid (--nlat/--nlon).
-      For cubed sphere, this is then regridded with xesmf bilinear interpolation.
     - Level 1 = surface (highest pressure), level LLPAR = TOA.
-    - Unit conversion v/v -> kg/box must be applied in Fortran before adding
-      to State_Chm%%SpeciesAdj.
-    - The GEOS-5 gnomonic cubed sphere face orientation used here follows the
-      Putman & Lin (2007) convention. Verify face 0 covers lon~[-45,45] at the
-      equator against your GCHP output.
-    - OCO-2 data is stored by month so read_oco_monthly always reads all days
-      in the month; observations outside [t_start, t_end] are discarded in the
-      per-observation loop.
+    - Fortran reads forcing as (nlev, n_obs) in column-major (matches Python
+      (obs, lev) row-major layout in netCDF).
+    - OCO-2 data is stored by month; observations outside [t_start, t_end]
+      are discarded in the per-observation loop.
 """
 
 import os
@@ -281,22 +261,20 @@ def regrid_latlon_to_cubedsphere(ds_ll, cs_res):
 # Core computation
 # ---------------------------------------------------------------------------
 
-def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s, nlat, nlon):
+def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s):
     """
-    Load GCHP sat-track file, apply obs operator, and accumulate forcing
-    on an intermediate regular lat/lon grid.
+    Load GCHP sat-track file, apply obs operator, and collect per-obs forcing.
 
     Each GCHP profile is matched to the nearest OCO-2 observation by time
-    (within OBS_MATCH_TOL).  This is robust when the GCHP file covers fewer
-    days than the full OCO-2 monthly file.
+    (within OBS_MATCH_TOL).  Forcing is accumulated per observation, with
+    longitude normalized to [-180, 180).  No intermediate lat/lon grid is used;
+    Fortran does the nearest-cell assignment directly on the cubed sphere.
 
     Returns
     -------
-    active_times   : pd.DatetimeIndex  checkpoint times with observations
-    active_forcing : ndarray (n_ckpt, nlev, nlat, nlon)
-    active_n_obs   : ndarray (n_ckpt, nlat, nlon)
-    levs           : model level coordinate array
-    lats, lons     : 1-D coordinate arrays for the accumulation grid
+    checkpoints  : pd.DatetimeIndex  all checkpoint times in the window
+    obs_by_ckpt  : dict {ckpt_idx: [(lat, lon, force_profile), ...]}
+    levs         : model level coordinate array
     """
     OBS_MATCH_TOL = pd.Timedelta(seconds=60)
 
@@ -306,15 +284,9 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s, nlat, nlon):
     nlev = ds_gchp.sizes['lev']
     levs = ds_gchp['lev'].values
 
-    lats = np.linspace(-90,  90,  nlat)
-    lons = np.linspace(-180, 180, nlon, endpoint=False)
-    dlat = lats[1] - lats[0]
-    dlon = lons[1] - lons[0]
-
     checkpoints = make_checkpoint_grid(t_start, t_end, ts_chem_s)
     n_ckpt      = len(checkpoints)
-    forcing     = np.zeros((n_ckpt, nlev, nlat, nlon), dtype=np.float64)
-    n_obs_arr   = np.zeros((n_ckpt, nlat, nlon),        dtype=np.int32)
+    obs_by_ckpt = {i: [] for i in range(n_ckpt)}
 
     # Restrict GCHP profiles to the assimilation window
     times_gchp  = pd.DatetimeIndex(ds_gchp['time'].values)
@@ -324,8 +296,7 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s, nlat, nlon):
 
     if len(times_win) == 0:
         print('No GCHP profiles within the assimilation window.')
-        empty = np.zeros(n_ckpt, dtype=bool)
-        return checkpoints[empty], forcing[:0], n_obs_arr[:0], levs, lats, lons
+        return checkpoints, obs_by_ckpt, levs
 
     # Only read OCO-2 months that are actually needed
     year_months = sorted(set(zip(times_win.year, times_win.month)))
@@ -394,30 +365,24 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s, nlat, nlon):
             if ckpt_idx < 0:
                 continue
 
-            ilat = int(np.round((obs_lats[idx_obs] - lats[0]) / dlat))
-            ilon = int(np.round(((obs_lons[idx_obs] + 180) % 360 - 180 - lons[0]) / dlon))
-            ilat = np.clip(ilat, 0, nlat - 1)
-            ilon = np.clip(ilon, 0, nlon - 1)
-
             force_model, _ = obs_forcing_profile(
                 prs_mod_j, prs_obs_j,
                 xAK_all[idx_obs], xco2_hat_ppm, xco2_obs_ppm, xco2_std_ppm,
             )
-            forcing[ckpt_idx, :, ilat, ilon] += force_model
-            n_obs_arr[ckpt_idx, ilat, ilon]  += 1
+            # Normalize lon to [-180, 180) and store per-obs entry
+            lon_norm = float((float(obs_lons[idx_obs]) + 180) % 360 - 180)
+            obs_by_ckpt[ckpt_idx].append((
+                float(obs_lats[idx_obs]),
+                lon_norm,
+                force_model * PPM_TO_MMR_ADJ,   # ppm^-1 → 1/(kg_CO2/kg_dry_air)
+            ))
             total += 1
 
-    n_with_obs = int((n_obs_arr.sum(axis=(1, 2)) > 0).sum())
+    n_with_obs = sum(1 for obs_list in obs_by_ckpt.values() if obs_list)
     print(f'Total observations matched: {total}  '
           f'({n_with_obs}/{n_ckpt} checkpoints have at least one obs)')
 
-    # Convert ppm^-1 → 1/(kg_CO2/kg_dry_air) so the output can be loaded
-    # directly into State_Chm%SpeciesAdj without further conversion in Fortran.
-    forcing *= PPM_TO_MMR_ADJ
-
-    # Return ALL checkpoints; those with no obs have forcing=0 and n_obs=0.
-    # The caller writes one file per checkpoint regardless.
-    return checkpoints, forcing, n_obs_arr, levs, lats, lons
+    return checkpoints, obs_by_ckpt, levs
 
 
 # ---------------------------------------------------------------------------
@@ -442,71 +407,62 @@ def _checkpoint_filename(output_dir, t):
     return os.path.join(output_dir, f'CO2_adjoint_forcing_{tstr}.nc4')
 
 
-def write_latlon(output_path, t, forcing_t, n_obs_t, levs, lats, lons):
-    """Write a single checkpoint lat/lon forcing file."""
+def write_sparse(output_path, t, obs_lats, obs_lons, forcing_k, levs):
+    """Write a per-obs sparse forcing file for one checkpoint.
+
+    Always written, even when n_obs == 0 (empty obs dimension), so Fortran
+    can distinguish 'no obs this checkpoint' from 'file missing'.
+
+    forcing_k : (n_obs, nlev) float32
+        Dim order ('obs', 'lev') → Fortran reads as forcing_f(nlev, n_obs).
+    """
+    n_obs = len(obs_lats)
+    nlev  = len(levs)
+    forcing_arr = np.asarray(forcing_k, dtype=np.float32).reshape(n_obs, nlev)
     ds = xr.Dataset(
         {
-            'forcing': (['time', 'lev', 'lat', 'lon'], forcing_t[np.newaxis],  FORCING_ATTRS),
-            'n_obs':   (['time', 'lat', 'lon'],         n_obs_t[np.newaxis],    N_OBS_ATTRS),
+            'lat_obs': (['obs'], np.asarray(obs_lats, dtype=np.float32),
+                        {'long_name': 'Observation latitude',  'units': 'degrees_north'}),
+            'lon_obs': (['obs'], np.asarray(obs_lons, dtype=np.float32),
+                        {'long_name': 'Observation longitude', 'units': 'degrees_east',
+                         'comment': 'normalized to [-180, 180)'}),
+            'forcing': (['obs', 'lev'], forcing_arr, FORCING_ATTRS),
         },
-        coords={'time': [t], 'lev': levs, 'lat': lats, 'lon': lons},
+        coords={'time': [t], 'lev': levs},
     )
-    ds['lat'].attrs = {'long_name': 'Latitude',  'units': 'degrees_north'}
-    ds['lon'].attrs = {'long_name': 'Longitude', 'units': 'degrees_east'}
     ds['lev'].attrs = {'long_name': 'Model level (1=surface, LLPAR=TOA)'}
-    ds.to_netcdf(output_path,
-                 encoding={'time': TIME_ENCODING, 'forcing': FORCING_ENCODING})
-    print(f'  Written {output_path}')
-
-
-def write_cubedsphere(output_path, t, forcing_t, n_obs_t, levs, lats, lons, cs_res):
-    """Write a single checkpoint cubed-sphere forcing file."""
-    ds_ll = xr.Dataset(
-        {
-            'forcing': (['time', 'lev', 'lat', 'lon'],
-                        forcing_t[np.newaxis].astype(np.float32), FORCING_ATTRS),
-            'n_obs':   (['time', 'lat', 'lon'],
-                        n_obs_t[np.newaxis].astype(np.float32),   N_OBS_ATTRS),
-        },
-        coords={'time': [t], 'lev': levs, 'lat': lats, 'lon': lons},
-    )
-    ds_ll['lat'].attrs = {'units': 'degrees_north'}
-    ds_ll['lon'].attrs = {'units': 'degrees_east'}
-
-    ds_cs = regrid_latlon_to_cubedsphere(ds_ll, cs_res)
-    ds_cs['lev'].attrs = {'long_name': 'Model level (1=surface, LLPAR=TOA)'}
-    ds_cs['cs_lat'].attrs = {'long_name': 'Latitude of cubed-sphere cell centre',
-                             'units': 'degrees_north'}
-    ds_cs['cs_lon'].attrs = {'long_name': 'Longitude of cubed-sphere cell centre',
-                             'units': 'degrees_east'}
-    ds_cs.to_netcdf(output_path,
-                    encoding={'time': TIME_ENCODING, 'forcing': FORCING_ENCODING})
-    print(f'  Written {output_path}')
+    # zlib compression requires at least one element; skip for empty files
+    forcing_enc = FORCING_ENCODING if n_obs > 0 else {'dtype': 'float32'}
+    ds.to_netcdf(output_path, encoding={'time': TIME_ENCODING, 'forcing': forcing_enc})
+    print(f'  Written: {output_path}  ({n_obs} obs)')
 
 
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def co2_adjoint_forcing(gchp_file, output_dir,
-                        ts_chem_s, t_start, t_end,
-                        nlat, nlon,
-                        grid='latlon', cs_res=None):
+def co2_adjoint_forcing(gchp_file, output_dir, ts_chem_s, t_start, t_end):
 
     os.makedirs(output_dir, exist_ok=True)
 
-    active_times, active_forcing, active_n_obs, levs, lats, lons = \
-        _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s, nlat, nlon)
+    checkpoints, obs_by_ckpt, levs = \
+        _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s)
 
-    print(f'Writing {len(active_times)} checkpoint file(s) to {output_dir}/ '
-          f'(zero-forcing files included for checkpoints with no obs)')
-    for i, t in enumerate(active_times):
-        fpath = _checkpoint_filename(output_dir, t)
-        if grid == 'latlon':
-            write_latlon(fpath, t, active_forcing[i], active_n_obs[i], levs, lats, lons)
+    nlev = len(levs)
+    print(f'Writing {len(checkpoints)} checkpoint file(s) to {output_dir}/ '
+          f'(zero-obs files included for all checkpoints)')
+    for i, t in enumerate(checkpoints):
+        fpath     = _checkpoint_filename(output_dir, t)
+        obs_list  = obs_by_ckpt[i]
+        if obs_list:
+            obs_lats_k = np.array([d[0] for d in obs_list], dtype=np.float32)
+            obs_lons_k = np.array([d[1] for d in obs_list], dtype=np.float32)
+            forcing_k  = np.array([d[2] for d in obs_list], dtype=np.float32)
         else:
-            write_cubedsphere(fpath, t, active_forcing[i], active_n_obs[i],
-                              levs, lats, lons, cs_res)
+            obs_lats_k = np.empty(0, dtype=np.float32)
+            obs_lons_k = np.empty(0, dtype=np.float32)
+            forcing_k  = np.empty((0, nlev), dtype=np.float32)
+        write_sparse(fpath, t, obs_lats_k, obs_lons_k, forcing_k, levs)
 
 
 # ---------------------------------------------------------------------------
@@ -526,28 +482,12 @@ if __name__ == '__main__':
                         help='Assimilation window start YYYY-MM-DDTHH:MM:SS')
     parser.add_argument('--t-end',   required=True,
                         help='Assimilation window end   YYYY-MM-DDTHH:MM:SS')
-    parser.add_argument('--grid', choices=['latlon', 'cubedsphere'], default='latlon',
-                        help='Output grid (default: latlon)')
-    parser.add_argument('--cs-res', type=int, default=None,
-                        help='Cubed-sphere resolution N for C{N} (required if --grid cubedsphere)')
-    parser.add_argument('--nlat', type=int, default=181,
-                        help='Intermediate accumulation grid latitude points (default 181 → 1°)')
-    parser.add_argument('--nlon', type=int, default=360,
-                        help='Intermediate accumulation grid longitude points (default 360 → 1°)')
-
     args = parser.parse_args()
 
-    if args.grid == 'cubedsphere' and args.cs_res is None:
-        parser.error('--cs-res is required when --grid cubedsphere')
-
     co2_adjoint_forcing(
-        gchp_file   = args.gchp_file,
-        output_dir  = args.output_dir,
-        ts_chem_s   = args.ts_chem_s,
-        t_start     = pd.Timestamp(args.t_start),
-        t_end       = pd.Timestamp(args.t_end),
-        nlat        = args.nlat,
-        nlon        = args.nlon,
-        grid        = args.grid,
-        cs_res      = args.cs_res,
+        gchp_file  = args.gchp_file,
+        output_dir = args.output_dir,
+        ts_chem_s  = args.ts_chem_s,
+        t_start    = pd.Timestamp(args.t_start),
+        t_end      = pd.Timestamp(args.t_end),
     )
