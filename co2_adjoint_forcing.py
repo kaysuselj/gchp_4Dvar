@@ -49,8 +49,6 @@ import argparse
 import numpy as np
 import pandas as pd
 import xarray as xr
-from metpy.interpolate import interpolate_1d
-from metpy.units import units
 
 # Molecular weights [g/mol] for unit conversion ppm^-1 → 1/(kg_CO2/kg_dry_air)
 M_AIR = 28.97
@@ -346,13 +344,15 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s):
             co2_mod_j = co2_mod[j]            # (nlev,)
             prs_obs_j = prs_obs_all[idx_obs]  # (nlev_sat,)
 
-            # Interpolate model CO2 to satellite pressure levels
-            result     = interpolate_1d(prs_obs_j * units.hPa,
-                                        prs_mod_j * units.hPa,
-                                        co2_mod_j * units.K)
-            co2_interp = result.magnitude.copy()
-            if np.isnan(co2_interp[0]):
-                co2_interp[0] = co2_mod_j[0]
+            # Interpolate model CO2 to satellite pressure levels.
+            # np.interp requires ascending x; model levels run surface→TOA
+            # (descending pressure), so flip before interpolating.
+            # Out-of-bounds satellite levels (above model top or below surface)
+            # receive the boundary model value — no NaN, no warning.
+            sort_idx   = np.argsort(prs_mod_j)          # ascending pressure indices
+            co2_interp = np.interp(prs_obs_j,
+                                   prs_mod_j[sort_idx],
+                                   co2_mod_j[sort_idx])
 
             # Apply OCO-2 observation operator
             co2_pert     = co2_interp - co2_apr_all[idx_obs]
