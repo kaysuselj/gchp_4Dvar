@@ -46,7 +46,7 @@ Output variables:
     latlon output     : (time, lev, lat, lon)
     cubedsphere output: (time, lev, nf, Ydim, Xdim)  nf=6 faces
 
-    forcing : adjoint forcing dJ/d(xCO2_model) [ppm^-1]
+    forcing : adjoint forcing dJ/d(CO2_mmr) [1/(kg_CO2/kg_dry_air)], ready for SpeciesAdj
     n_obs   : number of observations per cell per checkpoint [count]
 
 Notes:
@@ -71,6 +71,12 @@ import pandas as pd
 import xarray as xr
 from metpy.interpolate import interpolate_1d
 from metpy.units import units
+
+# Molecular weights [g/mol] for unit conversion ppm^-1 → 1/(kg_CO2/kg_dry_air)
+M_AIR = 28.97
+M_CO2 = 44.01
+# SpeciesAdj [1/(kg_CO2/kg_dry)] = forcing [ppm^-1] * (M_AIR/M_CO2) * 1e6
+PPM_TO_MMR_ADJ = (M_AIR / M_CO2) * 1e6   # ≈ 6.585e5
 
 from co2_sat_compare_monthly import read_oco_monthly
 
@@ -228,11 +234,13 @@ def regrid_latlon_to_cubedsphere(ds_ll, cs_res):
     """
     try:
         import xesmf as xe
-    except ImportError:
+    except ImportError as _e:
         raise ImportError(
-            'xesmf is required for cubed-sphere output.\n'
-            'Install it with:  pip install xesmf'
-        )
+            f'xesmf import failed: {_e}\n'
+            'Try:  pip install xesmf esmpy\n'
+            'On HPC systems the ESMF C library must also be available.\n'
+            'If "module load esmf" is available, run that before activating the venv.'
+        ) from _e
 
     cs_lat, cs_lon = cubedsphere_cell_centers(cs_res)  # (6, n, n)
 
@@ -403,6 +411,10 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s, nlat, nlon):
     print(f'Total observations matched: {total}  '
           f'({n_with_obs}/{n_ckpt} checkpoints have at least one obs)')
 
+    # Convert ppm^-1 → 1/(kg_CO2/kg_dry_air) so the output can be loaded
+    # directly into State_Chm%SpeciesAdj without further conversion in Fortran.
+    forcing *= PPM_TO_MMR_ADJ
+
     # Return ALL checkpoints; those with no obs have forcing=0 and n_obs=0.
     # The caller writes one file per checkpoint regardless.
     return checkpoints, forcing, n_obs_arr, levs, lats, lons
@@ -413,10 +425,11 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s, nlat, nlon):
 # ---------------------------------------------------------------------------
 
 FORCING_ATTRS = {
-    'long_name': 'Adjoint forcing dJ/d(xCO2_model)',
-    'units': 'ppm^-1',
-    'comment': ('H^T S^{-1}(Hx-y) summed over obs in each checkpoint window. '
-                'Unit conversion v/v->kg/box must be applied in Fortran.'),
+    'long_name': 'Adjoint forcing dJ/d(CO2_mass_mixing_ratio)',
+    'units': '1/(kg_CO2/kg_dry_air)',
+    'comment': ('H^T S^{-1}(Hx-y) * (M_air/M_CO2) * 1e6, summed over obs in '
+                'each checkpoint window. Ready to load directly into '
+                'State_Chm%SpeciesAdj [J/(kg_CO2/kg_dry_air)].'),
 }
 N_OBS_ATTRS = {'long_name': 'Number of observations accumulated', 'units': '1'}
 TIME_ENCODING = {'units': 'hours since 1900-01-01 00:00:00',
