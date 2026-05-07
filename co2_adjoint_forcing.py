@@ -285,6 +285,7 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s):
     checkpoints = make_checkpoint_grid(t_start, t_end, ts_chem_s)
     n_ckpt      = len(checkpoints)
     obs_by_ckpt = {i: [] for i in range(n_ckpt)}
+    J_total     = 0.0
 
     # Restrict GCHP profiles to the assimilation window
     times_gchp  = pd.DatetimeIndex(ds_gchp['time'].values)
@@ -294,7 +295,7 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s):
 
     if len(times_win) == 0:
         print('No GCHP profiles within the assimilation window.')
-        return checkpoints, obs_by_ckpt, levs
+        return checkpoints, obs_by_ckpt, levs, J_total
 
     # Only read OCO-2 months that are actually needed
     year_months = sorted(set(zip(times_win.year, times_win.month)))
@@ -365,10 +366,11 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s):
             if ckpt_idx < 0:
                 continue
 
-            force_model, _ = obs_forcing_profile(
+            force_model, diff = obs_forcing_profile(
                 prs_mod_j, prs_obs_j,
                 xAK_all[idx_obs], xco2_hat_ppm, xco2_obs_ppm, xco2_std_ppm,
             )
+            J_total += 0.5 * (diff / xco2_std_ppm) ** 2
             # Normalize lon to [-180, 180) and store per-obs entry
             lon_norm = float((float(obs_lons[idx_obs]) + 180) % 360 - 180)
             obs_by_ckpt[ckpt_idx].append((
@@ -381,8 +383,9 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s):
     n_with_obs = sum(1 for obs_list in obs_by_ckpt.values() if obs_list)
     print(f'Total observations matched: {total}  '
           f'({n_with_obs}/{n_ckpt} checkpoints have at least one obs)')
+    print(f'Cost function J = {J_total:.6e}')
 
-    return checkpoints, obs_by_ckpt, levs
+    return checkpoints, obs_by_ckpt, levs, J_total
 
 
 # ---------------------------------------------------------------------------
@@ -445,8 +448,13 @@ def co2_adjoint_forcing(gchp_file, output_dir, ts_chem_s, t_start, t_end):
 
     os.makedirs(output_dir, exist_ok=True)
 
-    checkpoints, obs_by_ckpt, levs = \
+    checkpoints, obs_by_ckpt, levs, J = \
         _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s)
+
+    j_path = os.path.join(output_dir, 'J_value.txt')
+    with open(j_path, 'w') as fh:
+        fh.write(f'{J:.10e}\n')
+    print(f'J written to {j_path}')
 
     nlev = len(levs)
     print(f'Writing {len(checkpoints)} checkpoint file(s) to {output_dir}/ '
@@ -463,6 +471,8 @@ def co2_adjoint_forcing(gchp_file, output_dir, ts_chem_s, t_start, t_end):
             obs_lons_k = np.empty(0, dtype=np.float32)
             forcing_k  = np.empty((0, nlev), dtype=np.float32)
         write_sparse(fpath, t, obs_lats_k, obs_lons_k, forcing_k, levs)
+
+    return J
 
 
 # ---------------------------------------------------------------------------
