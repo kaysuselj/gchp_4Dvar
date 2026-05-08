@@ -54,15 +54,20 @@ def read_obs_gradient(adj_output_dir, t_start, nlat, nlon):
     if not files:
         raise RuntimeError(f'No adjoint output files matching {pattern}')
 
-    t_target = pd.Timestamp(t_start)
     ds = (xr.open_dataset(files[0]) if len(files) == 1
           else xr.concat([xr.open_dataset(f) for f in files], dim='time'))
-    grad = (ds['SurfaceFluxAdj_CO2']
-            .sel(time=t_target, method='nearest')
-            .values)   # (nlat, nlon) — already lat-lon from HISTORY.rc
+    ds = ds.sortby('time')
 
-    t_found = ds.time.sel(time=t_target, method='nearest').values
-    print(f'  Gradient read from time {t_found} (target: {t_target})')
+    all_times = ds.time.values
+    t_selected = all_times[0]   # minimum time = adjoint final time = forward T_START
+    print(f'  Adjoint output files : {[os.path.basename(f) for f in files]}')
+    print(f'  Available times      : {all_times}')
+    print(f'  Selected time        : {t_selected}  (min time, index 0)')
+
+    da   = ds['SurfaceFluxAdj_CO2'].isel(time=0)
+    print(f'  SurfaceFluxAdj_CO2 dims   : {dict(da.sizes)}')
+    grad = da.values   # (nlat, nlon) — already lat-lon from HISTORY.rc
+    print(f'  Gradient array shape : {grad.shape}  (expected: ({nlat}, {nlon}))')
 
     if grad.shape != (nlat, nlon):
         raise ValueError(
