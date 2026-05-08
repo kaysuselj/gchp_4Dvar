@@ -41,19 +41,27 @@ import xarray as xr
 def read_obs_gradient(adj_output_dir, t_start, nlat, nlon):
     """
     Read SurfaceFluxAdj_CO2 at the adjoint final time (= forward t_start).
+
+    All GEOSChem.Adjoint.*.nc4 files are opened together; the time record
+    nearest to t_start is selected. This handles the case where GCHP splits
+    adjoint output across multiple daily files and none is named for t_start.
+
     The adjoint HISTORY.rc must be configured to output on a lat-lon grid
     (PC{nlon}x{nlat}-DC) so the array is already (nlat, nlon).
     """
-    t_str   = pd.Timestamp(t_start).strftime('%Y%m%d')
-    pattern = os.path.join(adj_output_dir, f'GEOSChem.Adjoint.{t_str}*.nc4')
+    pattern = os.path.join(adj_output_dir, 'GEOSChem.Adjoint.*.nc4')
     files   = sorted(glob.glob(pattern))
     if not files:
-        raise RuntimeError(f'No adjoint output matching {pattern}')
+        raise RuntimeError(f'No adjoint output files matching {pattern}')
 
+    t_target = pd.Timestamp(t_start)
     ds   = xr.open_mfdataset(files, combine='by_coords')
     grad = (ds['SurfaceFluxAdj_CO2']
-            .sel(time=pd.Timestamp(t_start), method='nearest')
+            .sel(time=t_target, method='nearest')
             .values)   # (nlat, nlon) — already lat-lon from HISTORY.rc
+
+    t_found = ds.time.sel(time=t_target, method='nearest').values
+    print(f'  Gradient read from time {t_found} (target: {t_target})')
 
     if grad.shape != (nlat, nlon):
         raise ValueError(
