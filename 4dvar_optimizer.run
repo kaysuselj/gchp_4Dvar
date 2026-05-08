@@ -4,7 +4,7 @@
 #PBS -l select=1:ncpus=24:mpiprocs=24:model=bro_ele
 ##PBS -l walltime=72:00:00
 ##PBS -q long
-#PBL -l walltime=2:00:00
+#PBS -l walltime=2:00:00
 #PBS -q debug
 #PBS -j oe
 #PBS -W group_list=s1055
@@ -27,9 +27,10 @@ set -euo pipefail
 cd "$PBS_O_WORKDIR"
 
 # ============================================================
-#  Helper: die with a message  (defined early — used in env checks below)
+#  Helpers  (defined early — used in env checks below)
 # ============================================================
 die() { echo "ERROR: $*" >&2; exit 1; }
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
 # ============================================================
 #  Configuration  (edit for your system)
@@ -46,6 +47,10 @@ SIGMA_FILE="${WORK_DIR}/sigma_co2.nc4"  # shared; ../sigma_co2.nc4 in HEMCO conf
 FORCING_DIR="${WORK_DIR}/forcing_files"
 STATE_FILE="${WORK_DIR}/4dvar_state.npz" # L-BFGS-B state, persisted between iters
 OUTPUT_DIR="${WORK_DIR}/4dvar_output"    # sigma_iter_NNN.npy, J_iter_NNN.txt
+LOG_FILE="${WORK_DIR}/4dvar_optimizer.log"
+
+# Tee all stdout+stderr to LOG_FILE for the rest of the script
+exec > >(tee "${LOG_FILE}") 2>&1
 
 # Simulation window (must match runConfig_*.sh settings)
 T_START="2019-01-01"
@@ -111,7 +116,7 @@ mkdir -p "${FORCING_DIR}" "${OUTPUT_DIR}" "${ADJ_DIR}/Restarts"
 [ -d "${CTRL_ADJ_DIR}" ] || die "Adjoint control files not found: ${CTRL_ADJ_DIR}"
 rsync -a "${CTRL_FWD_DIR}/" "${FWD_DIR}/"
 rsync -a "${CTRL_ADJ_DIR}/" "${ADJ_DIR}/"
-echo "Control files synced to run directories"
+log "Control files synced to run directories"
 
 # ============================================================
 #  Patch runConfig timing from T_START / T_END
@@ -131,7 +136,7 @@ done
 sed -i 's/^INITIAL_RESTART=.*/INITIAL_RESTART=gcchem_initial_restart.nc4/' \
     "${ADJ_DIR}/runConfig_adjoint.sh"
 
-echo "runConfig patched: Start=\"${START_FMT}\"  End=\"${END_FMT}\"  Duration=\"${DURATION_FMT}\""
+log "runConfig patched: Start=\"${START_FMT}\"  End=\"${END_FMT}\"  Duration=\"${DURATION_FMT}\""
 
 # ============================================================
 #  Restart / fresh-start handling
@@ -155,18 +160,20 @@ fi
 # ============================================================
 #  Outer loop
 # ============================================================
-echo "========================================================"
-echo " 4D-Var start  $(date)"
-echo " nlat=${NLAT}  nlon=${NLON}  sigma_b=${SIGMA_B}  max_iter=${MAX_ITER}"
-echo "========================================================"
+log "========================================================"
+log " 4D-Var start"
+log " nlat=${NLAT}  nlon=${NLON}  sigma_b=${SIGMA_B}  max_iter=${MAX_ITER}"
+log " log → ${LOG_FILE}"
+log "========================================================"
 
 for iter in $(seq 1 "${MAX_ITER}"); do
-    echo ""
-    echo "-------- Iteration ${iter} / ${MAX_ITER}  $(date) --------"
+    log ""
+    log "-------- Iteration ${iter} / ${MAX_ITER} --------"
 
     # ----------------------------------------------------------
     # (1) Write sigma_co2.nc4  from current state
     # ----------------------------------------------------------
+    log "[${iter}/${MAX_ITER}] Writing sigma_co2.nc4"
     python3 "${SCRIPT_DIR}/write_sigma.py" \
         --sigma-file "${SIGMA_FILE}" \
         --state-file "${STATE_FILE}" \
@@ -177,7 +184,7 @@ for iter in $(seq 1 "${MAX_ITER}"); do
     # ----------------------------------------------------------
     # (2) Forward GCHP
     # ----------------------------------------------------------
-    echo "[iter ${iter}] Forward GCHP"
+    log "[${iter}/${MAX_ITER}] Forward GCHP — started"
     cd "${FWD_DIR}"
 
     # Cleanup (mirrors gchp.forward.run)
@@ -190,11 +197,12 @@ for iter in $(seq 1 "${MAX_ITER}"); do
 
     mpiexec -n "${NCORES}" ./gchp >> gchp.log 2>&1 \
         || die "Forward GCHP failed (iter ${iter}). See ${FWD_DIR}/gchp.log"
+    log "[${iter}/${MAX_ITER}] Forward GCHP — done"
 
     # ----------------------------------------------------------
     # (3) Observation cost J + forcing files
     # ----------------------------------------------------------
-    echo "[iter ${iter}] Computing forcing (J_obs and dJ/dE)"
+    log "[${iter}/${MAX_ITER}] Computing J_obs and adjoint forcing"
     SAT_FILE=$(ls "${FWD_DIR}/OutputDir"/GEOSChem.sat_track.*.nc4 2>/dev/null \
                | tail -1)
     [ -z "${SAT_FILE}" ] && die "No sat_track file in ${FWD_DIR}/OutputDir"
@@ -209,7 +217,7 @@ for iter in $(seq 1 "${MAX_ITER}"); do
     # ----------------------------------------------------------
     # (4) Copy forward checkpoints to adjoint directory
     # ----------------------------------------------------------
-    echo "[iter ${iter}] Moving checkpoints"
+    log "[${iter}/${MAX_ITER}] Moving checkpoints forward → adjoint"
     cd "${FWD_DIR}"
     for f in gcadj_internal_checkpoint* gcadj_import_checkpoint*; do
         [ -f "${f}" ] && mv "${f}" "${ADJ_DIR}/" \
@@ -225,7 +233,7 @@ for iter in $(seq 1 "${MAX_ITER}"); do
     # ----------------------------------------------------------
     # (5) Adjoint GCHP
     # ----------------------------------------------------------
-    echo "[iter ${iter}] Adjoint GCHP"
+    log "[${iter}/${MAX_ITER}] Adjoint GCHP — started"
     cd "${ADJ_DIR}"
 
     # Cleanup (mirrors gchp.adjoint.run)
@@ -237,11 +245,12 @@ for iter in $(seq 1 "${MAX_ITER}"); do
 
     mpiexec -n "${NCORES}" ./gchp >> gchp.log 2>&1 \
         || die "Adjoint GCHP failed (iter ${iter}). See ${ADJ_DIR}/gchp.log"
+    log "[${iter}/${MAX_ITER}] Adjoint GCHP — done"
 
     # ----------------------------------------------------------
     # (6) L-BFGS-B step: update sigma, check convergence
     # ----------------------------------------------------------
-    echo "[iter ${iter}] L-BFGS-B optimizer step"
+    log "[${iter}/${MAX_ITER}] L-BFGS-B optimizer step"
     cd "${BASE_DIR}"
 
     rc=0
@@ -259,19 +268,21 @@ for iter in $(seq 1 "${MAX_ITER}"); do
     cp "${STATE_FILE}" "${OUTPUT_DIR}/4dvar_state_iter$(printf '%03d' "${iter}").npz"
 
     if [ "${rc}" -eq 1 ]; then
-        echo "========================================================"
-        echo " CONVERGED at iteration ${iter}  $(date)"
-        echo "========================================================"
+        log "========================================================"
+        log " CONVERGED at iteration ${iter}"
+        log "========================================================"
         break
     elif [ "${rc}" -ne 0 ]; then
         die "lbfgsb_step.py returned error code ${rc}"
     fi
+    log "[${iter}/${MAX_ITER}] Iteration complete — state saved"
 
 done
 
-echo ""
-echo "========================================================"
-echo " 4D-Var finished  $(date)"
-echo " Final state: ${STATE_FILE}"
-echo " Per-iteration snapshots: ${OUTPUT_DIR}/"
-echo "========================================================"
+log ""
+log "========================================================"
+log " 4D-Var finished"
+log " Final state:            ${STATE_FILE}"
+log " Per-iteration snapshots: ${OUTPUT_DIR}/"
+log " Log:                     ${LOG_FILE}"
+log "========================================================"
