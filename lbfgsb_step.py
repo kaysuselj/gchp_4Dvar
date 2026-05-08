@@ -55,7 +55,8 @@ def read_obs_gradient(adj_output_dir, t_start, nlat, nlon):
         raise RuntimeError(f'No adjoint output files matching {pattern}')
 
     t_target = pd.Timestamp(t_start)
-    ds   = xr.open_mfdataset(files, combine='by_coords')
+    ds = (xr.open_dataset(files[0]) if len(files) == 1
+          else xr.concat([xr.open_dataset(f) for f in files], dim='time'))
     grad = (ds['SurfaceFluxAdj_CO2']
             .sel(time=t_target, method='nearest')
             .values)   # (nlat, nlon) — already lat-lon from HISTORY.rc
