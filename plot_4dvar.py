@@ -28,6 +28,15 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
+try:
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+    from cartopy.mpl.ticker import LongitudeFormatter, LatitudeFormatter
+    HAS_CARTOPY = True
+except ImportError:
+    HAS_CARTOPY = False
+    print('WARNING: cartopy not found — land mask will not be drawn')
+
 
 # -----------------------------------------------------------------------
 # Helpers
@@ -39,6 +48,22 @@ def make_grid(nlat, nlon):
     return lats, lons
 
 
+def _add_land(ax):
+    """Add land fill and coastlines to a cartopy GeoAxes."""
+    ax.add_feature(cfeature.LAND,      facecolor='0.85', zorder=0)
+    ax.add_feature(cfeature.COASTLINE, linewidth=0.5,    zorder=2)
+    ax.add_feature(cfeature.BORDERS,   linewidth=0.3,    zorder=2,
+                   linestyle=':', edgecolor='0.4')
+
+
+def _set_ticks(ax):
+    ax.set_xticks(range(-180, 181, 60), crs=ccrs.PlateCarree())
+    ax.set_yticks(range(-90,   91, 30), crs=ccrs.PlateCarree())
+    ax.xaxis.set_major_formatter(LongitudeFormatter())
+    ax.yaxis.set_major_formatter(LatitudeFormatter())
+    ax.tick_params(labelsize=8)
+
+
 def plot_map(data, lats, lons, title, path,
              cmap='RdBu_r', vmin=None, vmax=None, cbar_label=''):
     """Save a single lat-lon map as a PNG."""
@@ -48,18 +73,30 @@ def plot_map(data, lats, lons, title, path,
 
     lon2d, lat2d = np.meshgrid(lons, lats)
 
-    fig, ax = plt.subplots(figsize=(12, 5))
-    im = ax.pcolormesh(lon2d, lat2d, data,
-                       cmap=cmap, vmin=vmin, vmax=vmax, shading='auto')
+    if HAS_CARTOPY:
+        proj = ccrs.PlateCarree()
+        _, ax = plt.subplots(figsize=(12, 5),
+                              subplot_kw={'projection': proj})
+        _add_land(ax)
+        im = ax.pcolormesh(lon2d, lat2d, data,
+                           cmap=cmap, vmin=vmin, vmax=vmax,
+                           shading='auto', transform=proj, zorder=1)
+        ax.set_extent([-180, 180, -90, 90], crs=proj)
+        _set_ticks(ax)
+        ax.gridlines(alpha=0.3, linewidth=0.5, draw_labels=False)
+    else:
+        _, ax = plt.subplots(figsize=(12, 5))
+        im = ax.pcolormesh(lon2d, lat2d, data,
+                           cmap=cmap, vmin=vmin, vmax=vmax, shading='auto')
+        ax.set_xlabel('Longitude')
+        ax.set_ylabel('Latitude')
+        ax.set_xticks(range(-180, 181, 60))
+        ax.set_yticks(range(-90,   91, 30))
+        ax.grid(True, alpha=0.3, linewidth=0.5)
+
     plt.colorbar(im, ax=ax, label=cbar_label, fraction=0.046, pad=0.04)
     ax.set_title(title, fontsize=12)
-    ax.set_xlabel('Longitude')
-    ax.set_ylabel('Latitude')
-    ax.set_xticks(range(-180, 181, 60))
-    ax.set_yticks(range(-90,   91, 30))
-    ax.grid(True, alpha=0.3, linewidth=0.5)
 
-    # summary stats in corner
     stats = (f'min={data.min():.3f}  max={data.max():.3f}  '
              f'mean={data.mean():.3f}  |inf|={np.abs(data).max():.3e}')
     ax.text(0.01, 0.02, stats, transform=ax.transAxes,
@@ -85,8 +122,10 @@ def main():
                              '(for convergence plot)')
     parser.add_argument('--plot-dir',    default=None,
                         help='Where to save PNGs (default: same dir as state file)')
-    parser.add_argument('--nlat', type=int, default=46)
-    parser.add_argument('--nlon', type=int, default=72)
+    parser.add_argument('--nlat', type=int, default=None,
+                        help='Override grid rows (read from state file by default)')
+    parser.add_argument('--nlon', type=int, default=None,
+                        help='Override grid cols (read from state file by default)')
     args = parser.parse_args()
 
     plot_dir = args.plot_dir or os.path.dirname(os.path.abspath(args.state_file))
@@ -95,10 +134,12 @@ def main():
     # ------------------------------------------------------------------
     # Load state
     # ------------------------------------------------------------------
-    s      = np.load(args.state_file)
-    it     = int(s['iteration']) - 1        # completed iterations
-    J      = float(s['J_prev'])
-    nlat, nlon = args.nlat, args.nlon
+    s  = np.load(args.state_file)
+    it = int(s['iteration']) - 1        # completed iterations
+    J  = float(s['J_prev'])
+
+    nlat = args.nlat or int(s['nlat'])
+    nlon = args.nlon or int(s['nlon'])
 
     sigma      = s['x_next'].reshape(nlat, nlon)
     sigma_prev = s['x_prev'].reshape(nlat, nlon)
@@ -158,7 +199,7 @@ def main():
         snap_files = sorted(glob.glob(
             os.path.join(snap_dir, '4dvar_state_iter*.npz')))
 
-        iters, Js, g_infs = [], [], []
+        iters, Js, J_obss, J_bs, g_infs = [], [], [], [], []
         for f in snap_files:
             sv  = np.load(f)
             i   = int(sv['iteration']) - 1
@@ -166,17 +207,30 @@ def main():
                 continue
             iters.append(i)
             Js.append(float(sv['J_prev']))
+            J_obss.append(float(sv['J_obs_prev']) if 'J_obs_prev' in sv else None)
+            J_bs.append(float(sv['J_b_prev'])   if 'J_b_prev'   in sv else None)
             g_infs.append(float(np.abs(sv['g_prev']).max()))
 
         if len(iters) >= 2:
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 7), sharex=True)
 
-            ax1.semilogy(iters, Js, 'b-o', markersize=5, linewidth=1.5)
-            ax1.set_ylabel('Total cost  J')
+            ax1.semilogy(iters, Js, 'k-o', markersize=5, linewidth=1.5, label='J (total)')
+            if any(v is not None for v in J_obss):
+                J_obss_clean = [v for v in J_obss if v is not None]
+                iters_obs    = [iters[k] for k, v in enumerate(J_obss) if v is not None]
+                ax1.semilogy(iters_obs, J_obss_clean,
+                             'b--s', markersize=4, linewidth=1.2, label='J_obs')
+            if any(v is not None for v in J_bs):
+                J_bs_clean = [v for v in J_bs if v is not None]
+                iters_b    = [iters[k] for k, v in enumerate(J_bs) if v is not None]
+                ax1.semilogy(iters_b, J_bs_clean,
+                             'r--^', markersize=4, linewidth=1.2, label='J_b')
+            ax1.set_ylabel('Cost  J')
             ax1.set_title('4D-Var convergence history')
+            ax1.legend(fontsize=9)
             ax1.grid(True, which='both', alpha=0.3)
 
-            ax2.semilogy(iters, g_infs, 'r-o', markersize=5, linewidth=1.5)
+            ax2.semilogy(iters, g_infs, 'g-o', markersize=5, linewidth=1.5)
             ax2.set_ylabel('||∇J||∞')
             ax2.set_xlabel('Iteration')
             ax2.grid(True, which='both', alpha=0.3)
@@ -211,18 +265,31 @@ def main():
         if len(frames) >= 2:
             lon2d, lat2d = np.meshgrid(lons, lats)
 
-            fig, ax = plt.subplots(figsize=(12, 5))
-            im = ax.pcolormesh(lon2d, lat2d, frames[0],
-                               cmap='RdBu_r', vmin=0.0, vmax=2.0,
-                               shading='auto')
-            cb = plt.colorbar(im, ax=ax, label='σ  [ ]',
-                              fraction=0.046, pad=0.04)
-            ax.set_xlabel('Longitude')
-            ax.set_ylabel('Latitude')
-            ax.set_xticks(range(-180, 181, 60))
-            ax.set_yticks(range(-90,   91, 30))
-            ax.grid(True, alpha=0.3, linewidth=0.5)
-            title = ax.set_title('')
+            if HAS_CARTOPY:
+                proj = ccrs.PlateCarree()
+                fig, ax = plt.subplots(figsize=(12, 5),
+                                       subplot_kw={'projection': proj})
+                _add_land(ax)
+                im = ax.pcolormesh(lon2d, lat2d, frames[0],
+                                   cmap='RdBu_r', vmin=0.0, vmax=2.0,
+                                   shading='auto', transform=proj, zorder=1)
+                ax.set_extent([-180, 180, -90, 90], crs=proj)
+                _set_ticks(ax)
+                ax.gridlines(alpha=0.3, linewidth=0.5, draw_labels=False)
+            else:
+                fig, ax = plt.subplots(figsize=(12, 5))
+                im = ax.pcolormesh(lon2d, lat2d, frames[0],
+                                   cmap='RdBu_r', vmin=0.0, vmax=2.0,
+                                   shading='auto')
+                ax.set_xlabel('Longitude')
+                ax.set_ylabel('Latitude')
+                ax.set_xticks(range(-180, 181, 60))
+                ax.set_yticks(range(-90,   91, 30))
+                ax.grid(True, alpha=0.3, linewidth=0.5)
+
+            plt.colorbar(im, ax=ax, label='σ  [ ]',
+                         fraction=0.046, pad=0.04)
+            title      = ax.set_title('')
             stats_text = ax.text(0.01, 0.02, '', transform=ax.transAxes,
                                  fontsize=8, color='0.3', va='bottom')
 

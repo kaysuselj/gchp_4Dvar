@@ -250,10 +250,14 @@ def main():
         x_prev    = x_cur,
         g_prev    = g_cur,
         J_prev    = np.float64(J_cur),
+        J_obs_prev = np.float64(J_obs),
+        J_b_prev   = np.float64(J_b),
         s_hist    = s_hist,
         y_hist    = y_hist,
         m_used    = np.int64(m_used),
         iteration = np.int64(it + 1),
+        nlat      = np.int64(args.nlat),
+        nlon      = np.int64(args.nlon),
     )
     print(f'  State saved → {args.state_file}')
 
