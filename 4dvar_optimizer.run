@@ -2,8 +2,10 @@
 #PBS -S /bin/bash
 #PBS -N gchp_4dvar
 #PBS -l select=1:ncpus=24:mpiprocs=24:model=bro_ele
-#PBS -l walltime=72:00:00
-#PBS -q long
+##PBS -l walltime=72:00:00
+##PBS -q long
+#PBL -l walltime=2:00:00
+#PBS -q debug
 #PBS -j oe
 #PBS -W group_list=s1055
 #PBS -m bea
