@@ -1,0 +1,10 @@
+   Adjoint.template:       '%y4%m2%d2.nc4',
+   Adjoint.format:         'CFIO',
+   Adjoint.timestampStart: .true.
+   Adjoint.frequency:      001000
+   Adjoint.duration:       240000
+   Adjoint.mode:           'instantaneous'
+   Adjoint.backwards:      1
+   Adjoint.fields:         'SpeciesAdj_CO2     ', 'GCHPchem',
+                          'SurfaceFluxAdj_CO2    ', 'GCHPchem',
+::

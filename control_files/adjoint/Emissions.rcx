@@ -1,0 +1,38 @@
+  Emissions.template:         '%y4%m2%d2_%h2%n2z.nc4',
+  Emissions.format:           'CFIO',
+  Emissions.timestampStart:   .true.
+  Emissions.monthly:          0
+  Emissions.frequency:        001000
+  Emissions.duration:         240000
+  Emissions.mode:             'time-averaged'
+  Emissions.fields:            'EmisCO2_Total        ', 'GCHPchem',
+                             # 'EmisCH4_Total        ', 'GCHPchem',
+                             # 'EmisCH4_Oil          ', 'GCHPchem',
+                             # 'EmisCH4_Gas          ', 'GCHPchem',
+                             # 'EmisCH4_Coal         ', 'GCHPchem',
+                             # 'EmisCH4_Livestock    ', 'GCHPchem',
+                             # 'EmisCH4_Landfills    ', 'GCHPchem',
+                             # 'EmisCH4_Wastewater   ', 'GCHPchem',
+                             # 'EmisCH4_Rice         ', 'GCHPchem',
+                             # 'EmisCH4_OtherAnth    ', 'GCHPchem',
+                             # 'EmisCH4_BiomassBurn  ', 'GCHPchem',
+                             # 'EmisCH4_Wetlands     ', 'GCHPchem',
+                             # 'EmisCH4_Seeps        ', 'GCHPchem',
+                             # 'EmisCH4_Lakes        ', 'GCHPchem',
+                             # 'EmisCH4_Termites     ', 'GCHPchem',
+                             # 'EmisCH4_SoilAbsorb   ', 'GCHPchem',
+                             # 'EmisCH4_Reservoirs   ', 'GCHPchem',
+                             # 'EmisCO_Total         ', 'GCHPchem',
+                             # 'EmisCO_Aircraft      ', 'GCHPchem',
+                             # 'EmisCO_Anthro        ', 'GCHPchem',
+                             # 'EmisCO_BiomassBurn   ', 'GCHPchem',
+                             # 'EmisCO_Ship          ', 'GCHPchem',
+                              'EmisCO2_FossilFuel   ', 'GCHPchem',
+                              'EmisCO2_Ocean        ', 'GCHPchem',
+                              'EmisCO2_BalBiosph    ', 'GCHPchem',
+                              'EmisCO2_NetTerrExch  ', 'GCHPchem',
+                              'EmisCO2_Ship         ', 'GCHPchem',
+                              'EmisCO2_Aviation     ', 'GCHPchem',
+                              'EmisCO2_CO2SurfCorr  ', 'GCHPchem',
+                              'EmisCO2_BiomassBurn  ', 'GCHPchem',
+::

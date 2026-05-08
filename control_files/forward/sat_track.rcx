@@ -1,0 +1,27 @@
+  sat_track.template:         '%y4%m2%d2_%h2%n2z.nc4',
+  sat_track.format:           'CFIO',
+  sat_track.timestampStart:   .true.
+  sat_track.monthly:          1
+  sat_track.track_file:        track_file_201901.nc
+  sat_track.recycle_track:    .false.
+  sat_track.mode:             'instantaneous'
+  sat_track.fields:           'EmisCO2_Total        ', 'GCHPchem',
+                        #'EmisCO2_FossilFuel   ', 'GCHPchem',
+                        #'EmisCO2_Ocean        ', 'GCHPchem',
+                        #'EmisCO2_BalBiosph    ', 'GCHPchem',
+                        #'EmisCO2_NBE          ', 'GCHPchem',
+                        'SpeciesConcVV_CO2    ', 'GCHPchem',
+                        'Met_AD         ', 'GCHPchem',
+                        'Met_BXHEIGHT   ', 'GCHPchem',
+                        'Met_DELP       ', 'GCHPchem',
+                        'Met_PMID       ', 'GCHPchem',
+                        'Met_PMIDDRY    ', 'GCHPchem',
+                        'Met_PSC2WET     ', 'GCHPchem',
+                        'Met_PSC2DRY     ', 'GCHPchem',
+                              #'EmisCO2_BalBiosph    ', 'GCHPchem',
+                              #'EmisCO2_NetTerrExch  ', 'GCHPchem',
+                              #'EmisCO2_Ship         ', 'GCHPchem',
+                              #'EmisCO2_Aviation     ', 'GCHPchem',
+                              #'EmisCO2_CO2SurfCorr  ', 'GCHPchem',
+                              #'EmisCO2_BiomassBurn  ', 'GCHPchem',
+::
