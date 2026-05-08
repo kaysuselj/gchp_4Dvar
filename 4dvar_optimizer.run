@@ -71,7 +71,11 @@ GCHP_ENV="${FWD_DIR}/gchp.env"
 if [ ! -f "${GCHP_ENV}" ]; then
     echo "ERROR: ${GCHP_ENV} not found"; exit 1
 fi
+# Suspend errexit while sourcing: environment files often contain harmless
+# commands (e.g. unalias of non-existent aliases) that return non-zero.
+set +e
 source "${GCHP_ENV}"
+set -e
 
 if ! command -v mpiexec &>/dev/null; then
     echo "ERROR: mpiexec not found after sourcing ${GCHP_ENV}"; exit 1
