@@ -214,17 +214,17 @@ def main():
         if len(iters) >= 2:
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 7), sharex=True)
 
-            ax1.semilogy(iters, Js, 'k-o', markersize=5, linewidth=1.5, label='J (total)')
+            ax1.plot(iters, Js, 'k-o', markersize=5, linewidth=1.5, label='J (total)')
             if any(v is not None for v in J_obss):
                 J_obss_clean = [v for v in J_obss if v is not None]
                 iters_obs    = [iters[k] for k, v in enumerate(J_obss) if v is not None]
-                ax1.semilogy(iters_obs, J_obss_clean,
-                             'b--s', markersize=4, linewidth=1.2, label='J_obs')
+                ax1.plot(iters_obs, J_obss_clean,
+                         'b--s', markersize=4, linewidth=1.2, label='J_obs')
             if any(v is not None for v in J_bs):
                 J_bs_clean = [v for v in J_bs if v is not None]
                 iters_b    = [iters[k] for k, v in enumerate(J_bs) if v is not None]
-                ax1.semilogy(iters_b, J_bs_clean,
-                             'r--^', markersize=4, linewidth=1.2, label='J_b')
+                ax1.plot(iters_b, J_bs_clean,
+                         'r--^', markersize=4, linewidth=1.2, label='J_b')
             ax1.set_ylabel('Cost  J')
             ax1.set_title('4D-Var convergence history')
             ax1.legend(fontsize=9)

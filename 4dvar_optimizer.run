@@ -286,3 +286,15 @@ log " Final state:            ${STATE_FILE}"
 log " Per-iteration snapshots: ${OUTPUT_DIR}/"
 log " Log:                     ${LOG_FILE}"
 log "========================================================"
+
+# ============================================================
+#  Post-optimization plots
+# ============================================================
+PLOT_DIR="${WORK_DIR}/plots"
+log "Generating plots → ${PLOT_DIR}"
+python3 "${SCRIPT_DIR}/plot_4dvar.py" \
+    --state-file  "${STATE_FILE}" \
+    --output-dir  "${OUTPUT_DIR}" \
+    --plot-dir    "${PLOT_DIR}" \
+    && log "Plots saved to ${PLOT_DIR}" \
+    || log "WARNING: plot_4dvar.py failed (plots not generated)"
