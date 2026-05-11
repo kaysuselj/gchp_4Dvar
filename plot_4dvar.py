@@ -15,8 +15,14 @@ Usage:
                        --output-dir 4dvar_output/   \\
                        --plot-dir   plots/          \\
                        [--nlat 46] [--nlon 72]
-  sigma_animation.gif - sigma evolving across all iterations
-                        (requires --output-dir with per-iter snapshots)
+  sigma_animation.gif  - sigma evolving across all iterations
+                         (requires --output-dir with per-iter snapshots)
+  obs_locations.png    - observation locations coloured by iteration
+  forcing_profile.png  - mean ± std adjoint forcing vs model level,
+                         iteration 1 vs last  (requires forcing_iter_NNN.nc4
+                         files in --output-dir, written when SAVE_DIAG=true)
+  forcing_latlon.png   - vertically averaged forcing gridded on lat-lon,
+                         iteration 1 vs last
 """
 
 import argparse
@@ -27,6 +33,13 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+
+try:
+    import xarray as xr
+    HAS_XARRAY = True
+except ImportError:
+    HAS_XARRAY = False
+    print('WARNING: xarray not found — forcing diagnostic plots will be skipped')
 
 try:
     import cartopy.crs as ccrs
@@ -103,6 +116,173 @@ def plot_map(data, lats, lons, title, path,
             fontsize=8, color='0.3', va='bottom')
 
     plt.tight_layout()
+    plt.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f'  Saved: {path}')
+
+
+# -----------------------------------------------------------------------
+# Forcing diagnostic helpers
+# -----------------------------------------------------------------------
+
+def _load_forcing_file(path):
+    """Return (lat, lon, forcing) arrays from a forcing_iter_NNN.nc4 file,
+    or None if the file cannot be opened."""
+    if not HAS_XARRAY:
+        return None
+    try:
+        ds = xr.open_dataset(path)
+        lat = ds['lat_obs'].values.astype(float)
+        lon = ds['lon_obs'].values.astype(float)
+        f   = ds['forcing'].values.astype(float)   # (n_obs, nlev)
+        ds.close()
+        return lat, lon, f
+    except Exception as exc:
+        print(f'  WARNING: could not read {path}: {exc}')
+        return None
+
+
+def plot_obs_locations(lat, lon, n_iter, plot_dir):
+    """Scatter plot of observation locations coloured by obs index (time proxy)."""
+    title = f'Observation locations  (iteration {n_iter},  N={len(lat):,})'
+    path  = os.path.join(plot_dir, 'obs_locations.png')
+    c     = np.arange(len(lat))
+
+    if HAS_CARTOPY:
+        proj = ccrs.PlateCarree()
+        fig, ax = plt.subplots(figsize=(12, 5), subplot_kw={'projection': proj})
+        _add_land(ax)
+        sc = ax.scatter(lon, lat, c=c, s=3, cmap='rainbow',
+                        transform=proj, zorder=3, alpha=0.7)
+        ax.set_extent([-180, 180, -90, 90], crs=proj)
+        _set_ticks(ax)
+        ax.gridlines(alpha=0.3, linewidth=0.5, draw_labels=False)
+    else:
+        fig, ax = plt.subplots(figsize=(12, 5))
+        sc = ax.scatter(lon, lat, c=c, s=3, cmap='rainbow', alpha=0.7)
+        ax.set_xlabel('Longitude')
+        ax.set_ylabel('Latitude')
+        ax.set_xticks(range(-180, 181, 60))
+        ax.set_yticks(range(-90,   91, 30))
+        ax.grid(True, alpha=0.3, linewidth=0.5)
+
+    plt.colorbar(sc, ax=ax, label='Observation index (proxy for time in window)',
+                 fraction=0.046, pad=0.04)
+    ax.set_title(title, fontsize=12)
+    plt.tight_layout()
+    plt.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f'  Saved: {path}')
+
+
+def plot_forcing_profile(data_first, data_last, plot_dir):
+    """Mean ± std of adjoint forcing vs model level for iteration 1 and last.
+
+    data_first / data_last : (lat, lon, forcing) tuples from _load_forcing_file.
+    forcing shape: (n_obs, nlev)  level 0 = surface, level nlev-1 = TOA.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(10, 7), sharey=True)
+    fig.suptitle('Adjoint forcing profile  ∂J/∂CO₂  per model level', fontsize=12)
+
+    datasets = [('Iteration 1',    data_first),
+                ('Last iteration', data_last)]
+
+    for ax, (label, data) in zip(axes, datasets):
+        if data is None:
+            ax.set_title(f'{label}\n(no data)', fontsize=10)
+            continue
+        _, _, f = data                    # f: (n_obs, nlev)
+        nlev    = f.shape[1]
+        levs    = np.arange(1, nlev + 1)  # 1=surface ... nlev=TOA
+        mean_f  = f.mean(axis=0)
+        std_f   = f.std(axis=0)
+
+        ax.plot(mean_f, levs, 'b-', linewidth=1.5, label='mean')
+        ax.fill_betweenx(levs, mean_f - std_f, mean_f + std_f,
+                         alpha=0.25, color='blue', label='±1 std')
+        ax.axvline(0, color='k', linewidth=0.6, linestyle='--')
+        ax.set_xlabel('∂J/∂CO₂  [1/(kg CO₂/kg dry air)]', fontsize=9)
+        ax.set_title(f'{label}\n(N={f.shape[0]:,} obs)', fontsize=10)
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+        ax.invert_yaxis()   # surface at bottom
+
+    axes[0].set_ylabel('Model level  (1 = surface)', fontsize=9)
+    plt.tight_layout()
+    path = os.path.join(plot_dir, 'forcing_profile.png')
+    plt.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f'  Saved: {path}')
+
+
+def plot_forcing_latlon(data_first, data_last, lats, lons, plot_dir):
+    """Vertically averaged adjoint forcing gridded on the sigma lat-lon grid,
+    for iteration 1 and last iteration side by side."""
+    nlat, nlon  = len(lats), len(lons)
+    lat_edges   = np.concatenate([[lats[0]  - (lats[1]  - lats[0])  / 2],
+                                  (lats[:-1] + lats[1:]) / 2,
+                                  [lats[-1] + (lats[-1] - lats[-2]) / 2]])
+    lon_edges   = np.concatenate([[lons[0]  - (lons[1]  - lons[0])  / 2],
+                                  (lons[:-1] + lons[1:]) / 2,
+                                  [lons[-1] + (lons[-1] - lons[-2]) / 2]])
+
+    def _grid(data):
+        if data is None:
+            return None, None
+        lat_o, lon_o, f = data
+        vals = f.mean(axis=1)           # vertical mean per obs → (n_obs,)
+        sums, _, _  = np.histogram2d(lat_o, lon_o, bins=[lat_edges, lon_edges],
+                                     weights=vals)
+        cnts, _, _  = np.histogram2d(lat_o, lon_o, bins=[lat_edges, lon_edges])
+        with np.errstate(invalid='ignore'):
+            grid = np.where(cnts > 0, sums / cnts, np.nan)
+        return grid, int(cnts.sum())
+
+    grid1, n1 = _grid(data_first)
+    grid2, n2 = _grid(data_last)
+
+    grids = [g for g in [grid1, grid2] if g is not None]
+    if not grids:
+        print('  No forcing data available for lat-lon plot — skipping.')
+        return
+    amax = max(np.nanmax(np.abs(g)) for g in grids)
+    amax = max(amax, 1e-30)
+
+    lon2d, lat2d = np.meshgrid(lons, lats)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5),
+                             subplot_kw={'projection': ccrs.PlateCarree()}
+                             if HAS_CARTOPY else {})
+    fig.suptitle('Vertically averaged adjoint forcing  ∂J/∂CO₂  [1/(kg CO₂/kg dry air)]',
+                 fontsize=11)
+
+    panels = [('Iteration 1',    grid1, n1),
+              ('Last iteration', grid2, n2)]
+
+    for ax, (label, grid, n_obs) in zip(axes, panels):
+        if grid is None:
+            ax.set_title(f'{label}\n(no data)', fontsize=10)
+            continue
+        if HAS_CARTOPY:
+            _add_land(ax)
+            im = ax.pcolormesh(lon2d, lat2d, grid,
+                               cmap='RdBu_r', vmin=-amax, vmax=amax,
+                               shading='auto', transform=ccrs.PlateCarree(), zorder=1)
+            ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
+            _set_ticks(ax)
+            ax.gridlines(alpha=0.3, linewidth=0.5, draw_labels=False)
+        else:
+            im = ax.pcolormesh(lon2d, lat2d, grid,
+                               cmap='RdBu_r', vmin=-amax, vmax=amax, shading='auto')
+            ax.set_xlabel('Longitude')
+            ax.set_ylabel('Latitude')
+            ax.set_xticks(range(-180, 181, 60))
+            ax.set_yticks(range(-90,   91, 30))
+            ax.grid(True, alpha=0.3, linewidth=0.5)
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        ax.set_title(f'{label}  (N={n_obs:,} obs)', fontsize=10)
+
+    plt.tight_layout()
+    path = os.path.join(plot_dir, 'forcing_latlon.png')
     plt.savefig(path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f'  Saved: {path}')
@@ -309,6 +489,38 @@ def main():
             print(f'  Saved: {gif_path}')
         elif snap_files:
             print('  Animation needs at least 2 iterations — skipping.')
+
+    # ------------------------------------------------------------------
+    # 7–9. Forcing diagnostics  (requires forcing_iter_NNN.nc4 files)
+    # ------------------------------------------------------------------
+    if not HAS_XARRAY:
+        pass   # warning already printed at import time
+    elif snap_dir and os.path.isdir(snap_dir):
+        forcing_files = sorted(glob.glob(
+            os.path.join(snap_dir, 'forcing_iter*.nc4')))
+
+        if not forcing_files:
+            print('  No forcing_iter_NNN.nc4 files found — '
+                  'skipping forcing diagnostic plots '
+                  '(run with SAVE_DIAG=true to generate them).')
+        else:
+            data_first = _load_forcing_file(forcing_files[0])
+            data_last  = _load_forcing_file(forcing_files[-1])
+            iter_first = int(forcing_files[0].split('forcing_iter')[1].split('.')[0])
+            iter_last  = int(forcing_files[-1].split('forcing_iter')[1].split('.')[0])
+            print(f'  Forcing files found: {len(forcing_files)}  '
+                  f'(iter {iter_first} … {iter_last})')
+
+            # 7. Observation locations  (use first-iteration file)
+            if data_first is not None:
+                plot_obs_locations(data_first[0], data_first[1],
+                                   iter_first, plot_dir)
+
+            # 8. Forcing profile: mean ± std vs model level
+            plot_forcing_profile(data_first, data_last, plot_dir)
+
+            # 9. Forcing lat-lon map (vertically averaged)
+            plot_forcing_latlon(data_first, data_last, lats, lons, plot_dir)
 
 
 if __name__ == '__main__':

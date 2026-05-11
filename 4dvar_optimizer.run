@@ -49,8 +49,8 @@ STATE_FILE="${WORK_DIR}/4dvar_state.npz" # L-BFGS-B state, persisted between ite
 OUTPUT_DIR="${WORK_DIR}/4dvar_output"    # sigma_iter_NNN.npy, J_iter_NNN.txt
 LOG_FILE="${WORK_DIR}/4dvar_optimizer.log"
 
-# Tee all stdout+stderr to LOG_FILE for the rest of the script
-exec > >(tee "${LOG_FILE}") 2>&1
+# Tee all stdout+stderr to LOG_FILE for the rest of the script (append so restarts don't erase history)
+exec > >(tee -a "${LOG_FILE}") 2>&1
 
 # Simulation window (must match runConfig_*.sh settings)
 T_START="2019-01-01"
@@ -70,6 +70,12 @@ FTOL=${FTOL:-1e-8}
 #   qsub                        4dvar_optimizer.run   # fresh start
 #   qsub -v RESTART=true        4dvar_optimizer.run   # resume previous run
 RESTART=${RESTART:-false}
+
+# Set SAVE_DIAG=false to skip writing forcing_all_obs.nc4 each iteration.
+# Useful when assimilating a very large number of observations where the
+# consolidated file would be too large.
+#   qsub -v SAVE_DIAG=false 4dvar_optimizer.run
+SAVE_DIAG=${SAVE_DIAG:-true}
 
 # ============================================================
 #  Environment
@@ -101,12 +107,7 @@ if ! python3 -c "import numpy, pandas, xarray, netCDF4" 2>/dev/null; then
 fi
 echo "Python env: $(python3 --version)  from ${PYTHON_ENV}"
 
-# Read core count from GCHP.rc (NX * NY)
-NCORES=$(awk '/^NX[[:space:]]/ {nx=$2} /^NY[[:space:]]/ {ny=$2} END {print nx*ny}' \
-         "${FWD_DIR}/GCHP.rc")
-echo "Core count from GCHP.rc: ${NCORES}"
-
-mkdir -p "${FORCING_DIR}" "${OUTPUT_DIR}" "${ADJ_DIR}/Restarts"
+mkdir -p "${FORCING_DIR}" "${OUTPUT_DIR}" "${ADJ_DIR}/Restarts" "${FWD_DIR}/Restarts"
 
 # ============================================================
 #  Copy control files to run directories (control_files/ is the
@@ -117,6 +118,16 @@ mkdir -p "${FORCING_DIR}" "${OUTPUT_DIR}" "${ADJ_DIR}/Restarts"
 rsync -a "${CTRL_FWD_DIR}/" "${FWD_DIR}/"
 rsync -a "${CTRL_ADJ_DIR}/" "${ADJ_DIR}/"
 log "Control files synced to run directories"
+
+# Read core count from GCHP.rc NOW (after rsync so we read the canonical version)
+NCORES=$(awk '/^NX[[:space:]]/ {nx=$2} /^NY[[:space:]]/ {ny=$2} END {print nx*ny}' \
+         "${FWD_DIR}/GCHP.rc")
+[ -z "${NCORES}" ] && die "Could not parse NX/NY from ${FWD_DIR}/GCHP.rc"
+log "Core count from GCHP.rc: ${NCORES}"
+
+# Check GCHP executables exist
+[ -f "${FWD_DIR}/gchp" ] || die "Forward GCHP executable not found: ${FWD_DIR}/gchp"
+[ -f "${ADJ_DIR}/gchp" ] || die "Adjoint GCHP executable not found: ${ADJ_DIR}/gchp"
 
 # ============================================================
 #  Patch runConfig timing from T_START / T_END
@@ -207,12 +218,24 @@ for iter in $(seq 1 "${MAX_ITER}"); do
                | tail -1)
     [ -z "${SAT_FILE}" ] && die "No sat_track file in ${FWD_DIR}/OutputDir"
 
+    _diag_flag=""
+    [ "${SAVE_DIAG}" = "true" ] || _diag_flag="--no-save-diagnostics"
+
     python3 "${SCRIPT_DIR}/co2_adjoint_forcing.py" \
         "${SAT_FILE}" "${FORCING_DIR}" \
         --ts-chem "${TS_CHEM}" \
         --t-start "${T_START}T00:00:00" \
         --t-end   "${T_END}T23:59:59" \
+        ${_diag_flag} \
         || die "co2_adjoint_forcing.py failed (iter ${iter})"
+
+    # Archive consolidated forcing file per iteration for later plotting.
+    # Only copies when the file was actually written (SAVE_DIAG=true).
+    _diag_src="${FORCING_DIR}/forcing_all_obs.nc4"
+    if [ -f "${_diag_src}" ]; then
+        cp "${_diag_src}" \
+           "${OUTPUT_DIR}/forcing_iter$(printf '%03d' "${iter}").nc4"
+    fi
 
     # ----------------------------------------------------------
     # (4) Copy forward checkpoints to adjoint directory

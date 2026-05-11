@@ -389,7 +389,7 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s):
 
 
 # ---------------------------------------------------------------------------
-# Write helpers  (one file per checkpoint)
+# Write helpers  (one file per checkpoint + optional consolidated diagnostics)
 # ---------------------------------------------------------------------------
 
 FORCING_ATTRS = {
@@ -441,10 +441,58 @@ def write_sparse(output_path, t, obs_lats, obs_lons, forcing_k, levs):
 
 
 # ---------------------------------------------------------------------------
+# Consolidated diagnostics file  (optional; one per co2_adjoint_forcing call)
+# ---------------------------------------------------------------------------
+
+def write_consolidated(output_path, obs_by_ckpt, levs):
+    """Write all observations from all checkpoints into a single netCDF file.
+
+    Concatenates lat_obs, lon_obs, and forcing across every checkpoint that
+    has at least one observation.  Empty checkpoints are skipped.
+
+    The file is intended for post-processing only (plots, diagnostics); it is
+    NOT read by GCHP.  Disable with save_diagnostics=False if the observation
+    count is very large.
+
+    forcing : (n_total_obs, nlev)  — same units as the per-checkpoint files.
+    """
+    all_lats, all_lons, all_forcing = [], [], []
+    for obs_list in obs_by_ckpt.values():
+        for lat, lon, force in obs_list:
+            all_lats.append(lat)
+            all_lons.append(lon)
+            all_forcing.append(force)
+
+    if not all_lats:
+        print('  No observations — consolidated forcing file not written.')
+        return
+
+    n_obs = len(all_lats)
+    ds = xr.Dataset(
+        {
+            'lat_obs': (['obs'], np.array(all_lats, dtype=np.float32),
+                        {'long_name': 'Observation latitude', 'units': 'degrees_north'}),
+            'lon_obs': (['obs'], np.array(all_lons, dtype=np.float32),
+                        {'long_name': 'Observation longitude', 'units': 'degrees_east',
+                         'comment': 'normalized to [-180, 180)'}),
+            'forcing': (['obs', 'lev'],
+                        np.array(all_forcing, dtype=np.float32),
+                        FORCING_ATTRS),
+        },
+        coords={'lev': levs},
+    )
+    ds['lev'].attrs = {'long_name': 'Model level (1=surface, LLPAR=TOA)'}
+    ds.to_netcdf(output_path,
+                 encoding={'forcing': FORCING_ENCODING})
+    print(f'  Consolidated forcing written: {output_path}  ({n_obs} obs total)')
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def co2_adjoint_forcing(gchp_file, output_dir, ts_chem_s, t_start, t_end):
+def co2_adjoint_forcing(gchp_file, output_dir, ts_chem_s, t_start, t_end,
+                        save_diagnostics=True):
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -472,6 +520,10 @@ def co2_adjoint_forcing(gchp_file, output_dir, ts_chem_s, t_start, t_end):
             forcing_k  = np.empty((0, nlev), dtype=np.float32)
         write_sparse(fpath, t, obs_lats_k, obs_lons_k, forcing_k, levs)
 
+    if save_diagnostics:
+        diag_path = os.path.join(output_dir, 'forcing_all_obs.nc4')
+        write_consolidated(diag_path, obs_by_ckpt, levs)
+
     return J
 
 
@@ -492,12 +544,16 @@ if __name__ == '__main__':
                         help='Assimilation window start YYYY-MM-DDTHH:MM:SS')
     parser.add_argument('--t-end',   required=True,
                         help='Assimilation window end   YYYY-MM-DDTHH:MM:SS')
+    parser.add_argument('--no-save-diagnostics', dest='save_diagnostics',
+                        action='store_false', default=True,
+                        help='Skip writing forcing_all_obs.nc4 (use for large obs counts)')
     args = parser.parse_args()
 
     co2_adjoint_forcing(
-        gchp_file  = args.gchp_file,
-        output_dir = args.output_dir,
-        ts_chem_s  = args.ts_chem_s,
-        t_start    = pd.Timestamp(args.t_start),
-        t_end      = pd.Timestamp(args.t_end),
+        gchp_file        = args.gchp_file,
+        output_dir       = args.output_dir,
+        ts_chem_s        = args.ts_chem_s,
+        t_start          = pd.Timestamp(args.t_start),
+        t_end            = pd.Timestamp(args.t_end),
+        save_diagnostics = args.save_diagnostics,
     )
