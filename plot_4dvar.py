@@ -199,7 +199,7 @@ def main():
         snap_files = sorted(glob.glob(
             os.path.join(snap_dir, '4dvar_state_iter*.npz')))
 
-        iters, Js, J_obss, J_bs, g_infs = [], [], [], [], []
+        iters, Js, J_obss, g_infs = [], [], [], []
         for f in snap_files:
             sv  = np.load(f)
             i   = int(sv['iteration']) - 1
@@ -208,7 +208,6 @@ def main():
             iters.append(i)
             Js.append(float(sv['J_prev']))
             J_obss.append(float(sv['J_obs_prev']) if 'J_obs_prev' in sv else None)
-            J_bs.append(float(sv['J_b_prev'])   if 'J_b_prev'   in sv else None)
             g_infs.append(float(np.abs(sv['g_prev']).max()))
 
         if len(iters) >= 2:
@@ -220,11 +219,6 @@ def main():
                 iters_obs    = [iters[k] for k, v in enumerate(J_obss) if v is not None]
                 ax1.plot(iters_obs, J_obss_clean,
                          'b--s', markersize=4, linewidth=1.2, label='J_obs')
-            if any(v is not None for v in J_bs):
-                J_bs_clean = [v for v in J_bs if v is not None]
-                iters_b    = [iters[k] for k, v in enumerate(J_bs) if v is not None]
-                ax1.plot(iters_b, J_bs_clean,
-                         'r--^', markersize=4, linewidth=1.2, label='J_b')
             ax1.set_ylabel('Cost  J')
             ax1.set_title('4D-Var convergence history')
             ax1.legend(fontsize=9)
