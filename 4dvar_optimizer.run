@@ -2,10 +2,10 @@
 #PBS -S /bin/bash
 #PBS -N gchp_4dvar
 #PBS -l select=1:ncpus=24:mpiprocs=24:model=bro_ele
-##PBS -l walltime=72:00:00
-##PBS -q long
-#PBS -l walltime=2:00:00
-#PBS -q debug
+#PBS -l walltime=72:00:00
+#PBS -q long
+##PBS -l walltime=2:00:00
+##PBS -q debug
 #PBS -j oe
 #PBS -W group_list=s1055
 #PBS -m bea
@@ -54,7 +54,7 @@ exec > >(tee -a "${LOG_FILE}") 2>&1
 
 # Simulation window (must match runConfig_*.sh settings)
 T_START="2019-01-01"
-T_END="2019-01-04"
+T_END="2019-01-31"
 TS_CHEM=1200                             # chemistry timestep [s]
 
 # Optimization
@@ -165,6 +165,17 @@ else
         echo "Fresh start: removing existing state file ${STATE_FILE}"
         rm -f "${STATE_FILE}"
     fi
+    # Remove per-iteration snapshots so plots don't mix iterations from
+    # different experiments.
+    _old_snaps=$(ls "${OUTPUT_DIR}"/4dvar_state_iter*.npz \
+                    "${OUTPUT_DIR}"/forcing_iter*.nc4 \
+                    "${OUTPUT_DIR}"/daily_forcing_iter*.nc4 2>/dev/null | wc -l)
+    if [ "${_old_snaps}" -gt 0 ]; then
+        echo "Fresh start: removing ${_old_snaps} old snapshot(s) from ${OUTPUT_DIR}/"
+        rm -f "${OUTPUT_DIR}"/4dvar_state_iter*.npz \
+              "${OUTPUT_DIR}"/forcing_iter*.nc4 \
+              "${OUTPUT_DIR}"/daily_forcing_iter*.nc4
+    fi
     echo "Starting fresh from sigma=1"
 fi
 
@@ -235,6 +246,13 @@ for iter in $(seq 1 "${MAX_ITER}"); do
     if [ -f "${_diag_src}" ]; then
         cp "${_diag_src}" \
            "${OUTPUT_DIR}/forcing_iter$(printf '%03d' "${iter}").nc4"
+    fi
+
+    # Archive daily mean forcing profile (always written; small file).
+    _daily_src="${FORCING_DIR}/daily_forcing_stats.nc4"
+    if [ -f "${_daily_src}" ]; then
+        cp "${_daily_src}" \
+           "${OUTPUT_DIR}/daily_forcing_iter$(printf '%03d' "${iter}").nc4"
     fi
 
     # ----------------------------------------------------------

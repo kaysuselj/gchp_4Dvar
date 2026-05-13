@@ -21,8 +21,11 @@ Usage:
   forcing_profile.png  - mean ± std adjoint forcing vs model level,
                          iteration 1 vs last  (requires forcing_iter_NNN.nc4
                          files in --output-dir, written when SAVE_DIAG=true)
-  forcing_latlon.png   - vertically averaged forcing gridded on lat-lon,
+  forcing_latlon.png   - column-integrated forcing (∑ forcing·Δm_dry) on lat-lon,
                          iteration 1 vs last
+  daily_forcing.png    - daily mean forcing per model level heatmap,
+                         iteration 1 vs last  (requires daily_forcing_iter_NNN.nc4
+                         in --output-dir, written every iteration)
 """
 
 import argparse
@@ -296,7 +299,11 @@ def plot_forcing_profile(data_first, data_last, iter_first, iter_last, plot_dir)
 
 def plot_forcing_latlon(data_first, data_last, iter_first, iter_last,
                         lats, lons, plot_dir):
-    """Vertically averaged adjoint forcing gridded on the sigma lat-lon grid.
+    """Column-integrated adjoint forcing gridded on the sigma lat-lon grid.
+
+    Vertical integration uses forcing · (Δp/g) — dry air mass per level —
+    approximated with uniform log-pressure spacing for GEOS-5 L72
+    (Ps = 984 hPa, Ptop = 0.01 hPa, standard atmosphere).
 
     Three panels: iteration 1 | last iteration | difference (last − first).
     Panels 1 and 2 share the same symmetric colour scale.
@@ -310,11 +317,21 @@ def plot_forcing_latlon(data_first, data_last, iter_first, iter_last,
                                  (lons[:-1] + lons[1:]) / 2,
                                  [lons[-1] + (lons[-1] - lons[-2]) / 2]])
 
+    # Dry air column mass per level [kg/m²] = Δp / g
+    # Log-pressure edges from surface (lev=1, ~984 hPa) to TOA (lev=72, ~0.01 hPa).
+    _nlev = next((d[2].shape[1] for d in [data_first, data_last]
+                  if d is not None), 72)
+    _Ps   = 98400.0   # Pa  (~984 hPa typical surface pressure)
+    _Ptop = 1.0       # Pa  (0.01 hPa)
+    _g    = 9.80665   # m/s²
+    _p_edges = np.exp(np.linspace(np.log(_Ps), np.log(_Ptop), _nlev + 1))
+    _dm      = np.abs(np.diff(_p_edges)) / _g   # (nlev,), lev 1 at index 0
+
     def _grid(data):
         if data is None:
             return None, 0
         lat_o, lon_o, f = data
-        vals = f.mean(axis=1)
+        vals = (f * _dm).sum(axis=1)   # column-integrated forcing [m²/kg_CO2]
         sums, _, _ = np.histogram2d(lat_o, lon_o, bins=[lat_edges, lon_edges],
                                     weights=vals)
         cnts, _, _ = np.histogram2d(lat_o, lon_o, bins=[lat_edges, lon_edges])
@@ -347,7 +364,7 @@ def plot_forcing_latlon(data_first, data_last, iter_first, iter_last,
     proj_kw = {'projection': ccrs.PlateCarree()} if HAS_CARTOPY else {}
     fig, axes = plt.subplots(1, 3, figsize=(19, 5), subplot_kw=proj_kw)
     fig.suptitle(
-        'Vertically averaged adjoint forcing  ∂J/∂CO₂  [1/(kg CO₂/kg dry air)]',
+        'Column-integrated adjoint forcing  Σ(∂J/∂CO₂ · Δm_dry)  [m²/kg CO₂]',
         fontsize=11)
 
     def _draw(ax, grid, vmin, vmax, cmap, title, n_obs):
@@ -383,6 +400,82 @@ def plot_forcing_latlon(data_first, data_last, iter_first, iter_last,
 
     plt.tight_layout()
     path = os.path.join(plot_dir, 'forcing_latlon.png')
+    plt.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f'  Saved: {path}')
+
+
+def plot_daily_forcing(snap_dir, iter_first, iter_last, plot_dir):
+    """2-panel heatmap: daily mean adjoint forcing vs model level, iter 1 vs last.
+
+    Reads daily_forcing_iter_NNN.nc4 files from snap_dir.
+    Left panel = iter_first, right panel = iter_last.
+    x-axis = calendar day, y-axis = model level (1=surface at bottom).
+    Shared symmetric colour scale across both panels.
+    """
+    if not HAS_XARRAY:
+        return
+
+    def _load(itr):
+        path = os.path.join(snap_dir,
+                            f'daily_forcing_iter{itr:03d}.nc4')
+        if not os.path.isfile(path):
+            return None, None
+        try:
+            ds  = xr.open_dataset(path)
+            mf  = ds['mean_forcing'].values.astype(float)   # (n_days, nlev)
+            dates = ds['date'].values                        # datetime64[D]
+            ds.close()
+            return mf, dates
+        except Exception as exc:
+            print(f'  WARNING: could not read {path}: {exc}')
+            return None, None
+
+    mf1, dates1 = _load(iter_first)
+    mf2, dates2 = _load(iter_last)
+
+    if mf1 is None and mf2 is None:
+        print('  No daily_forcing_iter_NNN.nc4 files found — skipping daily forcing plot.')
+        return
+
+    # Use whichever dataset is available for the date axis
+    dates = dates1 if dates1 is not None else dates2
+    day_labels = [str(np.datetime_as_string(d, unit='D')) for d in dates]
+
+    nlev = (mf1 if mf1 is not None else mf2).shape[1]
+    levs = np.arange(1, nlev + 1)
+
+    # Shared colour scale from both panels
+    valid = [m for m in [mf1, mf2] if m is not None]
+    amax  = max(np.nanmax(np.abs(m)) for m in valid)
+    amax  = max(amax, 1e-30)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharey=True)
+    fig.suptitle('Daily mean adjoint forcing ∂J/∂CO₂ per model level  '
+                 '[1/(kg CO₂/kg dry air)]', fontsize=11)
+
+    def _draw(ax, mf, itr, dates_):
+        if mf is None:
+            ax.set_title(f'Iteration {itr}\n(no data)', fontsize=10)
+            return
+        # mf : (n_days, nlev) — transpose so rows=lev, cols=day for imshow
+        im = ax.imshow(mf.T, aspect='auto', origin='lower',
+                       cmap='RdBu_r', vmin=-amax, vmax=amax,
+                       extent=[-0.5, mf.shape[0] - 0.5, 0.5, nlev + 0.5])
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04,
+                     label='∂J/∂CO₂')
+        ax.set_title(f'Iteration {itr}', fontsize=10)
+        ax.set_xlabel('Day')
+        ax.set_ylabel('Model level  (1 = surface)')
+        ax.set_xticks(range(mf.shape[0]))
+        ax.set_xticklabels(day_labels, rotation=30, ha='right', fontsize=8)
+        ax.set_ylim(0.5, nlev + 0.5)
+
+    _draw(axes[0], mf1, iter_first, dates1)
+    _draw(axes[1], mf2, iter_last,  dates2)
+
+    plt.tight_layout()
+    path = os.path.join(plot_dir, 'daily_forcing.png')
     plt.savefig(path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f'  Saved: {path}')
@@ -629,8 +722,11 @@ def main():
                                 iter_first, iter_last,
                                 lats, lons, plot_dir)
 
+            # 10. Daily mean forcing heatmap: iter 1 vs last
+            plot_daily_forcing(snap_dir, iter_first, iter_last, plot_dir)
+
     # ------------------------------------------------------------------
-    # 10. Obs time series  (reads per-checkpoint forcing files directly;
+    # 12. Obs time series  (reads per-checkpoint forcing files directly;
     #     obs count is identical every iteration — no rerun needed)
     # ------------------------------------------------------------------
     forcing_dir = args.forcing_dir

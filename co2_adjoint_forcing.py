@@ -487,6 +487,65 @@ def write_consolidated(output_path, obs_by_ckpt, levs):
 
 
 # ---------------------------------------------------------------------------
+# Daily mean forcing profile  (always written; small file)
+# ---------------------------------------------------------------------------
+
+def write_daily_forcing(output_path, obs_by_ckpt, levs, checkpoints):
+    """Write one mean forcing profile (nlev,) per calendar day.
+
+    Groups all observations by the calendar day of their checkpoint time,
+    then computes the mean forcing profile across all obs within that day.
+    The result is a 2-D array mean_forcing(n_days, nlev).
+
+    This file is always written regardless of save_diagnostics — it is small
+    (n_days × nlev × 4 bytes) and useful for comparing how the adjoint signal
+    evolves across iterations.
+    """
+    daily = {}  # date → list of (nlev,) arrays
+    for ckpt_idx, obs_list in obs_by_ckpt.items():
+        if not obs_list:
+            continue
+        t_day = pd.Timestamp(checkpoints[ckpt_idx]).normalize()
+        if t_day not in daily:
+            daily[t_day] = []
+        for _, _, force in obs_list:
+            daily[t_day].append(force)   # force is (nlev,)
+
+    if not daily:
+        print('  No observations — daily forcing file not written.')
+        return
+
+    days     = sorted(daily.keys())
+    profiles = np.array([np.array(daily[d]).mean(axis=0) for d in days],
+                        dtype=np.float32)   # (n_days, nlev)
+    n_obs_day = np.array([len(daily[d]) for d in days], dtype=np.int32)
+    dates     = np.array([np.datetime64(d.date(), 'D') for d in days])
+
+    ds = xr.Dataset(
+        {
+            'mean_forcing': (
+                ['date', 'lev'], profiles,
+                {'long_name': 'Daily mean adjoint forcing profile',
+                 'units': '1/(kg_CO2/kg_dry_air)',
+                 'comment': 'Mean of forcing(obs, lev) over all obs in the calendar day'},
+            ),
+            'n_obs': (
+                ['date'], n_obs_day,
+                {'long_name': 'Number of observations in this calendar day'},
+            ),
+        },
+        coords={'date': dates, 'lev': levs},
+    )
+    ds['lev'].attrs  = {'long_name': 'Model level (1=surface, LLPAR=TOA)'}
+    ds['date'].attrs = {'long_name': 'Calendar day (UTC)'}
+    ds.to_netcdf(output_path,
+                 encoding={'mean_forcing': {'dtype': 'float32', 'zlib': True,
+                                            'complevel': 4}})
+    print(f'  Daily forcing written: {output_path}  '
+          f'({len(days)} day(s), {n_obs_day.sum()} obs total)')
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -522,6 +581,9 @@ def co2_adjoint_forcing(gchp_file, output_dir, ts_chem_s, t_start, t_end,
     if save_diagnostics:
         diag_path = os.path.join(output_dir, 'forcing_all_obs.nc4')
         write_consolidated(diag_path, obs_by_ckpt, levs)
+
+    daily_path = os.path.join(output_dir, 'daily_forcing_stats.nc4')
+    write_daily_forcing(daily_path, obs_by_ckpt, levs, checkpoints)
 
     return J
 
