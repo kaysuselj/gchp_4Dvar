@@ -169,10 +169,12 @@ else
         rm -f "${STATE_FILE}"
     fi
     # Remove per-iteration snapshots so plots don't mix iterations from
-    # different experiments.
-    _old_snaps=$(ls "${OUTPUT_DIR}"/4dvar_state_iter*.npz \
-                    "${OUTPUT_DIR}"/forcing_iter*.nc4 \
-                    "${OUTPUT_DIR}"/daily_forcing_iter*.nc4 2>/dev/null | wc -l)
+    # different experiments.  Use find rather than ls so missing files
+    # don't trigger a non-zero exit under set -euo pipefail.
+    _old_snaps=$(find "${OUTPUT_DIR}" -maxdepth 1 \
+        \( -name '4dvar_state_iter*.npz' \
+           -o -name 'forcing_iter*.nc4' \
+           -o -name 'daily_forcing_iter*.nc4' \) 2>/dev/null | wc -l)
     if [ "${_old_snaps}" -gt 0 ]; then
         echo "Fresh start: removing ${_old_snaps} old snapshot(s) from ${OUTPUT_DIR}/"
         rm -f "${OUTPUT_DIR}"/4dvar_state_iter*.npz \
