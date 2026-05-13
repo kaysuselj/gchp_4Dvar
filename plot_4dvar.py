@@ -262,6 +262,7 @@ def plot_forcing_profile(data_first, data_last, iter_first, iter_last, plot_dir)
     fig, ax = plt.subplots(figsize=(6, 8))
     ax.set_title('Adjoint forcing profile  ∂J/∂CO₂  per model level', fontsize=11)
 
+    nlev   = next((d[2].shape[1] for d in [data_first, data_last] if d is not None), 72)
     styles = [(data_first, iter_first, 'steelblue', 'Iteration 1'),
               (data_last,  iter_last,  'crimson',   f'Iteration {iter_last}')]
 
@@ -283,7 +284,7 @@ def plot_forcing_profile(data_first, data_last, iter_first, iter_last, plot_dir)
     ax.axvline(0, color='k', linewidth=0.7, linestyle='--')
     ax.set_xlabel('∂J/∂CO₂  [1/(kg CO₂/kg dry air)]', fontsize=9)
     ax.set_ylabel('Model level  (1 = surface)', fontsize=9)
-    ax.invert_yaxis()
+    ax.set_ylim(1, nlev)
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
