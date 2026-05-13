@@ -252,50 +252,6 @@ def plot_obs_locations(lat, lon, n_iter, plot_dir):
     print(f'  Saved: {path}')
 
 
-def plot_obs_time_series(time_obs, plot_dir):
-    """Bar chart: number of observations per hour over the assimilation window.
-
-    time_obs : numpy array of datetime64 values (from time_obs field in
-               forcing_iter_NNN.nc4).  Resolution is the chemistry timestep.
-    """
-    import matplotlib.dates as mdates
-
-    # Floor to hour, count unique hours
-    times_h = time_obs.astype('datetime64[h]')
-    unique_h, counts = np.unique(times_h, return_counts=True)
-
-    # Fill gaps so bar chart shows zeros for hours with no obs
-    if len(unique_h) > 1:
-        all_hours = np.arange(unique_h[0], unique_h[-1] + np.timedelta64(1, 'h'),
-                              np.timedelta64(1, 'h'), dtype='datetime64[h]')
-        all_counts = np.zeros(len(all_hours), dtype=int)
-        idx = np.searchsorted(all_hours, unique_h)
-        all_counts[idx] = counts
-    else:
-        all_hours, all_counts = unique_h, counts
-
-    # Convert to Python datetime for matplotlib
-    dt_hours = all_hours.astype('datetime64[ms]').astype(object)
-
-    fig, ax = plt.subplots(figsize=(12, 4))
-    ax.bar(dt_hours, all_counts, width=1 / 24, align='center',
-           color='steelblue', edgecolor='white', linewidth=0.3)
-    ax.set_ylabel('Number of observations')
-    ax.set_xlabel('Time (UTC)')
-    ax.set_title('Hourly observation count over assimilation window')
-    ax.grid(True, axis='y', alpha=0.4, linewidth=0.5)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d\n%HZ'))
-    ax.xaxis.set_major_locator(mdates.HourLocator(interval=max(1, len(all_hours) // 12)))
-    total = int(all_counts.sum())
-    ax.text(0.01, 0.97, f'Total observations: {total:,}',
-            transform=ax.transAxes, fontsize=9, va='top', color='0.3')
-    plt.tight_layout()
-    path = os.path.join(plot_dir, 'obs_time_series.png')
-    plt.savefig(path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f'  Saved: {path}')
-
-
 def plot_forcing_profile(data_first, data_last, iter_first, iter_last, plot_dir):
     """Mean ± std of adjoint forcing vs model level, iteration 1 and last overlaid.
 
