@@ -120,9 +120,12 @@ rsync -a "${CTRL_ADJ_DIR}/" "${ADJ_DIR}/"
 log "Control files synced to run directories"
 
 # Read core count from GCHP.rc NOW (after rsync so we read the canonical version)
-NCORES=$(awk '/^NX[[:space:]]/ {nx=$2} /^NY[[:space:]]/ {ny=$2} END {print nx*ny}' \
-         "${FWD_DIR}/GCHP.rc")
-[ -z "${NCORES}" ] && die "Could not parse NX/NY from ${FWD_DIR}/GCHP.rc"
+# Handles both "NX 4" and "NX: 4" formats (colon optional, any surrounding whitespace).
+NCORES=$(awk -F'[[:space:]:]+' '/^NX[[:space:]:]/ {nx=$2} /^NY[[:space:]:]/ {ny=$2} \
+         END {print nx*ny}' "${FWD_DIR}/GCHP.rc")
+{ [ -z "${NCORES}" ] || [ "${NCORES}" -le 0 ]; } && \
+    die "Could not parse NX/NY from ${FWD_DIR}/GCHP.rc (got '${NCORES}'). "\
+        "Check that NX and NY are set in that file."
 log "Core count from GCHP.rc: ${NCORES}"
 
 # Check GCHP executables exist
