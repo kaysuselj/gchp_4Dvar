@@ -471,7 +471,7 @@ def write_consolidated(output_path, obs_by_ckpt, levs):
     ds = xr.Dataset(
         {
             'lat_obs': (['obs'], np.array(all_lats, dtype=np.float32),
-                        {'long_name': 'Observation latitude', 'units': 'degrees_north'}),
+                        {'long_name': 'Observation latitude',  'units': 'degrees_north'}),
             'lon_obs': (['obs'], np.array(all_lons, dtype=np.float32),
                         {'long_name': 'Observation longitude', 'units': 'degrees_east',
                          'comment': 'normalized to [-180, 180)'}),
@@ -482,8 +482,7 @@ def write_consolidated(output_path, obs_by_ckpt, levs):
         coords={'lev': levs},
     )
     ds['lev'].attrs = {'long_name': 'Model level (1=surface, LLPAR=TOA)'}
-    ds.to_netcdf(output_path,
-                 encoding={'forcing': FORCING_ENCODING})
+    ds.to_netcdf(output_path, encoding={'forcing': FORCING_ENCODING})
     print(f'  Consolidated forcing written: {output_path}  ({n_obs} obs total)')
 
 

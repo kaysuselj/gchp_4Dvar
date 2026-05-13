@@ -126,12 +126,12 @@ def plot_map(data, lats, lons, title, path,
 # -----------------------------------------------------------------------
 
 def _load_forcing_file(path):
-    """Return (lat, lon, forcing) arrays from a forcing_iter_NNN.nc4 file,
+    """Return (lat, lon, forcing) from a forcing_iter_NNN.nc4 file,
     or None if the file cannot be opened."""
     if not HAS_XARRAY:
         return None
     try:
-        ds = xr.open_dataset(path)
+        ds  = xr.open_dataset(path)
         lat = ds['lat_obs'].values.astype(float)
         lon = ds['lon_obs'].values.astype(float)
         f   = ds['forcing'].values.astype(float)   # (n_obs, nlev)
@@ -140,6 +140,83 @@ def _load_forcing_file(path):
     except Exception as exc:
         print(f'  WARNING: could not read {path}: {exc}')
         return None
+
+
+def plot_obs_time_series(forcing_dir, plot_dir):
+    """Bar chart: number of observations per hour from per-checkpoint forcing files.
+
+    Reads every CO2_adjoint_forcing_YYYYMMDD_HHMMz.nc4 in forcing_dir, parses
+    the timestamp from the filename, and counts len(lat_obs) in each file.
+    The obs count is the same every iteration, so any iteration's forcing dir
+    works.
+    """
+    import re
+    import matplotlib.dates as mdates
+
+    pattern = os.path.join(forcing_dir, 'CO2_adjoint_forcing_*.nc4')
+    files   = sorted(glob.glob(pattern))
+    if not files:
+        print(f'  No CO2_adjoint_forcing_*.nc4 files in {forcing_dir} — '
+              'obs time series skipped.')
+        return
+
+    re_ts = re.compile(r'CO2_adjoint_forcing_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})z\.nc4$')
+    times, counts = [], []
+    for fpath in files:
+        m = re_ts.search(os.path.basename(fpath))
+        if not m:
+            continue
+        yr, mo, dy, hh, mm = (int(x) for x in m.groups())
+        t = np.datetime64(f'{yr:04d}-{mo:02d}-{dy:02d}T{hh:02d}:{mm:02d}', 'ns')
+        try:
+            ds = xr.open_dataset(fpath)
+            n  = ds.sizes.get('obs', 0)
+            ds.close()
+        except Exception:
+            n = 0
+        times.append(t)
+        counts.append(n)
+
+    if not times:
+        print('  Could not parse any checkpoint files — obs time series skipped.')
+        return
+
+    times  = np.array(times,  dtype='datetime64[ns]')
+    counts = np.array(counts, dtype=int)
+
+    # Bin into hourly buckets (sum checkpoints within the same hour)
+    hours_trunc = times.astype('datetime64[h]')
+    unique_h, inv = np.unique(hours_trunc, return_inverse=True)
+    hourly_counts = np.bincount(inv, weights=counts).astype(int)
+
+    # Fill gaps so the bar chart shows zeros for quiet hours
+    if len(unique_h) > 1:
+        all_h = np.arange(unique_h[0], unique_h[-1] + np.timedelta64(1, 'h'),
+                          np.timedelta64(1, 'h'), dtype='datetime64[h]')
+        all_c = np.zeros(len(all_h), dtype=int)
+        idx = np.searchsorted(all_h, unique_h)
+        all_c[idx] = hourly_counts
+    else:
+        all_h, all_c = unique_h, hourly_counts
+
+    dt_hours = all_h.astype('datetime64[ms]').astype(object)
+
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.bar(dt_hours, all_c, width=1 / 24, align='center',
+           color='steelblue', edgecolor='white', linewidth=0.3)
+    ax.set_ylabel('Number of observations')
+    ax.set_xlabel('Time (UTC)')
+    ax.set_title('Hourly observation count over assimilation window')
+    ax.grid(True, axis='y', alpha=0.4, linewidth=0.5)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d\n%HZ'))
+    ax.xaxis.set_major_locator(mdates.HourLocator(interval=max(1, len(all_h) // 12)))
+    ax.text(0.01, 0.97, f'Total: {int(all_c.sum()):,} obs  |  {len(files)} checkpoints',
+            transform=ax.transAxes, fontsize=9, va='top', color='0.3')
+    plt.tight_layout()
+    path = os.path.join(plot_dir, 'obs_time_series.png')
+    plt.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f'  Saved: {path}')
 
 
 def plot_obs_locations(lat, lon, n_iter, plot_dir):
@@ -175,39 +252,84 @@ def plot_obs_locations(lat, lon, n_iter, plot_dir):
     print(f'  Saved: {path}')
 
 
-def plot_forcing_profile(data_first, data_last, plot_dir):
-    """Mean ± std of adjoint forcing vs model level for iteration 1 and last.
+def plot_obs_time_series(time_obs, plot_dir):
+    """Bar chart: number of observations per hour over the assimilation window.
 
-    data_first / data_last : (lat, lon, forcing) tuples from _load_forcing_file.
-    forcing shape: (n_obs, nlev)  level 0 = surface, level nlev-1 = TOA.
+    time_obs : numpy array of datetime64 values (from time_obs field in
+               forcing_iter_NNN.nc4).  Resolution is the chemistry timestep.
     """
-    fig, axes = plt.subplots(1, 2, figsize=(10, 7), sharey=True)
-    fig.suptitle('Adjoint forcing profile  ∂J/∂CO₂  per model level', fontsize=12)
+    import matplotlib.dates as mdates
 
-    datasets = [('Iteration 1',    data_first),
-                ('Last iteration', data_last)]
+    # Floor to hour, count unique hours
+    times_h = time_obs.astype('datetime64[h]')
+    unique_h, counts = np.unique(times_h, return_counts=True)
 
-    for ax, (label, data) in zip(axes, datasets):
+    # Fill gaps so bar chart shows zeros for hours with no obs
+    if len(unique_h) > 1:
+        all_hours = np.arange(unique_h[0], unique_h[-1] + np.timedelta64(1, 'h'),
+                              np.timedelta64(1, 'h'), dtype='datetime64[h]')
+        all_counts = np.zeros(len(all_hours), dtype=int)
+        idx = np.searchsorted(all_hours, unique_h)
+        all_counts[idx] = counts
+    else:
+        all_hours, all_counts = unique_h, counts
+
+    # Convert to Python datetime for matplotlib
+    dt_hours = all_hours.astype('datetime64[ms]').astype(object)
+
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.bar(dt_hours, all_counts, width=1 / 24, align='center',
+           color='steelblue', edgecolor='white', linewidth=0.3)
+    ax.set_ylabel('Number of observations')
+    ax.set_xlabel('Time (UTC)')
+    ax.set_title('Hourly observation count over assimilation window')
+    ax.grid(True, axis='y', alpha=0.4, linewidth=0.5)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d\n%HZ'))
+    ax.xaxis.set_major_locator(mdates.HourLocator(interval=max(1, len(all_hours) // 12)))
+    total = int(all_counts.sum())
+    ax.text(0.01, 0.97, f'Total observations: {total:,}',
+            transform=ax.transAxes, fontsize=9, va='top', color='0.3')
+    plt.tight_layout()
+    path = os.path.join(plot_dir, 'obs_time_series.png')
+    plt.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f'  Saved: {path}')
+
+
+def plot_forcing_profile(data_first, data_last, iter_first, iter_last, plot_dir):
+    """Mean ± std of adjoint forcing vs model level, iteration 1 and last overlaid.
+
+    Blue = iteration 1,  red = last iteration.  Shading is ±1 std, alpha=0.20.
+    data_first / data_last : (lat, lon, forcing, time) tuples or None.
+    forcing shape : (n_obs, nlev),  level index 0 = surface, nlev-1 = TOA.
+    """
+    fig, ax = plt.subplots(figsize=(6, 8))
+    ax.set_title('Adjoint forcing profile  ∂J/∂CO₂  per model level', fontsize=11)
+
+    styles = [(data_first, iter_first, 'steelblue', 'Iteration 1'),
+              (data_last,  iter_last,  'crimson',   f'Iteration {iter_last}')]
+
+    for data, it, color, label in styles:
         if data is None:
-            ax.set_title(f'{label}\n(no data)', fontsize=10)
             continue
-        _, _, f = data                    # f: (n_obs, nlev)
-        nlev    = f.shape[1]
-        levs    = np.arange(1, nlev + 1)  # 1=surface ... nlev=TOA
-        mean_f  = f.mean(axis=0)
-        std_f   = f.std(axis=0)
+        _, _, f = data                  # f: (n_obs, nlev)
+        nlev   = f.shape[1]
+        levs   = np.arange(1, nlev + 1)
+        mean_f = f.mean(axis=0)
+        std_f  = f.std(axis=0)
+        n_obs  = f.shape[0]
 
-        ax.plot(mean_f, levs, 'b-', linewidth=1.5, label='mean')
+        ax.plot(mean_f, levs, color=color, linewidth=1.8,
+                label=f'{label}  (N={n_obs:,})')
         ax.fill_betweenx(levs, mean_f - std_f, mean_f + std_f,
-                         alpha=0.25, color='blue', label='±1 std')
-        ax.axvline(0, color='k', linewidth=0.6, linestyle='--')
-        ax.set_xlabel('∂J/∂CO₂  [1/(kg CO₂/kg dry air)]', fontsize=9)
-        ax.set_title(f'{label}\n(N={f.shape[0]:,} obs)', fontsize=10)
-        ax.legend(fontsize=8)
-        ax.grid(True, alpha=0.3)
-        ax.invert_yaxis()   # surface at bottom
+                         alpha=0.20, color=color)
 
-    axes[0].set_ylabel('Model level  (1 = surface)', fontsize=9)
+    ax.axvline(0, color='k', linewidth=0.7, linestyle='--')
+    ax.set_xlabel('∂J/∂CO₂  [1/(kg CO₂/kg dry air)]', fontsize=9)
+    ax.set_ylabel('Model level  (1 = surface)', fontsize=9)
+    ax.invert_yaxis()
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
     plt.tight_layout()
     path = os.path.join(plot_dir, 'forcing_profile.png')
     plt.savefig(path, dpi=150, bbox_inches='tight')
@@ -215,25 +337,30 @@ def plot_forcing_profile(data_first, data_last, plot_dir):
     print(f'  Saved: {path}')
 
 
-def plot_forcing_latlon(data_first, data_last, lats, lons, plot_dir):
-    """Vertically averaged adjoint forcing gridded on the sigma lat-lon grid,
-    for iteration 1 and last iteration side by side."""
-    nlat, nlon  = len(lats), len(lons)
-    lat_edges   = np.concatenate([[lats[0]  - (lats[1]  - lats[0])  / 2],
-                                  (lats[:-1] + lats[1:]) / 2,
-                                  [lats[-1] + (lats[-1] - lats[-2]) / 2]])
-    lon_edges   = np.concatenate([[lons[0]  - (lons[1]  - lons[0])  / 2],
-                                  (lons[:-1] + lons[1:]) / 2,
-                                  [lons[-1] + (lons[-1] - lons[-2]) / 2]])
+def plot_forcing_latlon(data_first, data_last, iter_first, iter_last,
+                        lats, lons, plot_dir):
+    """Vertically averaged adjoint forcing gridded on the sigma lat-lon grid.
+
+    Three panels: iteration 1 | last iteration | difference (last − first).
+    Panels 1 and 2 share the same symmetric colour scale.
+    The difference panel uses a separate symmetric scale centred on zero.
+    """
+    nlat, nlon = len(lats), len(lons)
+    lat_edges  = np.concatenate([[lats[0]  - (lats[1]  - lats[0])  / 2],
+                                 (lats[:-1] + lats[1:]) / 2,
+                                 [lats[-1] + (lats[-1] - lats[-2]) / 2]])
+    lon_edges  = np.concatenate([[lons[0]  - (lons[1]  - lons[0])  / 2],
+                                 (lons[:-1] + lons[1:]) / 2,
+                                 [lons[-1] + (lons[-1] - lons[-2]) / 2]])
 
     def _grid(data):
         if data is None:
-            return None, None
+            return None, 0
         lat_o, lon_o, f = data
-        vals = f.mean(axis=1)           # vertical mean per obs → (n_obs,)
-        sums, _, _  = np.histogram2d(lat_o, lon_o, bins=[lat_edges, lon_edges],
-                                     weights=vals)
-        cnts, _, _  = np.histogram2d(lat_o, lon_o, bins=[lat_edges, lon_edges])
+        vals = f.mean(axis=1)
+        sums, _, _ = np.histogram2d(lat_o, lon_o, bins=[lat_edges, lon_edges],
+                                    weights=vals)
+        cnts, _, _ = np.histogram2d(lat_o, lon_o, bins=[lat_edges, lon_edges])
         with np.errstate(invalid='ignore'):
             grid = np.where(cnts > 0, sums / cnts, np.nan)
         return grid, int(cnts.sum())
@@ -241,45 +368,61 @@ def plot_forcing_latlon(data_first, data_last, lats, lons, plot_dir):
     grid1, n1 = _grid(data_first)
     grid2, n2 = _grid(data_last)
 
-    grids = [g for g in [grid1, grid2] if g is not None]
-    if not grids:
+    if grid1 is None and grid2 is None:
         print('  No forcing data available for lat-lon plot — skipping.')
         return
-    amax = max(np.nanmax(np.abs(g)) for g in grids)
-    amax = max(amax, 1e-30)
+
+    # Shared scale for panels 1 & 2
+    valid = [g for g in [grid1, grid2] if g is not None]
+    amax  = max(np.nanmax(np.abs(g)) for g in valid)
+    amax  = max(amax, 1e-30)
+
+    # Difference panel (last − first) and its independent scale
+    if grid1 is not None and grid2 is not None:
+        diff  = grid2 - grid1
+        dmax  = np.nanmax(np.abs(diff))
+        dmax  = max(dmax, 1e-30)
+    else:
+        diff, dmax = None, 1.0
 
     lon2d, lat2d = np.meshgrid(lons, lats)
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5),
-                             subplot_kw={'projection': ccrs.PlateCarree()}
-                             if HAS_CARTOPY else {})
-    fig.suptitle('Vertically averaged adjoint forcing  ∂J/∂CO₂  [1/(kg CO₂/kg dry air)]',
-                 fontsize=11)
 
-    panels = [('Iteration 1',    grid1, n1),
-              ('Last iteration', grid2, n2)]
+    proj_kw = {'projection': ccrs.PlateCarree()} if HAS_CARTOPY else {}
+    fig, axes = plt.subplots(1, 3, figsize=(19, 5), subplot_kw=proj_kw)
+    fig.suptitle(
+        'Vertically averaged adjoint forcing  ∂J/∂CO₂  [1/(kg CO₂/kg dry air)]',
+        fontsize=11)
 
-    for ax, (label, grid, n_obs) in zip(axes, panels):
+    def _draw(ax, grid, vmin, vmax, cmap, title, n_obs):
         if grid is None:
-            ax.set_title(f'{label}\n(no data)', fontsize=10)
-            continue
+            ax.set_title(f'{title}\n(no data)', fontsize=10)
+            return
         if HAS_CARTOPY:
             _add_land(ax)
-            im = ax.pcolormesh(lon2d, lat2d, grid,
-                               cmap='RdBu_r', vmin=-amax, vmax=amax,
-                               shading='auto', transform=ccrs.PlateCarree(), zorder=1)
+            im = ax.pcolormesh(lon2d, lat2d, grid, cmap=cmap,
+                               vmin=vmin, vmax=vmax, shading='auto',
+                               transform=ccrs.PlateCarree(), zorder=1)
             ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
             _set_ticks(ax)
             ax.gridlines(alpha=0.3, linewidth=0.5, draw_labels=False)
         else:
-            im = ax.pcolormesh(lon2d, lat2d, grid,
-                               cmap='RdBu_r', vmin=-amax, vmax=amax, shading='auto')
+            im = ax.pcolormesh(lon2d, lat2d, grid, cmap=cmap,
+                               vmin=vmin, vmax=vmax, shading='auto')
             ax.set_xlabel('Longitude')
             ax.set_ylabel('Latitude')
             ax.set_xticks(range(-180, 181, 60))
             ax.set_yticks(range(-90,   91, 30))
             ax.grid(True, alpha=0.3, linewidth=0.5)
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        ax.set_title(f'{label}  (N={n_obs:,} obs)', fontsize=10)
+        lbl = f'{title}  (N={n_obs:,})' if n_obs else title
+        ax.set_title(lbl, fontsize=10)
+
+    _draw(axes[0], grid1, -amax, amax, 'RdBu_r',
+          f'Iteration {iter_first}', n1)
+    _draw(axes[1], grid2, -amax, amax, 'RdBu_r',
+          f'Iteration {iter_last}', n2)
+    _draw(axes[2], diff,  -dmax, dmax, 'PiYG',
+          f'Difference  (iter {iter_last} − iter {iter_first})', 0)
 
     plt.tight_layout()
     path = os.path.join(plot_dir, 'forcing_latlon.png')
@@ -298,8 +441,11 @@ def main():
     parser.add_argument('--state-file',  required=True,
                         help='Path to 4dvar_state.npz')
     parser.add_argument('--output-dir',  default=None,
-                        help='Directory with 4dvar_state_iter_NNN.npz snapshots '
-                             '(for convergence plot)')
+                        help='Directory with 4dvar_state_iter_NNN.npz and '
+                             'forcing_iter_NNN.nc4 snapshots')
+    parser.add_argument('--forcing-dir', default=None,
+                        help='Directory containing CO2_adjoint_forcing_*.nc4 files '
+                             '(for obs time series plot)')
     parser.add_argument('--plot-dir',    default=None,
                         help='Where to save PNGs (default: same dir as state file)')
     parser.add_argument('--nlat', type=int, default=None,
@@ -511,16 +657,30 @@ def main():
             print(f'  Forcing files found: {len(forcing_files)}  '
                   f'(iter {iter_first} … {iter_last})')
 
-            # 7. Observation locations  (use first-iteration file)
+            # 7. Observation locations  (use first-iteration file; locations
+            #    are the same every iteration since the obs dataset is fixed)
             if data_first is not None:
                 plot_obs_locations(data_first[0], data_first[1],
                                    iter_first, plot_dir)
 
-            # 8. Forcing profile: mean ± std vs model level
-            plot_forcing_profile(data_first, data_last, plot_dir)
+            # 8. Forcing profile: mean ± std vs model level, overlaid
+            plot_forcing_profile(data_first, data_last,
+                                 iter_first, iter_last, plot_dir)
 
-            # 9. Forcing lat-lon map (vertically averaged)
-            plot_forcing_latlon(data_first, data_last, lats, lons, plot_dir)
+            # 9. Forcing lat-lon map (vertically averaged), 3 panels
+            plot_forcing_latlon(data_first, data_last,
+                                iter_first, iter_last,
+                                lats, lons, plot_dir)
+
+    # ------------------------------------------------------------------
+    # 10. Obs time series  (reads per-checkpoint forcing files directly;
+    #     obs count is identical every iteration — no rerun needed)
+    # ------------------------------------------------------------------
+    forcing_dir = args.forcing_dir
+    if forcing_dir and os.path.isdir(forcing_dir):
+        plot_obs_time_series(forcing_dir, plot_dir)
+    elif forcing_dir:
+        print(f'  WARNING: --forcing-dir not found: {forcing_dir}')
 
 
 if __name__ == '__main__':
