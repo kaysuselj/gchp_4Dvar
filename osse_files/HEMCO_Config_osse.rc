@@ -872,8 +872,8 @@ Mask fractions:              false
 )))FOSSIL_CDIAC
 
 (((FOSSIL_ODIAC
-# Fossil fuel emissions from FF_regrid2 (sim.template line 79: hourly)
-0 FOSSILCO2_ODIAC /nobackupp17/jliu7/INVENTORY/V4/Fossilfuel/FF_regrid2/FF_$YYYY$MM$DD$HH.nc CO2 2014-2023/1-12/1-31/0-23 C xy kg/m2/s CO2 750 1 500
+# Fossil fuel emissions from FF_regrid2 (daily files in YYYY/MM/ subdirs)
+0 FOSSILCO2_ODIAC /nobackupp17/jliu7/INVENTORY/V4/Fossilfuel/FF_regrid2/$YYYY/$MM/$DD.nc CO2 2014-2023/1-12/1-31/0-23 C xy kg/m2/s CO2 750 1 500
 )))FOSSIL_ODIAC
 
 #==============================================================================
@@ -895,8 +895,8 @@ Mask fractions:              false
 )))OCEAN_EXCH_SCALED
 
 (((OCEAN_ECCO_DARWIN
-# Ocean biosphere from ECCO-Darwin-MON-v05 (sim.template line 84: monthly)
-0 OCEAN_ECCO_DARWIN /nobackupp17/jliu7/INVENTORY/V4/Ocean/ECCO-Darwin-MON-v05/ECCO_Darwin_$YYYY$MM.nc CO2 2014-2023/1-12/1/0 C xy kg/m2/s CO2 750 2 500
+# Ocean biosphere from ECCO-Darwin-MON-v05 (sim.template line 84: monthly files in YYYY/ subdirs)
+0 OCEAN_ECCO_DARWIN /nobackupp17/jliu7/INVENTORY/V4/Ocean/ECCO-Darwin-MON-v05/$YYYY/$MM.nc CO2 2014-2023/1-12/1/0 C xy kg/m2/s CO2 750 2 500
 )))OCEAN_ECCO_DARWIN
 
 #==============================================================================
@@ -932,8 +932,8 @@ Mask fractions:              false
 )))NET_TERR_EXCH
 
 (((NBE_CARDAMOM
-# Net Biosphere Exchange from CARDAMOM-ECCO (Biosphere in sim.template line 83)
-0 NBE_CARDAMOM   /nobackupp17/jliu7/INVENTORY/V4/Balbio/CARDAMOM-ECCO/CARDAMOM_$YYYY$MM$DD$HH.nc CO2 2014-2023/1-12/1-31/0-23 C xy kg/m2/s CO2 750 3 500
+# Net Biosphere Exchange from CARDAMOM-ECCO (Biosphere in sim.template line 83: daily files in YYYY/MM/ subdirs)
+0 NBE_CARDAMOM   /nobackupp17/jliu7/INVENTORY/V4/Balbio/CARDAMOM-ECCO/$YYYY/$MM/$DD.nc CO2 2014-2023/1-12/1-31/0 C xy kg/m2/s CO2 750 3 500
 )))NBE_CARDAMOM
 
 #==============================================================================
@@ -942,7 +942,8 @@ Mask fractions:              false
 # From sim.template line 84: GPP ORCHIDEE monthly
 #==============================================================================
 (((GPP_ORCHIDEE
-0 GPP_ORCHIDEE   /nobackupp17/jliu7/INVENTORY/V4/GPP/ORCHIDEE/ORCHIDEE_GPP_$YYYY$MM.nc CO2 2014-2023/1-12/1/0 C xy kg/m2/s CO2 750 4 500
+# GPP from ORCHIDEE (sim.template line 84: monthly files in YYYY/ subdirs)
+0 GPP_ORCHIDEE   /nobackupp17/jliu7/INVENTORY/V4/GPP/ORCHIDEE/$YYYY/$MM.nc CO2 2014-2023/1-12/1/0 C xy kg/m2/s CO2 750 4 500
 )))GPP_ORCHIDEE
 
 #==============================================================================
@@ -952,7 +953,8 @@ Mask fractions:              false
 # This is the adjoint-optimized component (adjId=1)
 #==============================================================================
 (((TER_CLASS_CTEM
-0 TER_CLASS_CTEM /nobackupp17/jliu7/INVENTORY/V4/TER2/CLASS-CTEM/CLASS_CTEM_TER_$YYYY$MM.nc CO2 2014-2023/1-12/1/0 C xy kg/m2/s CO2 750 5 500
+# TER from CLASS-CTEM (sim.template line 85: monthly files in YYYY/ subdirs)
+0 TER_CLASS_CTEM /nobackupp17/jliu7/INVENTORY/V4/TER2/CLASS-CTEM/$YYYY/$MM.nc CO2 2014-2023/1-12/1/0 C xy kg/m2/s CO2 750 5 500
 )))TER_CLASS_CTEM
 
 #==============================================================================

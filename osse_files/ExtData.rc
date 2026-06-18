@@ -393,14 +393,14 @@ CEDS_CO_SHP  kg/m2/s N Y F%y4-%m2-01T00:00:00 none none CO_shp  ./HcoDir/CEDS/v2
 # --- CO2 emissions ---
 #==============================================================================
 
-# --- CO2 Fossil Fuel (FF_regrid2 from sim.template) ---
-FOSSILCO2_ODIAC  kg/m2/s N Y F%y4-%m2-%d2T%h2:00:00 none none CO2 /nobackupp17/jliu7/INVENTORY/V4/Fossilfuel/FF_regrid2/FF_%y4%m2%d2%h2.nc
+# --- CO2 Fossil Fuel (FF_regrid2 from sim.template - daily files in YYYY/MM/ subdirs) ---
+FOSSILCO2_ODIAC  kg/m2/s N Y F%y4-%m2-%d2T%h2:00:00 none none CO2 /nobackupp17/jliu7/INVENTORY/V4/Fossilfuel/FF_regrid2/%y4/%m2/%d2.nc
 
 # --- CO2 Ocean Exchange (OLD - not used in OSSE) ---
 #OCEANCO2_SCALED_MONTHLY kg/m2/s N  Y F%y4-%m2-01T00:00:00 none none CO2 ./HcoDir/CO2/v2022-11/OCEAN/Scaled_Ocean_CO2_monthly.nc
 
-# --- CO2 Ocean Exchange ECCO DARWIN (ECCO-Darwin-MON-v05 from sim.template) ---
-OCEAN_ECCO_DARWIN  kg/m2/s N Y F%y4-%m2-01T00:00:00 none none CO2 /nobackupp17/jliu7/INVENTORY/V4/Ocean/ECCO-Darwin-MON-v05/ECCO_Darwin_%y4%m2.nc
+# --- CO2 Ocean Exchange ECCO DARWIN (ECCO-Darwin-MON-v05 from sim.template - monthly files in YYYY/ subdirs) ---
+OCEAN_ECCO_DARWIN  kg/m2/s N Y F%y4-%m2-01T00:00:00 none none CO2 /nobackupp17/jliu7/INVENTORY/V4/Ocean/ECCO-Darwin-MON-v05/%y4/%m2.nc
 
 # --- Balanced biosphere exchange ---
 SIB_BBIO_CO2 kg/m2/s N Y F%y4-%m2-%d2T%h2:00:00 none none CO2 ./HcoDir/CO2/v2022-11/BIO/SiB3_3hr_NEP.nc
@@ -408,14 +408,14 @@ SIB_BBIO_CO2 kg/m2/s N Y F%y4-%m2-%d2T%h2:00:00 none none CO2 ./HcoDir/CO2/v2022
 # --- Net Terrestrial Exchange ---
 CO2_NET_TERRESTRIAL kg/m2/s N Y - none none CO2 ./HcoDir/CO2/v2022-11/BIO/Net_terrestrial_exch_5.29Pg.generic.1x1.nc
 
-# --- CARDAMOM prior fluxes (CARDAMOM-ECCO from sim.template) ---
-NBE_CARDAMOM  kg/m2/s N Y F%y4-%m2-%d2T%h2:00:00 none none CO2 /nobackupp17/jliu7/INVENTORY/V4/Balbio/CARDAMOM-ECCO/CARDAMOM_%y4%m2%d2%h2.nc
+# --- CARDAMOM prior fluxes (CARDAMOM-ECCO from sim.template - daily files in YYYY/MM/ subdirs) ---
+NBE_CARDAMOM  kg/m2/s N Y F%y4-%m2-%d2T00:00:00 none none CO2 /nobackupp17/jliu7/INVENTORY/V4/Balbio/CARDAMOM-ECCO/%y4/%m2/%d2.nc
 
-# --- GPP (Gross Primary Production from ORCHIDEE) ---
-GPP_ORCHIDEE  kg/m2/s N Y F%y4-%m2-01T00:00:00 none none CO2 /nobackupp17/jliu7/INVENTORY/V4/GPP/ORCHIDEE/ORCHIDEE_GPP_%y4%m2.nc
+# --- GPP (Gross Primary Production from ORCHIDEE - monthly files in YYYY/ subdirs) ---
+GPP_ORCHIDEE  kg/m2/s N Y F%y4-%m2-01T00:00:00 none none CO2 /nobackupp17/jliu7/INVENTORY/V4/GPP/ORCHIDEE/%y4/%m2.nc
 
-# --- TER (Terrestrial Ecosystem Respiration from CLASS-CTEM) ---
-TER_CLASS_CTEM  kg/m2/s N Y F%y4-%m2-01T00:00:00 none none CO2 /nobackupp17/jliu7/INVENTORY/V4/TER2/CLASS-CTEM/CLASS_CTEM_TER_%y4%m2.nc
+# --- TER (Terrestrial Ecosystem Respiration from CLASS-CTEM - monthly files in YYYY/ subdirs) ---
+TER_CLASS_CTEM  kg/m2/s N Y F%y4-%m2-01T00:00:00 none none CO2 /nobackupp17/jliu7/INVENTORY/V4/TER2/CLASS-CTEM/%y4/%m2.nc
 
 # --- CO2 Ship Emissions ---
 CEDS_CO2_SHP kg/m2/s N Y F%y4-%m2-01T00:00:00 none none CO2_shp ./HcoDir/CEDS/v2021-06/%y4/CO2-em-anthro_CMIP_CEDS_%y4.nc
