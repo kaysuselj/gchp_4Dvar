@@ -263,10 +263,10 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s):
     """
     Load GCHP sat-track file, apply obs operator, and collect per-obs forcing.
 
-    Each GCHP profile is matched to the nearest OCO-2 observation by time
-    (within OBS_MATCH_TOL).  Forcing is accumulated per observation, with
-    longitude normalized to [-180, 180).  No intermediate lat/lon grid is used;
-    Fortran does the nearest-cell assignment directly on the cubed sphere.
+    Each GCHP profile is matched to the nearest OCO-2 observation by time,
+    lat, and lon (within tolerances).  Forcing is accumulated per observation,
+    with longitude normalized to [-180, 180).  No intermediate lat/lon grid is
+    used; Fortran does the nearest-cell assignment directly on the cubed sphere.
 
     Returns
     -------
@@ -274,10 +274,18 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s):
     obs_by_ckpt  : dict {ckpt_idx: [(lat, lon, force_profile), ...]}
     levs         : model level coordinate array
     """
-    OBS_MATCH_TOL = pd.Timedelta(seconds=60)
+    OBS_MATCH_TOL_TIME = pd.Timedelta(seconds=60)  # 60 seconds
+    OBS_MATCH_TOL_LAT  = 0.1   # degrees latitude
+    OBS_MATCH_TOL_LON  = 0.1   # degrees longitude
 
     ds_gchp = xr.open_dataset(gchp_file)
     ds_gchp['time'] = pd.to_datetime(ds_gchp['time'].values).round('s')
+
+    # Check if GCHP file has lat/lon coordinates
+    if 'latitude' not in ds_gchp and 'lat' not in ds_gchp:
+        raise ValueError('GCHP sat-track file must contain latitude coordinate')
+    if 'longitude' not in ds_gchp and 'lon' not in ds_gchp:
+        raise ValueError('GCHP sat-track file must contain longitude coordinate')
 
     nlev = ds_gchp.sizes['lev']
     levs = ds_gchp['lev'].values
@@ -300,6 +308,8 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s):
     # Only read OCO-2 months that are actually needed
     year_months = sorted(set(zip(times_win.year, times_win.month)))
     total = 0
+    n_time_rejected = 0
+    n_spatial_rejected = 0
 
     for year, month in year_months:
         print(f'Processing {year}-{month:02d}')
@@ -311,6 +321,17 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s):
         co2_mod      = ds_mod['SpeciesConcVV_CO2'].transpose('time', 'lev').values  # (n_gchp, nlev)
         prs_mod      = ds_mod['Met_PMIDDRY'].transpose('time', 'lev').values         # (n_gchp, nlev)
 
+        # Get GCHP lat/lon (handle both 'latitude'/'longitude' and 'lat'/'lon' naming)
+        if 'latitude' in ds_mod:
+            gchp_lats_m = ds_mod['latitude'].values
+            gchp_lons_m = ds_mod['longitude'].values
+        else:
+            gchp_lats_m = ds_mod['lat'].values
+            gchp_lons_m = ds_mod['lon'].values
+
+        # Normalize GCHP longitudes to [0, 360) to match OCO-2
+        gchp_lons_m = gchp_lons_m % 360
+
         ds_obs = read_oco_monthly(year, month, FOLD_OBS)
         if ds_obs is None:
             print('  No OCO-2 data, skipping')
@@ -318,7 +339,7 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s):
 
         obs_times    = pd.DatetimeIndex(ds_obs['time'].values)
         obs_lats     = ds_obs['latitude'].values
-        obs_lons     = ds_obs['longitude'].values
+        obs_lons     = ds_obs['longitude'].values % 360  # Ensure [0, 360) for matching
         prs_obs_all  = ds_obs['pressure'].values           # (n_obs, nlev_sat)
         xAK_all      = ds_obs['xCO2-averagingKernel'].values
         co2_apr_all  = ds_obs['CO2-apriori'].values
@@ -333,13 +354,40 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s):
             print('  WARNING: no uncertainty variable found, using 1 ppm')
             xco2_std_all = np.ones(len(obs_times))
 
-        # Loop over GCHP profiles; match each to an OCO-2 obs by time
+        # Loop over GCHP profiles; match each to an OCO-2 obs by time, lat, lon
         for j in range(len(gchp_times_m)):
-            t_gchp  = gchp_times_m[j]
-            deltas  = np.abs(obs_times - t_gchp)
-            idx_obs = int(deltas.argmin())
-            if deltas[idx_obs] > OBS_MATCH_TOL:
+            t_gchp   = gchp_times_m[j]
+            lat_gchp = gchp_lats_m[j]
+            lon_gchp = gchp_lons_m[j]
+
+            # Find observations that match in time
+            time_deltas = np.abs(obs_times - t_gchp)
+            time_mask   = time_deltas <= OBS_MATCH_TOL_TIME
+
+            if not np.any(time_mask):
+                n_time_rejected += 1
                 continue
+
+            # Among time-matched obs, find the closest in lat/lon
+            time_matched_idx = np.where(time_mask)[0]
+            lat_diffs = np.abs(obs_lats[time_matched_idx] - lat_gchp)
+            lon_diffs = np.abs(obs_lons[time_matched_idx] - lon_gchp)
+
+            # Handle longitude wrapping: minimum of |lon1-lon2| and 360-|lon1-lon2|
+            lon_diffs = np.minimum(lon_diffs, 360 - lon_diffs)
+
+            # Combined spatial distance
+            spatial_dist = np.sqrt(lat_diffs**2 + lon_diffs**2)
+            min_spatial_idx = spatial_dist.argmin()
+
+            # Check if the closest match is within tolerances
+            if (lat_diffs[min_spatial_idx] > OBS_MATCH_TOL_LAT or
+                lon_diffs[min_spatial_idx] > OBS_MATCH_TOL_LON):
+                n_spatial_rejected += 1
+                continue
+
+            # Map back to original observation index
+            idx_obs = time_matched_idx[min_spatial_idx]
 
             prs_mod_j = prs_mod[j]            # (nlev,)
             co2_mod_j = co2_mod[j]            # (nlev,)
@@ -383,6 +431,8 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s):
     n_with_obs = sum(1 for obs_list in obs_by_ckpt.values() if obs_list)
     print(f'Total observations matched: {total}  '
           f'({n_with_obs}/{n_ckpt} checkpoints have at least one obs)')
+    print(f'Rejected by time tolerance: {n_time_rejected}')
+    print(f'Rejected by spatial tolerance: {n_spatial_rejected}')
     print(f'Cost function J = {J_total:.6e}')
 
     return checkpoints, obs_by_ckpt, levs, J_total
