@@ -1,0 +1,136 @@
+GEOS-CHEM SIMULATION v8-01-01: GEOS-5 1-month benchmark
+------------------------+------------------------------------------------------
+%%% SIMULATION MENU %%% :
+Start YYYYMMDD, HHMMSS  : SSSSSSSS 000000
+End   YYYYMMDD, HHMMSS  : EEEEEEEE 000000
+Restart file in         : Restart/restart.YYYYMMDD.nc
+Save restart file?      : {SRST}
+Restart file out        : Restart/restart.YYYYMMDD.nc
+Root data directory     : /nobackupp11/jliu7/GEOS_4x5
+GEOS     subdir         : MERRA2/YYYY/MM/
+1x1 deg Data dir        : /nobackupp11/jliu7/GEOS_1x1
+Tracer name             : {TRNAME}
+Configuratin file       : input.ghgF
+------------------------+------------------------------------------------------
+%%% TRANSPORT MENU %%%  :
+Turn on Transport       : T
+ => Use Flux Correction?: T
+ => Fill Negative Values: T 
+ => IORD, JORD, KORD    : 3 3 7
+Transport Timestep [min]: 30 
+------------------------+------------------------------------------------------
+%%% CONVECTION MENU %%% :
+Turn on Cloud Conv?     : T
+Turn on PBL Mixing?     : T
+Convect Timestep (min)  : 30 
+------------------------+------------------------------------------------------
+%%% NESTED GRID MENU %%%
+Save BC?                : F
+BC Timestep?            : 180 
+BC Resolution 4x5?      : F
+BC Resolution 2x2.5?    : T
+Over North America?     : F BC_NA/
+Over Europr ?           : F BC_EU/
+Over China ?            : F BC_CH
+Over South America?     : F BC_SA
+------------------------+------------------------------------------------------
+%%% UNIX CMDS MENU %%%  :
+Background symbol       : &
+Redirect symbol         :  >
+Unix remove command     : rm -f
+Unix pathname separator : /
+Unix wildcard character : *
+Unix unzip command      : gzip -dc
+Zip file suffix         : .gz
+------------------------+------------------------------------------------------
+%%% DIAGNOSTICS MENU %%%
+Time step (hr)          : 3
+Profile concentration?  : T
+  Fixed pressure level? : F
+  Ref. pressure(hPa)    : 1000.0
+Column concentration?   : T
+  level range           : 1 47
+Instantaneous output?   : F I3/
+Daily Average output?   : F Daily/
+Monthly Average output? : F Monthly/
+------------------------+------------------------------------------------------
+%%% OUTPUT MENU %%%     : 123456789.123456789.123456789.1--1=ZERO+2=BPCH
+Schedule output for JAN : 3330300000000030000000000000000
+Schedule output for FEB : 30000000000000300000000000000
+Schedule output for MAR : 3000000000000030000000000000000
+Schedule output for APR : 300000000000003000000000000003
+Schedule output for MAY : 3000000000000030000000000000003
+Schedule output for JUN : 303000000000003000000000000003
+Schedule output for JUL : 3000000000000030000000000000000
+Schedule output for AUG : 3000000000000030000000000000000
+Schedule output for SEP : 300000000000003000000000000000
+Schedule output for OCT : 3000000000000030000000000000000
+Schedule output for NOV : 300000000000003000000000000000
+Schedule output for DEC : 3000000000000030000000000000003
+------------------------+------------------------------------------------------
+%%% CMS CO2 EMISSIONS MENU %%% :
+Emission time step      : 60
+Archived CO directory   : /nobackup/mlee7/CMSF/CO/Res_4x5/Prior/ {YEAR}
+Archived OH directory   : TBD
+Emission directory      : /nobackupp11/jliu7/INVENTORY/V4/
+Climatology Emission?   : F 2015
+No. Emissions           : 7
+Emission entries -------: fwd? adj? adjId  SF   timeRes.     type       model
+1. Fossilfuel           :  T    F     0    1.0  YYYYMMDDHH  Fossilfuel   FF_regrid2
+2. Biofuel              :  F    F     0    1.0  YYYYMM0000  Biofuel      CASA-GFED3-FUEL
+3. Biomass Burning      :  F    F     0    1.0  YYYYMMDDHH  Fire         GFED4
+4. Biosphere            :  T    F     0    1.0  YYYYMMDDHH  Balbio       CARDAMOM-ECCO
+5. Ocean biosphere      :  T    F     0    1.0  YYYYMM0000  Ocean        ECCO-Darwin-MON-v05
+6. GPP                  :  T    F     0    1.0  YYYYMM0000  GPP       ORCHIDEE
+7. TER                  :  T    T     1    1.0  YYYYMM0000  TER2       CLASS-CTEM
+------------------------+------------------------------------------------------
+%%% CMS CO EMISSIONS MENU %%% :
+Emission time step      : 60
+Archived CH4 directory  : /nobackup/mlee7/GHGF/App_4x5/CH4/I3/ {YEAR}
+Archived OH directory   : TBD
+Emission directory      : /nobackup/mlee7/CMSF/CO/Res_4x5/Emissions/
+Climatology Emission?   : T 2015
+No. Emissions           : 5 
+Emission entries -------: fwd? adj? adjId  SF   timeRes.    type         model
+1. Fossil Fuel          :  T   T      1    1.0  YYYYMM0000  FossilFuel    Composit
+2. Biofuel              :  T   T      1    1.0  YYYYMM0000  BioFuel       EDGAR 
+3. Biomass Burning      :  T   T      1    1.0  YYYYMMDDHH  BiomassBurn   GFED4 
+4. Shipping             :  T   T      1    1.0  YYYYMM0000  Shipping      ICOADS
+5. Biogenic             :  T   T      2    1.0  YYYYMMDDHH  Biogenic      MEGAN
+-------------------------------------------------------------------------------
+%%% CMS CH4 EMISSIONS MENU %%% :
+Emission time step      : 60
+Archived OH directory   : TBD
+Emission directory      : /nobackup/mlee7/CMSF/CH4/Res_4x5/Emissions/
+Climatology Emission?   : T 2010
+No. Emissions           : 8
+Emission entries -------: fwd? adj? adjId  SF   timeRes.     type        model
+1. FOSSILFUEL           :  T   T      1     1.0  YYYY000000  FossilFuel   EDGAR-v4.2
+2. Biofuel              :  T   T      1     1.0  YYYY000000  BioFuel      EDGAR-v4.2
+3. BiomassBurn          :  T   T      1     1.0  YYYYMMDDHH  BiomassBurn  GFED4
+4. Wetlands             :  T   T      1     1.0  YYYYMM0000  Wetlands     CARDAMOM
+5. Waste                :  T   F      1     1.0  YYYY000000  Waste        EDGAR-v4.2
+6. Livestock            :  T   T      1     1.0  YYYY000000  Livestock    EDGAR-v4.2
+7. Termites             :  T   F      1     1.0  YYYY000000  Termites     GEOSCHEM
+8. GPP                  :  T   T      1     1.0  YYYY000000  GPP          GEOSCHEM
+------------------------+------------------------------------------------------
+%%% CMS COS EMISSIONS MENU %%% :
+Emission time step      : 60
+Archived OH directory   : TBD
+Emission directory      : /nobackup/mlee7/CMSF/OCS/Res_4x5/Emissions/
+Climatology Emission?   : T 2015
+Reference COS (v/v)     : T 450.0e-12
+No. Emissions           : 9
+Emission entries -------: fwd? adj? adjId  SF   timeRes.     type        model
+1. Manual COS           :  T   T      1     1.0  YYYYMM0000  ManCOS       Kettle
+2. Manual CS2           :  T   T      1     1.0  YYYYMM0000  ManCS2       Kettle
+3. Ocean COS            :  T   T      1     1.0  YYYYMM0000  OceanCOS     Kettle
+4. Ocean CS2            :  T   T      1     1.0  YYYYMM0000  OceanCS2     Kettle
+5. Ocean DMS            :  T   F      1     1.0  YYYYMM0000  OceanDMS     Kettle
+6. Plant Uptake         :  T   T      1     1.0  YYYYMMDDHH  plantUptake  SIB4
+7. Soil Uptake          :  T   F      1     1.0  YYYYMMDDHH  soilUptake   SIB4
+8. Biomass burn         :  T   T      1     1.0  YYYYMM0000  BiomassBurn  GFED3
+9. Missing Ocean        :  T   F      1     1.0  YYYY000000  MissingOcean MML
+------------------------+------------------------------------------------------
+END OF FILE             :
+
