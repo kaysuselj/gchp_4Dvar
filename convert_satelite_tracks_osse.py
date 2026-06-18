@@ -32,11 +32,18 @@ def read_oco_daily_osse(date, base_fold):
         #assign it back to ds['time']
         ds['time'] = ('nSamples', time_dt)
         ds['longitude'] = (ds['longitude'] % 360)
-        ds = ds[['latitude', 'longitude', 'time']]
-        ds = ds.sortby('time')
-        ds = ds.set_coords("time")
-        ds = ds.swap_dims({"nSamples": "time"})
-        return ds
+
+        # Extract only the variables GCHP needs, as plain arrays without metadata
+        ds_clean = xr.Dataset({
+            'latitude': (['nSamples'], ds['latitude'].values),
+            'longitude': (['nSamples'], ds['longitude'].values),
+            'time': (['nSamples'], time_dt)
+        })
+
+        ds_clean = ds_clean.sortby('time')
+        ds_clean = ds_clean.set_coords("time")
+        ds_clean = ds_clean.swap_dims({"nSamples": "time"})
+        return ds_clean
     else:
         print(f'No data found for date: {date_str}')
         return None
@@ -61,20 +68,45 @@ def convert_track_yearly(year, base_fold):
         print(f"Combining {len(datasets)} daily datasets for year {year}...")
         combined = xr.concat(datasets, dim='time')
 
-        # Save to new netCDF file
-        # Define encoding for time
-        time_encoding = {
+        # Create dataset matching EXACT format of working file
+        # Variables: latitude (float32), longitude (float32)
+        # Coordinate: time (float64)
+        ds_final = xr.Dataset({
+            'latitude': (['time'], combined['latitude'].values.astype('float32')),
+            'longitude': (['time'], combined['longitude'].values.astype('float32')),
+        }, coords={
+            'time': combined['time'].values
+        })
+
+        # Set attributes to match the working file format exactly
+        ds_final.attrs = {}  # No global attributes
+
+        # Set _FillValue for latitude and longitude (as in working file)
+        ds_final['latitude'].attrs = {'_FillValue': np.float32(np.nan)}
+        ds_final['longitude'].attrs = {'_FillValue': np.float32(np.nan)}
+
+        # Set time attributes (as in working file)
+        ds_final['time'].attrs = {
+            '_FillValue': np.float64(np.nan),
+            'units': 'hours since 1900-01-01',
+            'calendar': 'proleptic_gregorian'
+        }
+
+        # Define encoding to match working file
+        encoding = {
+            'latitude': {'dtype': 'float32', '_FillValue': np.float32(np.nan)},
+            'longitude': {'dtype': 'float32', '_FillValue': np.float32(np.nan)},
             'time': {
-                'units': 'hours since 1900-01-01 00:00:00',
-                'calendar': 'proleptic_gregorian',
                 'dtype': 'float64',
-                '_FillValue': np.nan,
+                '_FillValue': np.float64(np.nan),
+                'units': 'hours since 1900-01-01',
+                'calendar': 'proleptic_gregorian'
             }
         }
 
         output_file = f'sat_track/track_file_osse_{year}.nc'
-        combined.to_netcdf(output_file, encoding=time_encoding)
-        print(f"Saved: {output_file} ({len(combined.time)} observations)")
+        ds_final.to_netcdf(output_file, encoding=encoding)
+        print(f"Saved: {output_file} ({len(ds_final.time)} observations)")
     else:
         print(f"No data found for year {year}")
 
