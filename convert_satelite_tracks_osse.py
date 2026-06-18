@@ -81,18 +81,13 @@ def convert_track_yearly(year, base_fold):
         # Set attributes to match the working file format exactly
         ds_final.attrs = {}  # No global attributes
 
-        # Set _FillValue for latitude and longitude (as in working file)
-        ds_final['latitude'].attrs = {'_FillValue': np.float32(np.nan)}
-        ds_final['longitude'].attrs = {'_FillValue': np.float32(np.nan)}
-
-        # Set time attributes (as in working file)
-        ds_final['time'].attrs = {
-            '_FillValue': np.float64(np.nan),
-            'units': 'hours since 1900-01-01',
-            'calendar': 'proleptic_gregorian'
-        }
+        # Clear all variable attributes (will set via encoding instead)
+        ds_final['latitude'].attrs = {}
+        ds_final['longitude'].attrs = {}
+        ds_final['time'].attrs = {}
 
         # Define encoding to match working file
+        # _FillValue and other attributes are set via encoding, not attrs
         encoding = {
             'latitude': {'dtype': 'float32', '_FillValue': np.float32(np.nan)},
             'longitude': {'dtype': 'float32', '_FillValue': np.float32(np.nan)},
