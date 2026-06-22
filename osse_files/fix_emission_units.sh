@@ -57,8 +57,8 @@ else
                 continue
             fi
 
-            DAY=$(basename "${DAY_FILE}")
-            DEST_FILE="${DEST_FF}/${MONTH}/${DAY}"
+            DAY=$(basename "${DAY_FILE}" .nc)
+            DEST_FILE="${DEST_FF}/${MONTH}/${DAY}.nc"
 
             # Copy file first
             cp "${DAY_FILE}" "${DEST_FILE}"
@@ -66,8 +66,9 @@ else
             # Fix CO2_Flux attribute: delete 'unit', add 'units'
             ncatted -O -a unit,CO2_Flux,d,, -a units,CO2_Flux,c,c,"Kg C/Km^2/sec" "${DEST_FILE}"
 
-            # Fix time attribute: delete 'unit', add proper CF-compliant 'units' with reference time
-            ncatted -O -a unit,time,d,, -a units,time,c,c,"hours since 2000-01-01 00:00:00" "${DEST_FILE}"
+            # Fix time attribute: delete 'unit', add proper CF-compliant 'units' with reference time FOR THIS SPECIFIC DAY
+            REF_DATE="${YEAR}-${MONTH}-${DAY} 00:00:00"
+            ncatted -O -a unit,time,d,, -a units,time,c,c,"hours since ${REF_DATE}" "${DEST_FILE}"
 
             echo "   Fixed: ${YEAR}/${MONTH}/${DAY}"
         done
