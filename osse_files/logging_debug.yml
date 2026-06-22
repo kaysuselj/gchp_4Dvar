@@ -1,0 +1,45 @@
+# Enhanced logging configuration for debugging EXTDATA issues
+# Copy this to your run directory as logging.yml
+
+version: 1
+root:
+  level: DEBUG
+  handlers: [console, mpi_shared]
+
+loggers:
+  MAPL:
+    level: DEBUG
+  EXTDATA:
+    level: DEBUG
+  ExtData:
+    level: DEBUG
+  MAPL.ExtData:
+    level: DEBUG
+  CAP.EXTDATA:
+    level: DEBUG
+  HEMCO:
+    level: DEBUG
+  GCHP:
+    level: DEBUG
+
+handlers:
+  console:
+    class: StreamHandler
+    formatter: console
+    level: INFO
+
+  mpi_shared:
+    class: FileHandler
+    filename: allPEs.log
+    formatter: mpi
+    comm: MPI_COMM_WORLD
+    lock: mpi
+    rank_keyword: rank
+    level: DEBUG
+
+formatters:
+  console:
+    format: '%(name)s: %(levelname)s: %(message)s'
+
+  mpi:
+    format: 'pe=%(rank)05d %(name)s %(levelname)s: %(message)s'
