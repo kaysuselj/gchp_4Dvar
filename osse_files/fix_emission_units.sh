@@ -112,7 +112,7 @@ else
         fi
 
         MONTH=$(basename "${MONTH_FILE}")
-        MONTH_NUM=$(basename "${MONTH_FILE}" .nc)
+        MONTH_NUM=$(basename "${MONTH_FILE}" .nc | sed 's/^0*//') # Strip leading zeros for Python
         DEST_FILE="${DEST_OCEAN}/${MONTH}"
 
         # Copy file first
@@ -128,7 +128,7 @@ else
         # ADD time coordinate (middle of month: day 15, 12:00)
         HOURS_SINCE_1900=$(python3 -c "from datetime import datetime; d=datetime(${YEAR},${MONTH_NUM},15,12,0,0); ref=datetime(1900,1,1); print(int((d-ref).total_seconds()/3600))")
 
-        ncap2 -O -s "defdim(\"time\",1); time[\$time]=${HOURS_SINCE_1900}; time@units=\"hours since 1900-01-01 00:00:00\"; time@long_name=\"time\"; time@calendar=\"proleptic_gregorian\"" "${DEST_FILE}" "${DEST_FILE}.tmp"
+        ncap2 -O -s "defdim(\"time\",1); time[time]=${HOURS_SINCE_1900}f; time@units=\"hours since 1900-01-01 00:00:00\"; time@long_name=\"time\"; time@calendar=\"proleptic_gregorian\"" "${DEST_FILE}" "${DEST_FILE}.tmp"
         ncks -O -4 --mk_rec_dmn time "${DEST_FILE}.tmp" "${DEST_FILE}"
         rm -f "${DEST_FILE}.tmp"
 
