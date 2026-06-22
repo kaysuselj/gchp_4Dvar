@@ -53,10 +53,10 @@ Mask fractions:              false
     --> EMISSIONS              :       true
     --> METEOROLOGY            :       true
     --> CHEMISTRY_INPUT        :       true
-    --> USE_CH4_DATA           :       true
-    --> USE_CO_DATA            :       true
+    --> USE_CH4_DATA           :       false    # CO2-only OSSE
+    --> USE_CO_DATA            :       false    # CO2-only OSSE
     --> USE_CO2_DATA           :       true
-    --> USE_OCS_DATA           :       true     # 2012-2016
+    --> USE_OCS_DATA           :       false    # CO2-only OSSE
 # ----- RESTART FIELDS --------------------------------------------------------
     --> GC_RESTART             :       true
     --> HEMCO_RESTART          :       false
