@@ -62,29 +62,29 @@ Mask fractions:              false
     --> HEMCO_RESTART          :       false
 # ----- NESTED GRID FIELDS ----------------------------------------------------
     --> GC_BCs                 :       false
-# ----- CH4 INVENTORIES AND DATA ----------------------------------------------
+# ----- CH4 INVENTORIES AND DATA (ALL DISABLED FOR CO2-ONLY OSSE) -------------
 # ..... Regional Inventories .........
     --> GHGI_v2                :       false    # 2012-2018
-    --> GHGI_v2_Express_Ext    :       true     # 2012-2020
-    --> Scarpelli_Canada       :       true     # 2018
-    --> Scarpelli_Mexico       :       true     # 2015
+    --> GHGI_v2_Express_Ext    :       false    # 2012-2020 [DISABLED CO2-ONLY]
+    --> Scarpelli_Canada       :       false    # 2018 [DISABLED CO2-ONLY]
+    --> Scarpelli_Mexico       :       false    # 2015 [DISABLED CO2-ONLY]
 # ..... Global Inventories ...........
-    --> GFEIv2                 :       true     # 2019
-    --> EDGARv8                :       true     # 2010-2022
+    --> GFEIv2                 :       false    # 2019 [DISABLED CO2-ONLY]
+    --> EDGARv8                :       false    # 2010-2022 [DISABLED CO2-ONLY]
     --> QFED2                  :       false    # 2009-2015
-    --> JPL_WETCHARTS          :       true     # 2009-2017
-    --> SEEPS                  :       true     # 2012
+    --> JPL_WETCHARTS          :       false    # 2009-2017 [DISABLED CO2-ONLY]
+    --> SEEPS                  :       false    # 2012 [DISABLED CO2-ONLY]
     --> LAKES                  :       false    # 2009-2015
-    --> RESERVOIRS             :       true     # 2022
-    --> FUNG_TERMITES          :       true     # 1985
+    --> RESERVOIRS             :       false    # 2022 [DISABLED CO2-ONLY]
+    --> FUNG_TERMITES          :       false    # 1985 [DISABLED CO2-ONLY]
     --> FUNG_SOIL_ABSORPTION   :       false    # 2009-2015
-    --> MeMo_SOIL_ABSORPTION   :       true     # 1990-2009 or clim.
+    --> MeMo_SOIL_ABSORPTION   :       false    # 1990-2009 or clim. [DISABLED CO2-ONLY]
     --> CMIP6_SFC_LAND_ANTHRO  :       false    # 1850-2100
     --> CMIP6_SHIP             :       false    # 1850-2100
     --> BB4MIPS                :       false    # 1850-2100
 # ..... Non-Emissions Data ...........
-    --> CH4_LOSS_FREQ          :       true     # 1985
-    --> GLOBAL_CL              :       true     # 2010-2019
+    --> CH4_LOSS_FREQ          :       false    # 1985 [DISABLED CO2-ONLY]
+    --> GLOBAL_CL              :       false    # 2010-2019 [DISABLED CO2-ONLY]
 # ----- CO and CO2-only INVENTORIES AND DATA ----------------------------------
 # ..... Global inventories ...........
     --> AEIC2019_DAILY         :       false    # 2019 (daily data)
@@ -97,8 +97,8 @@ Mask fractions:              false
     --> FOSSIL_ODIAC           :       true     # 2000-2018 (Fossilfuel in sim.template)
     --> FOSSIL_CDIAC           :       false    # 1980-2014
     --> OCEAN_EXCH_TAKA09      :       false    # 2000
-    --> OCEAN_EXCH_SCALED      :       false    # 2000-2013
-    --> OCEAN_ECCO_DARWIN      :       true     # 2014-2023 (Ocean biosphere in sim.template)
+    --> OCEAN_EXCH_SCALED      :       true     # 2000-2013 (simpler, no dependencies)
+    --> OCEAN_ECCO_DARWIN      :       false    # 2014-2023 (has unfulfilled import dependencies)
     --> BBIO_DIURNAL           :       false    # 1985
     --> BBIO_SIB3              :       false    # 2006-2010
     --> NET_TERR_EXCH          :       false    # 2000
@@ -112,9 +112,9 @@ Mask fractions:              false
     --> DICE_Africa            :       false    # 2013
 # ..... Non-emissions data ...........
     --> CO2_COPROD             :       false     # 2004-2009
-    --> PROD_CO_CH4            :       true     # 2010-2019
-    --> PROD_CO_NMVOC          :       true     # 2010-2019
-    --> GMI_PROD_LOSS          :       true     # 2005
+    --> PROD_CO_CH4            :       false    # 2010-2019 [DISABLED CO2-ONLY]
+    --> PROD_CO_NMVOC          :       false    # 2010-2019 [DISABLED CO2-ONLY]
+    --> GMI_PROD_LOSS          :       false    # 2005 [DISABLED CO2-ONLY]
     --> GMD_SFC_CH4            :       false     # 1979-2020
     --> CMIP6_SFC_CH4          :       false    # 1750-1978
 # ..... Ship emissions ...............
@@ -123,11 +123,11 @@ Mask fractions:              false
     --> CEDS_GBDMAPS_SHIP      :       false    # 1970-2017
     --> CEDS_GBDMAPS_SHIP_byFuelType:  false    # 1970-2017
     --> ICOADS_SHIP            :       false    # 2004
-#------ OCS FLUX DATA ---------------------------------------------------------
-    --> OCS_ANTHRO_FLUX        :       true     # 2012-2016
-    --> OCS_BIOMASS_FLUX       :       true     # 2012-2016
-    --> OCS_MISSING_OCEAN_FLUX :       true     # 2012-2016
-    --> OCS_OCEAN_FLUX         :       true     # 2012-2016
+#------ OCS FLUX DATA (ALL DISABLED FOR CO2-ONLY OSSE) ------------------------
+    --> OCS_ANTHRO_FLUX        :       false    # 2012-2016 [DISABLED CO2-ONLY]
+    --> OCS_BIOMASS_FLUX       :       false    # 2012-2016 [DISABLED CO2-ONLY]
+    --> OCS_MISSING_OCEAN_FLUX :       false    # 2012-2016 [DISABLED CO2-ONLY]
+    --> OCS_OCEAN_FLUX         :       false    # 2012-2016 [DISABLED CO2-ONLY]
 # ----- FUTURE EMISSIONS ------------------------------------------------------
     --> RCP_3PD                :       false    # 2005-2100
     --> RCP_45                 :       false    # 2005-2100
