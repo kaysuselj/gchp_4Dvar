@@ -408,8 +408,8 @@ SIB_BBIO_CO2 kg/m2/s N Y F%y4-%m2-%d2T%h2:00:00 none none CO2 ./HcoDir/CO2/v2022
 # --- Net Terrestrial Exchange ---
 CO2_NET_TERRESTRIAL kg/m2/s N Y - none none CO2 ./HcoDir/CO2/v2022-11/BIO/Net_terrestrial_exch_5.29Pg.generic.1x1.nc
 
-# --- CARDAMOM prior fluxes (CARDAMOM-ECCO from sim.template - daily files in YYYY/MM/ subdirs) ---
-NBE_CARDAMOM  kg/m2/s N Y F%y4-%m2-%d2T00:00:00 none none CO2_Flux /nobackupp17/jliu7/INVENTORY/V4/Balbio/CARDAMOM-ECCO/%y4/%m2/%d2.nc
+# --- CARDAMOM prior fluxes (CARDAMOM-ECCO from sim.template - daily files in YYYY/MM/ subdirs - corrected time units) ---
+NBE_CARDAMOM  kg/m2/s N Y F%y4-%m2-%d2T00:00:00 none none CO2_Flux /nobackup/ksuselj1/gchp_14.5.3_adjoint_surfaceF/surface_fluxes_osse/Balbio/CARDAMOM-ECCO/%y4/%m2/%d2.nc
 
 # --- GPP (Gross Primary Production from ORCHIDEE - monthly files in YYYY/ subdirs) ---
 GPP_ORCHIDEE  kg/m2/s N Y F%y4-%m2-01T00:00:00 none none CO2_Flux /nobackupp17/jliu7/INVENTORY/V4/GPP/ORCHIDEE/%y4/%m2.nc

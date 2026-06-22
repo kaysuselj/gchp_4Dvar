@@ -932,8 +932,8 @@ Mask fractions:              false
 )))NET_TERR_EXCH
 
 (((NBE_CARDAMOM
-# Net Biosphere Exchange from CARDAMOM-ECCO (Biosphere in sim.template line 83: daily files in YYYY/MM/ subdirs)
-0 NBE_CARDAMOM   /nobackupp17/jliu7/INVENTORY/V4/Balbio/CARDAMOM-ECCO/$YYYY/$MM/$DD.nc CO2_Flux 2014-2023/1-12/1-31/0 C xy kg/m2/s CO2 750 3 500
+# Net Biosphere Exchange from CARDAMOM-ECCO (Biosphere in sim.template line 83: daily files in YYYY/MM/ subdirs - corrected time units)
+0 NBE_CARDAMOM   /nobackup/ksuselj1/gchp_14.5.3_adjoint_surfaceF/surface_fluxes_osse/Balbio/CARDAMOM-ECCO/$YYYY/$MM/$DD.nc CO2_Flux 2014-2023/1-12/1-31/0 C xy kg/m2/s CO2 750 3 500
 )))NBE_CARDAMOM
 
 #==============================================================================
