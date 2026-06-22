@@ -1,7 +1,12 @@
 #!/bin/bash
 
-# Script to fix 'unit' -> 'units' attribute in CO2 emission files
-# Also fixes time coordinate units to be CF-compliant
+# Comprehensive script to fix all CO2 emission file issues for GCHP OSSE
+# Fixes:
+#   1. Fossil Fuel: unit->units for CO2_Flux and time, proper time reference
+#   2. Ocean: unit->units for CO2_Flux, ADD time coordinate
+#   3. NBE: proper time reference for each day
+#   4. GPP/TER: use original files (no modifications)
+#
 # Usage: bash fix_emission_units.sh YEAR
 # Example: bash fix_emission_units.sh 2016
 
@@ -18,13 +23,19 @@ SRC_BASE="/nobackupp17/jliu7/INVENTORY/V4"
 DEST_BASE="/nobackup/ksuselj1/gchp_14.5.3_adjoint_surfaceF/surface_fluxes_osse"
 
 echo "========================================"
-echo "Fixing emission units attribute for year ${YEAR}"
+echo "Fixing emission files for year ${YEAR}"
 echo "========================================"
 echo ""
 
-# Check if ncatted is available
+# Check if NCO tools are available
 if ! command -v ncatted &> /dev/null; then
     echo "ERROR: ncatted (NCO tools) not found. Load the NCO module:"
+    echo "  module load nco"
+    exit 1
+fi
+
+if ! command -v ncap2 &> /dev/null; then
+    echo "ERROR: ncap2 (NCO tools) not found. Load the NCO module:"
     echo "  module load nco"
     exit 1
 fi
@@ -81,7 +92,7 @@ fi
 echo ""
 
 # -----------------------------------------------------------------------------
-# 2. Fix Ocean files (monthly: YYYY/MM.nc)
+# 2. Fix Ocean files (monthly: YYYY/MM.nc) - ADD TIME COORDINATE
 # -----------------------------------------------------------------------------
 echo "2. Processing Ocean emissions (monthly files)..."
 SRC_OCEAN="${SRC_BASE}/Ocean/ECCO-Darwin-MON-v05/${YEAR}"
@@ -101,13 +112,25 @@ else
         fi
 
         MONTH=$(basename "${MONTH_FILE}")
+        MONTH_NUM=$(basename "${MONTH_FILE}" .nc)
         DEST_FILE="${DEST_OCEAN}/${MONTH}"
 
         # Copy file first
         cp "${MONTH_FILE}" "${DEST_FILE}"
 
-        # Fix attribute: delete 'unit', add 'units'
+        # Fix CO2_Flux attribute: delete 'unit', add 'units'
         ncatted -O -a unit,CO2_Flux,d,, -a units,CO2_Flux,c,c,"Kg C/km2/sec" "${DEST_FILE}"
+
+        # Fix coordinate attributes: delete 'unit', add 'units'
+        ncatted -O -a unit,lon,d,, -a units,lon,c,c,"degrees_east" "${DEST_FILE}"
+        ncatted -O -a unit,lat,d,, -a units,lat,c,c,"degrees_north" "${DEST_FILE}"
+
+        # ADD time coordinate (middle of month: day 15, 12:00)
+        HOURS_SINCE_1900=$(python3 -c "from datetime import datetime; d=datetime(${YEAR},${MONTH_NUM},15,12,0,0); ref=datetime(1900,1,1); print(int((d-ref).total_seconds()/3600))")
+
+        ncap2 -O -s "defdim(\"time\",1); time[\$time]=${HOURS_SINCE_1900}; time@units=\"hours since 1900-01-01 00:00:00\"; time@long_name=\"time\"; time@calendar=\"proleptic_gregorian\"" "${DEST_FILE}" "${DEST_FILE}.tmp"
+        ncks -O -4 --mk_rec_dmn time "${DEST_FILE}.tmp" "${DEST_FILE}"
+        rm -f "${DEST_FILE}.tmp"
 
         echo "   Fixed: ${YEAR}/${MONTH}"
     done
@@ -146,15 +169,14 @@ else
                 continue
             fi
 
-            DAY=$(basename "${DAY_FILE}")
-            DEST_FILE="${DEST_NBE}/${MONTH}/${DAY}"
+            DAY=$(basename "${DAY_FILE}" .nc)
+            DEST_FILE="${DEST_NBE}/${MONTH}/${DAY}.nc"
 
             # Copy file first
             cp "${DAY_FILE}" "${DEST_FILE}"
 
-            # Fix time units: change "hour" to proper CF format
-            # NBE files already have units (not unit), just need proper reference time
-            REF_DATE="${YEAR}-${MONTH}-01 00:00:00"
+            # Fix time units: change "hour" to proper CF format with reference time for this specific day
+            REF_DATE="${YEAR}-${MONTH}-${DAY} 00:00:00"
             ncatted -O -a units,time,o,c,"hours since ${REF_DATE}" "${DEST_FILE}"
 
             echo "   Fixed: ${YEAR}/${MONTH}/${DAY}"
@@ -178,17 +200,16 @@ echo ""
 echo "Fixed emissions:"
 echo "  - Fossil Fuel: ${DEST_BASE}/Fossilfuel/FF_regrid2/${YEAR}/"
 echo "     * CO2_Flux: unit -> units"
-echo "     * time: unit -> units with reference time"
+echo "     * time: unit -> units with day-specific reference time"
 echo "  - Ocean:       ${DEST_BASE}/Ocean/ECCO-Darwin-MON-v05/${YEAR}/"
 echo "     * CO2_Flux: unit -> units"
+echo "     * lon/lat: unit -> units"
+echo "     * Added time coordinate (middle of month)"
 echo "  - NBE:         ${DEST_BASE}/Balbio/CARDAMOM-ECCO/${YEAR}/"
-echo "     * time: added proper reference time"
+echo "     * time: added day-specific reference time"
 echo ""
-echo "GPP, TER already have correct attributes - use original paths"
+echo "GPP, TER: Use original files at ${SRC_BASE} (no modifications needed)"
 echo ""
 echo "Next steps:"
-echo "1. Update HEMCO_Config.rc and ExtData.rc to point to ${DEST_BASE}"
-echo "2. Verify one file from each type:"
-echo "   ncdump -h ${DEST_BASE}/Fossilfuel/FF_regrid2/${YEAR}/01/01.nc | grep -E 'time:units|CO2_Flux:units'"
-echo "   ncdump -h ${DEST_BASE}/Ocean/ECCO-Darwin-MON-v05/${YEAR}/01.nc | grep 'CO2_Flux:units'"
-echo "   ncdump -h ${DEST_BASE}/Balbio/CARDAMOM-ECCO/${YEAR}/01/01.nc | grep 'time:units'"
+echo "1. Update HEMCO_Config.rc and ExtData.rc to point to corrected paths"
+echo "2. Verify with: bash osse_files/check_all_emission_files.sh ${YEAR}"
