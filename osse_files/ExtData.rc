@@ -393,14 +393,14 @@ CEDS_CO_SHP  kg/m2/s N Y F%y4-%m2-01T00:00:00 none none CO_shp  ./HcoDir/CEDS/v2
 # --- CO2 emissions ---
 #==============================================================================
 
-# --- CO2 Fossil Fuel (FF_regrid2 from sim.template - daily files in YYYY/MM/ subdirs) ---
-FOSSILCO2_ODIAC  kg/m2/s N Y F%y4-%m2-%d2T%h2:00:00 none none CO2_Flux /nobackupp17/jliu7/INVENTORY/V4/Fossilfuel/FF_regrid2/%y4/%m2/%d2.nc
+# --- CO2 Fossil Fuel (FF_regrid2 from sim.template - daily files in YYYY/MM/ subdirs - corrected units attribute) ---
+FOSSILCO2_ODIAC  kg/m2/s N Y F%y4-%m2-%d2T%h2:00:00 none none CO2_Flux /nobackup/ksuselj1/gchp_14.5.3_adjoint_surfaceF/surface_fluxes_osse/Fossilfuel/FF_regrid2/%y4/%m2/%d2.nc
 
 # --- CO2 Ocean Exchange (OLD - not used in OSSE) ---
 #OCEANCO2_SCALED_MONTHLY kg/m2/s N  Y F%y4-%m2-01T00:00:00 none none CO2 ./HcoDir/CO2/v2022-11/OCEAN/Scaled_Ocean_CO2_monthly.nc
 
-# --- CO2 Ocean Exchange ECCO DARWIN (ECCO-Darwin-MON-v05 from sim.template - monthly files in YYYY/ subdirs) ---
-OCEAN_ECCO_DARWIN  kg/m2/s N Y F%y4-%m2-01T00:00:00 none none CO2_Flux /nobackupp17/jliu7/INVENTORY/V4/Ocean/ECCO-Darwin-MON-v05/%y4/%m2.nc
+# --- CO2 Ocean Exchange ECCO DARWIN (ECCO-Darwin-MON-v05 from sim.template - monthly files in YYYY/ subdirs - corrected units attribute) ---
+OCEAN_ECCO_DARWIN  kg/m2/s N Y F%y4-%m2-01T00:00:00 none none CO2_Flux /nobackup/ksuselj1/gchp_14.5.3_adjoint_surfaceF/surface_fluxes_osse/Ocean/ECCO-Darwin-MON-v05/%y4/%m2.nc
 
 # --- Balanced biosphere exchange ---
 SIB_BBIO_CO2 kg/m2/s N Y F%y4-%m2-%d2T%h2:00:00 none none CO2 ./HcoDir/CO2/v2022-11/BIO/SiB3_3hr_NEP.nc
