@@ -393,6 +393,14 @@ CEDS_CO_SHP  kg/m2/s N Y F%y4-%m2-01T00:00:00 none none CO_shp  ./HcoDir/CEDS/v2
 # --- CO2 emissions ---
 #==============================================================================
 
+# --- Species concentrations and meteorology from restart file ---
+SPC_CO2 mol/mol N Y -  none none SPC_CO2 ./Restarts/GEOSChem.Restart.20160101_0000z.c24.nc4
+SPC_CO  mol/mol N Y -  none none SPC_CO  ./Restarts/GEOSChem.Restart.20160101_0000z.c24.nc4
+SPC_CH4 mol/mol N Y -  none none SPC_CH4 ./Restarts/GEOSChem.Restart.20160101_0000z.c24.nc4
+SPC_OCS mol/mol N Y -  none none SPC_OCS ./Restarts/GEOSChem.Restart.20160101_0000z.c24.nc4
+DELPDRY hPa N Y -  none none DELP_DRY ./Restarts/GEOSChem.Restart.20160101_0000z.c24.nc4
+Sigma_CO2  1  N  N  -  none  none  Sigma_CO2  ../sigma_co2.nc4
+
 # --- CO2 Fossil Fuel (FF_regrid2 from sim.template - daily files in YYYY/MM/ subdirs - corrected units attribute) ---
 FOSSILCO2_ODIAC  kg/m2/s N Y F%y4-%m2-%d2T%h2:00:00 none none CO2_Flux /nobackup/ksuselj1/gchp_14.5.3_adjoint_surfaceF/surface_fluxes_osse/Fossilfuel/FF_regrid2/%y4/%m2/%d2.nc
 
