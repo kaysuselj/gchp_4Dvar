@@ -21,7 +21,7 @@ simulation:
 operations:
 
   chemistry:
-    activate: true
+    activate: true  # Keep active for restart file timing
 
   convection:
     activate: true

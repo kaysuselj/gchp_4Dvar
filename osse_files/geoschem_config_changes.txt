@@ -1,0 +1,32 @@
+# Changes needed in geoschem_config.yml for CO2-only OSSE
+
+# CHANGE 1: Remove CH4 from chemistry list
+# FROM:
+  chemistry:
+      - CH4
+
+# TO:
+  chemistry: []
+  # Or if CO2 needs to be listed:
+  # chemistry:
+  #     - CO2
+
+
+# CHANGE 2: Disable CH4 options
+# FROM:
+CH4_simulation_options:
+    perturb_CH4_boundary_conditions: false
+    CH4_boundary_condition_ppb_increase_NSEW: [0.0, 0.0, 0.0, 0.0]
+  use_fullchem_PCO_from_CH4: true
+
+# TO:
+# CH4_simulation_options:
+#     perturb_CH4_boundary_conditions: false
+#     CH4_boundary_condition_ppb_increase_NSEW: [0.0, 0.0, 0.0, 0.0]
+  use_fullchem_PCO_from_CH4: false
+
+
+# Instructions:
+# 1. Edit geoschem_config.yml on the supercomputer
+# 2. Make the above changes
+# 3. Restart GCHP
