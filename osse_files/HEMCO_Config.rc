@@ -83,7 +83,7 @@ Mask fractions:              false
     --> CMIP6_SHIP             :       false    # 1850-2100
     --> BB4MIPS                :       false    # 1850-2100
 # ..... Non-Emissions Data ...........
-    --> CH4_LOSS_FREQ          :       false    # 1985 [DISABLED CO2-ONLY]
+    --> CH4_LOSS_FREQ          :       true     # 1985 (needed for CH4_LOSS field, but CH4 chemistry disabled in geoschem_config.yml)
     --> GLOBAL_CL              :       false    # 2010-2019 [DISABLED CO2-ONLY]
 # ----- CO and CO2-only INVENTORIES AND DATA ----------------------------------
 # ..... Global inventories ...........
