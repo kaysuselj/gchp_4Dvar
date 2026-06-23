@@ -97,8 +97,8 @@ Mask fractions:              false
     --> FOSSIL_ODIAC           :       true     # 2000-2018 (Fossilfuel in sim.template)
     --> FOSSIL_CDIAC           :       false    # 1980-2014
     --> OCEAN_EXCH_TAKA09      :       false    # 2000
-    --> OCEAN_EXCH_SCALED      :       true     # 2000-2013 (simpler, no dependencies)
-    --> OCEAN_ECCO_DARWIN      :       false    # 2014-2023 (has unfulfilled import dependencies)
+    --> OCEAN_EXCH_SCALED      :       false    # 2000-2013 (not using)
+    --> OCEAN_ECCO_DARWIN      :       true     # 2014-2023 (OSSE ocean fluxes - corrected files)
     --> BBIO_DIURNAL           :       false    # 1985
     --> BBIO_SIB3              :       false    # 2006-2010
     --> NET_TERR_EXCH          :       false    # 2000
