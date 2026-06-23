@@ -37,7 +37,6 @@ operations:
       - CO
       - CO2
       - OCS
-      # All species transported but only CO2 emissions active
 
 #============================================================================
 # Options for CH4
@@ -64,8 +63,8 @@ CH4_simulation_options:
 #============================================================================
 
 CO_simulation_options:
-  use_fullchem_PCO_from_CH4: false  # CO2-only OSSE
-  use_fullchem_PCO_from_NMVOC: false  # CO2-only OSSE
+  use_fullchem_PCO_from_CH4: true
+  use_fullchem_PCO_from_NMVOC: true
 
 #============================================================================
 # Options for CO2
@@ -74,7 +73,7 @@ CO_simulation_options:
 CO2_simulation_options:
 
   sources:
-    3D_chemical_oxidation_source: false  # CO2-only OSSE - no chemical sources
+    3D_chemical_oxidation_source: true
 
   tagged_species:
     tag_bio_and_ocean_CO2: false
