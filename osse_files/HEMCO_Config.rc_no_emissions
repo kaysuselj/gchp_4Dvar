@@ -1258,11 +1258,11 @@ Mask fractions:              false
 (((GLOBAL_OH_GCv5
 
 (((OH_PosteriorSF
-* GLOBAL_OH  $ROOT/OH/v2022-11/v5-07-08/OH_3Dglobal.geos5.72L.4x5.nc OH  1985/1-12/1/0 C xyz kg/m3 * 2/4 1 1
+0 GLOBAL_OH  $ROOT/OH/v2022-11/v5-07-08/OH_3Dglobal.geos5.72L.4x5.nc OH  1985/1-12/1/0 C xyz kg/m3 * 2/4 1 1
 )))OH_PosteriorSF
 
 (((.not.OH_PosteriorSF
-* GLOBAL_OH  $ROOT/OH/v2022-11/v5-07-08/OH_3Dglobal.geos5.72L.4x5.nc OH  1985/1-12/1/0 C xyz kg/m3 * 2 1 1
+0 GLOBAL_OH  $ROOT/OH/v2022-11/v5-07-08/OH_3Dglobal.geos5.72L.4x5.nc OH  1985/1-12/1/0 C xyz kg/m3 * 2 1 1
 ))).not.OH_PosteriorSF
 
 )))GLOBAL_OH_GCv5
@@ -1284,7 +1284,7 @@ Mask fractions:              false
 
 # --- Global CH4 loss frequencies [1/s] -----------
 (((CH4_LOSS_FREQ
-* CH4_LOSS $ROOT/CH4/v2024-01/GC_CH4_LOSS/GCC14_72LM.ch4loss.4x5.nc4  CH4loss  1985/1-12/1/0 C xyz s-1 * - 1 1
+0 CH4_LOSS $ROOT/CH4/v2024-01/GC_CH4_LOSS/GCC14_72LM.ch4loss.4x5.nc4  CH4loss  1985/1-12/1/0 C xyz s-1 * - 1 1
 )))CH4_LOSS_FREQ
 
 # --- Global Cl [mol/mol dry air] ---
