@@ -5,10 +5,11 @@
 #   1. Fossil Fuel: unit->units for CO2_Flux and time, proper time reference
 #   2. Ocean: unit->units for CO2_Flux, ADD time coordinate
 #   3. NBE: proper time reference for each day
-#   4. GPP/TER: use original files (no modifications)
+#   4. GPP: rename longitude->lon, latitude->lat
+#   5. TER: rename longitude->lon, latitude->lat
 #
-# Usage: bash fix_emission_units.sh YEAR
-# Example: bash fix_emission_units.sh 2016
+# Usage: bash fix_co2_fluxes.sh YEAR
+# Example: bash fix_co2_fluxes.sh 2016
 
 if [ $# -ne 1 ]; then
     echo "Usage: $0 YEAR"
@@ -36,6 +37,12 @@ fi
 
 if ! command -v ncap2 &> /dev/null; then
     echo "ERROR: ncap2 (NCO tools) not found. Load the NCO module:"
+    echo "  module load nco"
+    exit 1
+fi
+
+if ! command -v ncrename &> /dev/null; then
+    echo "ERROR: ncrename (NCO tools) not found. Load the NCO module:"
     echo "  module load nco"
     exit 1
 fi
@@ -190,6 +197,82 @@ fi
 echo ""
 
 # -----------------------------------------------------------------------------
+# 4. Fix GPP files (monthly: YYYY/MM.nc) - RENAME COORDINATES
+# -----------------------------------------------------------------------------
+echo "4. Processing GPP emissions (monthly files)..."
+SRC_GPP="${SRC_BASE}/GPP/ORCHIDEE/${YEAR}"
+DEST_GPP="${DEST_BASE}/GPP/ORCHIDEE/${YEAR}"
+
+if [ ! -d "${SRC_GPP}" ]; then
+    echo "   ERROR: Source directory not found: ${SRC_GPP}"
+else
+    # Create destination directory
+    mkdir -p "${DEST_GPP}"
+
+    # Process all monthly files
+    for MONTH_FILE in ${SRC_GPP}/*.nc; do
+        if [ ! -f "${MONTH_FILE}" ]; then
+            echo "   No monthly files found in ${SRC_GPP}"
+            break
+        fi
+
+        MONTH=$(basename "${MONTH_FILE}")
+        DEST_FILE="${DEST_GPP}/${MONTH}"
+
+        # Copy file first
+        cp "${MONTH_FILE}" "${DEST_FILE}"
+
+        # Rename longitude -> lon and latitude -> lat
+        ncrename -O -v longitude,lon -v latitude,lat "${DEST_FILE}"
+
+        echo "   Fixed: ${YEAR}/${MONTH}"
+    done
+
+    GPP_COUNT=$(find "${DEST_GPP}" -name "*.nc" 2>/dev/null | wc -l)
+    echo "   Completed: ${GPP_COUNT} GPP files processed"
+fi
+
+echo ""
+
+# -----------------------------------------------------------------------------
+# 5. Fix TER files (monthly: YYYY/MM.nc) - RENAME COORDINATES
+# -----------------------------------------------------------------------------
+echo "5. Processing TER emissions (monthly files)..."
+SRC_TER="${SRC_BASE}/TER2/CLASS-CTEM/${YEAR}"
+DEST_TER="${DEST_BASE}/TER/CLASS-CTEM/${YEAR}"
+
+if [ ! -d "${SRC_TER}" ]; then
+    echo "   ERROR: Source directory not found: ${SRC_TER}"
+else
+    # Create destination directory
+    mkdir -p "${DEST_TER}"
+
+    # Process all monthly files
+    for MONTH_FILE in ${SRC_TER}/*.nc; do
+        if [ ! -f "${MONTH_FILE}" ]; then
+            echo "   No monthly files found in ${SRC_TER}"
+            break
+        fi
+
+        MONTH=$(basename "${MONTH_FILE}")
+        DEST_FILE="${DEST_TER}/${MONTH}"
+
+        # Copy file first
+        cp "${MONTH_FILE}" "${DEST_FILE}"
+
+        # Rename longitude -> lon and latitude -> lat
+        ncrename -O -v longitude,lon -v latitude,lat "${DEST_FILE}"
+
+        echo "   Fixed: ${YEAR}/${MONTH}"
+    done
+
+    TER_COUNT=$(find "${DEST_TER}" -name "*.nc" 2>/dev/null | wc -l)
+    echo "   Completed: ${TER_COUNT} TER files processed"
+fi
+
+echo ""
+
+# -----------------------------------------------------------------------------
 # Summary
 # -----------------------------------------------------------------------------
 echo "========================================"
@@ -207,9 +290,11 @@ echo "     * lon/lat: unit -> units"
 echo "     * Added time coordinate (middle of month)"
 echo "  - NBE:         ${DEST_BASE}/Balbio/CARDAMOM-ECCO/${YEAR}/"
 echo "     * time: added day-specific reference time"
-echo ""
-echo "GPP, TER: Use original files at ${SRC_BASE} (no modifications needed)"
+echo "  - GPP:         ${DEST_BASE}/GPP/ORCHIDEE/${YEAR}/"
+echo "     * Renamed longitude -> lon, latitude -> lat"
+echo "  - TER:         ${DEST_BASE}/TER/CLASS-CTEM/${YEAR}/"
+echo "     * Renamed longitude -> lon, latitude -> lat"
 echo ""
 echo "Next steps:"
-echo "1. Update HEMCO_Config.rc and ExtData.rc to point to corrected paths"
-echo "2. Verify with: bash osse_files/check_all_emission_files.sh ${YEAR}"
+echo "1. HEMCO_Config.rc and ExtData.rc already updated to point to corrected paths"
+echo "2. Verify with: ncdump -h ${DEST_GPP}/01.nc | grep -E 'float (lon|lat)'"

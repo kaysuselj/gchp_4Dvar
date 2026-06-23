@@ -419,11 +419,11 @@ CO2_NET_TERRESTRIAL kg/m2/s N Y - none none CO2 ./HcoDir/CO2/v2022-11/BIO/Net_te
 # --- CARDAMOM prior fluxes (CARDAMOM-ECCO from sim.template - daily files in YYYY/MM/ subdirs - corrected time units) ---
 NBE_CARDAMOM  kg/m2/s N Y F%y4-%m2-%d2T00:00:00 none none CO2_Flux /nobackup/ksuselj1/gchp_14.5.3_adjoint_surfaceF/surface_fluxes_osse/Balbio/CARDAMOM-ECCO/%y4/%m2/%d2.nc
 
-# --- GPP (Gross Primary Production from ORCHIDEE - monthly files in YYYY/ subdirs - NO time dimension, exact match) ---
-GPP_ORCHIDEE  kg/m2/s N Y E%y4-%m2-01T00:00:00 none none CO2_Flux /nobackupp17/jliu7/INVENTORY/V4/GPP/ORCHIDEE/%y4/%m2.nc
+# --- GPP (Gross Primary Production from ORCHIDEE - monthly files in YYYY/ subdirs - corrected lon/lat names) ---
+GPP_ORCHIDEE  kg/m2/s N Y E%y4-%m2-01T00:00:00 none none CO2_Flux /nobackup/ksuselj1/gchp_14.5.3_adjoint_surfaceF/surface_fluxes_osse/GPP/ORCHIDEE/%y4/%m2.nc
 
-# --- TER (Terrestrial Ecosystem Respiration from CLASS-CTEM - monthly files in YYYY/ subdirs - NO time dimension, exact match) ---
-TER_CLASS_CTEM  kg/m2/s N Y E%y4-%m2-01T00:00:00 none none CO2_Flux /nobackupp17/jliu7/INVENTORY/V4/TER2/CLASS-CTEM/%y4/%m2.nc
+# --- TER (Terrestrial Ecosystem Respiration from CLASS-CTEM - monthly files in YYYY/ subdirs - corrected lon/lat names) ---
+TER_CLASS_CTEM  kg/m2/s N Y E%y4-%m2-01T00:00:00 none none CO2_Flux /nobackup/ksuselj1/gchp_14.5.3_adjoint_surfaceF/surface_fluxes_osse/TER/CLASS-CTEM/%y4/%m2.nc
 
 # --- CO2 Ship Emissions ---
 CEDS_CO2_SHP kg/m2/s N Y F%y4-%m2-01T00:00:00 none none CO2_shp ./HcoDir/CEDS/v2021-06/%y4/CO2-em-anthro_CMIP_CEDS_%y4.nc

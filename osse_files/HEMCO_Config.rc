@@ -942,8 +942,8 @@ Mask fractions:              false
 # From sim.template line 84: GPP ORCHIDEE monthly
 #==============================================================================
 (((GPP_ORCHIDEE
-# GPP from ORCHIDEE (sim.template line 84: monthly files in YYYY/ subdirs)
-0 GPP_ORCHIDEE   /nobackupp17/jliu7/INVENTORY/V4/GPP/ORCHIDEE/$YYYY/$MM.nc CO2_Flux 2014-2023/1-12/1/0 C xy kg/m2/s CO2 750 4 500
+# GPP from ORCHIDEE (sim.template line 84: monthly files in YYYY/ subdirs - corrected lon/lat names)
+0 GPP_ORCHIDEE   /nobackup/ksuselj1/gchp_14.5.3_adjoint_surfaceF/surface_fluxes_osse/GPP/ORCHIDEE/$YYYY/$MM.nc CO2_Flux 2014-2023/1-12/1/0 C xy kg/m2/s CO2 750 4 500
 )))GPP_ORCHIDEE
 
 #==============================================================================
@@ -953,8 +953,8 @@ Mask fractions:              false
 # This is the adjoint-optimized component (adjId=1)
 #==============================================================================
 (((TER_CLASS_CTEM
-# TER from CLASS-CTEM (sim.template line 85: monthly files in YYYY/ subdirs)
-0 TER_CLASS_CTEM /nobackupp17/jliu7/INVENTORY/V4/TER2/CLASS-CTEM/$YYYY/$MM.nc CO2_Flux 2014-2023/1-12/1/0 C xy kg/m2/s CO2 750 5 500
+# TER from CLASS-CTEM (sim.template line 85: monthly files in YYYY/ subdirs - corrected lon/lat names)
+0 TER_CLASS_CTEM /nobackup/ksuselj1/gchp_14.5.3_adjoint_surfaceF/surface_fluxes_osse/TER/CLASS-CTEM/$YYYY/$MM.nc CO2_Flux 2014-2023/1-12/1/0 C xy kg/m2/s CO2 750 5 500
 )))TER_CLASS_CTEM
 
 #==============================================================================
