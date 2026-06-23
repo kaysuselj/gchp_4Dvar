@@ -182,6 +182,9 @@ else
             # Copy file first
             cp "${DAY_FILE}" "${DEST_FILE}"
 
+            # Rename longitude -> lon and latitude -> lat
+            ncrename -O -v longitude,lon -v latitude,lat "${DEST_FILE}"
+
             # Fix time units: change "hour" to proper CF format with reference time for this specific day
             REF_DATE="${YEAR}-${MONTH}-${DAY} 00:00:00"
             ncatted -O -a units,time,o,c,"hours since ${REF_DATE}" "${DEST_FILE}"
