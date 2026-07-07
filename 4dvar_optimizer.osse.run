@@ -2,9 +2,9 @@
 #PBS -S /bin/bash
 #PBS -N gchp_4dvar_osse
 #PBS -l select=1:ncpus=24:mpiprocs=24:model=bro_ele
-#PBS -l walltime=72:00:00
-#PBS -q long
-##PBS -l walltime=2:00:00
+##PBS -l walltime=72:00:00
+##PBS -q long
+#PBS -l walltime=8:00:00
 ##PBS -q debug
 #PBS -j oe
 #PBS -W group_list=s1055
@@ -42,8 +42,8 @@ BASE_DIR="$(pwd)"                        # gchp_4Dvar/  (optimizer + control_fil
 WORK_DIR="$(cd "${BASE_DIR}/../4dvar_design_osse" && pwd)"  # 4dvar_design_osse/ (runs, state, sigma)
 FWD_DIR="${WORK_DIR}/forward_run"
 ADJ_DIR="${WORK_DIR}/adjoint"
-CTRL_FWD_DIR="${BASE_DIR}/control_files/forward"
-CTRL_ADJ_DIR="${BASE_DIR}/control_files/adjoint"
+CTRL_FWD_DIR="${BASE_DIR}/control_files/forward_osse"
+CTRL_ADJ_DIR="${BASE_DIR}/control_files/adjoint_osse"
 SCRIPT_DIR="${BASE_DIR}"                 # Python scripts are in gchp_4Dvar/
 
 SIGMA_FILE="${WORK_DIR}/sigma_co2_osse.nc4"  # OSSE-specific sigma file
@@ -57,8 +57,9 @@ exec > >(tee -a "${LOG_FILE}") 2>&1
 
 # Simulation window (OSSE: one month in 2016)
 T_START="2016-01-01"
-T_END="2016-01-31"
+T_END="2016-02-01"
 TS_CHEM=1200                             # chemistry timestep [s]
+TS_DYN=600                               # dynamic timestep [s] - forcing file frequency
 
 # Optimization
 NLAT=${NLAT:-46}
@@ -158,10 +159,14 @@ log "runConfig patched: Start=\"${START_FMT}\"  End=\"${END_FMT}\"  Duration=\"$
 # ============================================================
 #  Restart / fresh-start handling
 # ============================================================
+# ITER0 = iterations completed before this job; snapshot files are numbered
+# ITER0+iter so a restarted run does not overwrite earlier snapshots.
+ITER0=0
 if [ "${RESTART}" = "true" ]; then
     if [ -f "${STATE_FILE}" ]; then
         ITER_DONE=$(python3 -c \
             "import numpy as np; s=np.load('${STATE_FILE}'); print(int(s['iteration'])-1)")
+        ITER0=${ITER_DONE}
         echo "Resuming: ${ITER_DONE} iteration(s) already completed, continuing from $((ITER_DONE+1))"
     else
         echo "WARNING: RESTART=true but no state file found at ${STATE_FILE}. Starting fresh."
@@ -184,6 +189,14 @@ else
               "${OUTPUT_DIR}"/forcing_iter*.nc4 \
               "${OUTPUT_DIR}"/daily_forcing_iter*.nc4
     fi
+    # Also clear the sigma file and any derived forcing/J so a fresh start
+    # cannot read leftovers from a previous experiment before iteration 1
+    # regenerates them (write_sigma.py rewrites sigma=1 on the first step).
+    rm -f "${SIGMA_FILE}"
+    find "${FORCING_DIR}" -maxdepth 1 -type f \
+        \( -name 'CO2_adjoint_forcing_*.nc4' -o -name 'forcing_all_obs.nc4' \
+           -o -name 'daily_forcing_stats.nc4' -o -name 'J_value.txt' \) \
+        -delete 2>/dev/null || true
     echo "Starting fresh from sigma=1"
 fi
 
@@ -197,8 +210,9 @@ log " log → ${LOG_FILE}"
 log "========================================================"
 
 for iter in $(seq 1 "${MAX_ITER}"); do
+    TRUE_ITER=$((ITER0 + iter))            # global iteration number across restarts
     log ""
-    log "-------- Iteration ${iter} / ${MAX_ITER} --------"
+    log "-------- Iteration ${iter} / ${MAX_ITER}  (global iteration ${TRUE_ITER}) --------"
 
     # ----------------------------------------------------------
     # (1) Write sigma_co2_osse.nc4  from current state
@@ -233,16 +247,34 @@ for iter in $(seq 1 "${MAX_ITER}"); do
     # (3) Observation cost J + forcing files (OSSE version)
     # ----------------------------------------------------------
     log "[${iter}/${MAX_ITER}] Computing J_obs and adjoint forcing (OSSE)"
-    SAT_FILE=$(ls "${FWD_DIR}/OutputDir"/GEOSChem.sat_track.*.nc4 2>/dev/null \
-               | tail -1)
-    [ -z "${SAT_FILE}" ] && die "No sat_track file in ${FWD_DIR}/OutputDir"
+
+    # Remove stale forcing from any previous iteration/run before regenerating.
+    # This directory is otherwise never cleaned; leftover per-timestep
+    # CO2_adjoint_forcing_*.nc4 files from a longer/denser previous run would be
+    # read by the adjoint as phantom forcing, and the glob can overflow ARG_MAX.
+    # find -delete avoids the ARG_MAX limit that a shell glob would hit.
+    find "${FORCING_DIR}" -maxdepth 1 -type f \
+        \( -name 'CO2_adjoint_forcing_*.nc4' -o -name 'forcing_all_obs.nc4' \
+           -o -name 'daily_forcing_stats.nc4' -o -name 'J_value.txt' \) \
+        -delete 2>/dev/null || true
+
+    # Newest sat_track file is always from the current forward run, because
+    # OutputDir is wiped before each forward GCHP launch. Don't filter by the
+    # window start date: MAPL stamps monthly collections with the period start
+    # shifted one month back (e.g. run 20160101→20160201 yields
+    # GEOSChem.sat_track.20151201_0010z.nc4). '|| true' keeps set -e/pipefail
+    # from killing the job silently when the glob is empty, so die() can report.
+    SAT_FILE=$(ls -t "${FWD_DIR}/OutputDir"/GEOSChem.sat_track.*.nc4 \
+               2>/dev/null | head -1 || true)
+    [ -z "${SAT_FILE}" ] && \
+        die "No sat_track file in ${FWD_DIR}/OutputDir (iter ${iter})"
 
     _diag_flag=""
     [ "${SAVE_DIAG}" = "true" ] || _diag_flag="--no-save-diagnostics"
 
     python3 "${SCRIPT_DIR}/co2_adjoint_forcing_osse.py" \
         "${SAT_FILE}" "${FORCING_DIR}" \
-        --ts-chem "${TS_CHEM}" \
+        --ts-chem "${TS_DYN}" \
         --t-start "${T_START}T00:00:00" \
         --t-end   "${T_END}T23:59:59" \
         ${_diag_flag} \
@@ -253,14 +285,14 @@ for iter in $(seq 1 "${MAX_ITER}"); do
     _diag_src="${FORCING_DIR}/forcing_all_obs.nc4"
     if [ -f "${_diag_src}" ]; then
         cp "${_diag_src}" \
-           "${OUTPUT_DIR}/forcing_iter$(printf '%03d' "${iter}").nc4"
+           "${OUTPUT_DIR}/forcing_iter$(printf '%03d' "${TRUE_ITER}").nc4"
     fi
 
     # Archive daily mean forcing profile (always written; small file).
     _daily_src="${FORCING_DIR}/daily_forcing_stats.nc4"
     if [ -f "${_daily_src}" ]; then
         cp "${_daily_src}" \
-           "${OUTPUT_DIR}/daily_forcing_iter$(printf '%03d' "${iter}").nc4"
+           "${OUTPUT_DIR}/daily_forcing_iter$(printf '%03d' "${TRUE_ITER}").nc4"
     fi
 
     # ----------------------------------------------------------
@@ -314,7 +346,7 @@ for iter in $(seq 1 "${MAX_ITER}"); do
         || rc=$?
 
     # Save sigma snapshot for diagnostics
-    cp "${STATE_FILE}" "${OUTPUT_DIR}/4dvar_state_iter$(printf '%03d' "${iter}").npz"
+    cp "${STATE_FILE}" "${OUTPUT_DIR}/4dvar_state_iter$(printf '%03d' "${TRUE_ITER}").npz"
 
     if [ "${rc}" -eq 1 ]; then
         log "========================================================"
@@ -345,6 +377,7 @@ python3 "${SCRIPT_DIR}/plot_4dvar.py" \
     --state-file  "${STATE_FILE}" \
     --output-dir  "${OUTPUT_DIR}" \
     --forcing-dir "${FORCING_DIR}" \
+    --log-file    "${LOG_FILE}" \
     --plot-dir    "${PLOT_DIR}" \
     && log "Plots saved to ${PLOT_DIR}" \
     || log "WARNING: plot_4dvar.py failed (plots not generated)"

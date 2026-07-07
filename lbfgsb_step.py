@@ -58,13 +58,32 @@ def read_obs_gradient(adj_output_dir, t_start, nlat, nlon):
           else xr.concat([xr.open_dataset(f) for f in files], dim='time'))
     ds = ds.sortby('time')
 
-    all_times = ds.time.values
-    t_selected = all_times[0]   # minimum time = adjoint final time = forward T_START
-    print(f'  Adjoint output files : {[os.path.basename(f) for f in files]}')
-    print(f'  Available times      : {all_times}')
-    print(f'  Selected time        : {t_selected}  (min time, index 0)')
+    all_times  = ds.time.values.astype('datetime64[ns]')
+    t_expected = np.datetime64(pd.Timestamp(t_start))
 
-    da   = ds['SurfaceFluxAdj_CO2'].isel(time=0)
+    # Select the adjoint record at the forward window start (t_start) explicitly,
+    # by matching the time coordinate — NOT by assuming index 0 is that record.
+    # The adjoint integrates backwards and accumulates the surface-flux
+    # sensitivity, so at t_start (its final step) the accumulated gradient is
+    # complete.  Matching by time means a stale/extra file that shifts the record
+    # order cannot silently change which timestep we read.
+    dt_all     = np.abs((all_times - t_expected) / np.timedelta64(1, 's'))
+    i_sel      = int(dt_all.argmin())
+    t_selected = all_times[i_sel]
+    print(f'  Adjoint output files : {[os.path.basename(f) for f in files]}')
+    print(f'  Available time range : {all_times[0]} .. {all_times[-1]}  (n={len(all_times)})')
+    print(f'  Requested t_start    : {t_expected}')
+    print(f'  Selected time        : {t_selected}  (index {i_sel}, {dt_all[i_sel]:.0f} s from t_start)')
+
+    # Guard: refuse to run on a gradient that does not actually correspond to
+    # t_start (e.g. stale/wrong-date adjoint output leaking into the read).
+    if dt_all[i_sel] > 3600.0:
+        raise RuntimeError(
+            f'No adjoint record near t_start {t_expected}: nearest is {t_selected} '
+            f'({dt_all[i_sel]:.0f} s away). Stale or missing adjoint output in '
+            f'{adj_output_dir}? Files: {[os.path.basename(f) for f in files]}')
+
+    da   = ds['SurfaceFluxAdj_CO2'].isel(time=i_sel)
     print(f'  SurfaceFluxAdj_CO2 dims   : {dict(da.sizes)}')
     grad = da.values   # (nlat, nlon) — already lat-lon from HISTORY.rc
     print(f'  Gradient array shape : {grad.shape}  (expected: ({nlat}, {nlon}))')

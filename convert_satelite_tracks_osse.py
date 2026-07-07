@@ -21,8 +21,6 @@ def read_oco_daily_osse(date, base_fold):
         if os.path.exists(file_path):
             ds = xr.open_dataset(file_path)
             daily_datasets.append(ds)
-        else:
-            print(f'File not found: {file_path}')
     if daily_datasets:
         # Combine datasets along a dimension 'nSamples'
         ds = xr.concat(daily_datasets, dim='nSamples')
@@ -33,11 +31,17 @@ def read_oco_daily_osse(date, base_fold):
         ds['time'] = ('nSamples', time_dt)
         ds['longitude'] = (ds['longitude'] % 360)
 
-        # Extract only the variables GCHP needs, as plain arrays without metadata
+        # Extract variables needed for both track file and adjoint forcing
         ds_clean = xr.Dataset({
-            'latitude': (['nSamples'], ds['latitude'].values),
-            'longitude': (['nSamples'], ds['longitude'].values),
-            'time': (['nSamples'], time_dt)
+            'latitude':             (['nSamples'],             ds['latitude'].values),
+            'longitude':            (['nSamples'],             ds['longitude'].values),
+            'time':                 (['nSamples'],             time_dt),
+            'pressure':             (['nSamples', 'maxLevels'], ds['pressure'].values),
+            'xCO2':                 (['nSamples'],             ds['xCO2'].values),
+            'xCO2-apriori':         (['nSamples'],             ds['xCO2-apriori'].values),
+            'xCO2-uncertainty':     (['nSamples'],             ds['xCO2-uncertainty'].values),
+            'xCO2-averagingKernel': (['nSamples', 'maxLevels'], ds['xCO2-averagingKernel'].values),
+            'CO2-apriori':          (['nSamples', 'maxLevels'], ds['CO2-apriori'].values),
         })
 
         ds_clean = ds_clean.sortby('time')
@@ -45,7 +49,6 @@ def read_oco_daily_osse(date, base_fold):
         ds_clean = ds_clean.swap_dims({"nSamples": "time"})
         return ds_clean
     else:
-        print(f'No data found for date: {date_str}')
         return None
 
 
@@ -54,15 +57,17 @@ def convert_track_yearly(year, base_fold):
     datasets = []
     for month in range(1, 13):
         num_days = calendar.monthrange(year, month)[1]
+        n_ok = 0
         for day in range(1, num_days + 1):
             try:
                 date = f'{year}{month:02d}{day:02d}'
-                print(date)
                 ds = read_oco_daily_osse(date, base_fold)
                 if ds is not None:
                     datasets.append(ds)
+                    n_ok += 1
             except Exception as e:
-                print(f"Failed to process {year}-{month:02d}-{day:02d}: {e}")
+                print(f"  Failed {year}-{month:02d}-{day:02d}: {e}")
+        print(f"  {year}-{month:02d}: {n_ok}/{num_days} days with observations")
 
     if datasets:
         print(f"Combining {len(datasets)} daily datasets for year {year}...")
@@ -99,6 +104,7 @@ def convert_track_yearly(year, base_fold):
             }
         }
 
+        os.makedirs('sat_track', exist_ok=True)
         output_file = f'sat_track/track_file_osse_{year}.nc'
         ds_final.to_netcdf(output_file, encoding=encoding)
         print(f"Saved: {output_file} ({len(ds_final.time)} observations)")

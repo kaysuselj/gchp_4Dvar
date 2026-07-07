@@ -56,6 +56,7 @@ exec > >(tee -a "${LOG_FILE}") 2>&1
 T_START="2019-01-01"
 T_END="2019-01-31"
 TS_CHEM=1200                             # chemistry timestep [s]
+TS_DYN=600                               # dynamic timestep [s] - forcing file frequency
 
 # Optimization
 NLAT=${NLAT:-46}
@@ -239,7 +240,7 @@ for iter in $(seq 1 "${MAX_ITER}"); do
 
     python3 "${SCRIPT_DIR}/co2_adjoint_forcing.py" \
         "${SAT_FILE}" "${FORCING_DIR}" \
-        --ts-chem "${TS_CHEM}" \
+        --ts-chem "${TS_DYN}" \
         --t-start "${T_START}T00:00:00" \
         --t-end   "${T_END}T23:59:59" \
         ${_diag_flag} \

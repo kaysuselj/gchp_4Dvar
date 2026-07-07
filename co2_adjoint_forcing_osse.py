@@ -532,7 +532,6 @@ def write_sparse(output_path, t, obs_lats, obs_lons, forcing_k, levs):
     # zlib compression requires at least one element; skip for empty files
     forcing_enc = FORCING_ENCODING if n_obs > 0 else {'dtype': 'float32'}
     ds.to_netcdf(output_path, encoding={'time': TIME_ENCODING, 'forcing': forcing_enc})
-    print(f'  Written: {output_path}  ({n_obs} obs)')
 
 
 # ---------------------------------------------------------------------------
@@ -658,8 +657,7 @@ def co2_adjoint_forcing(gchp_file, output_dir, ts_chem_s, t_start, t_end,
     print(f'J written to {j_path}')
 
     nlev = len(levs)
-    print(f'Writing {len(checkpoints)} checkpoint file(s) to {output_dir}/ '
-          f'(zero-obs files included for all checkpoints)')
+    n_with_obs = 0
     for i, t in enumerate(checkpoints):
         fpath     = _checkpoint_filename(output_dir, t)
         obs_list  = obs_by_ckpt[i]
@@ -667,11 +665,14 @@ def co2_adjoint_forcing(gchp_file, output_dir, ts_chem_s, t_start, t_end,
             obs_lats_k = np.array([d[0] for d in obs_list], dtype=np.float32)
             obs_lons_k = np.array([d[1] for d in obs_list], dtype=np.float32)
             forcing_k  = np.array([d[2] for d in obs_list], dtype=np.float32)
+            n_with_obs += 1
         else:
             obs_lats_k = np.empty(0, dtype=np.float32)
             obs_lons_k = np.empty(0, dtype=np.float32)
             forcing_k  = np.empty((0, nlev), dtype=np.float32)
         write_sparse(fpath, t, obs_lats_k, obs_lons_k, forcing_k, levs)
+    print(f'Wrote {len(checkpoints)} checkpoint file(s) to {output_dir}/ '
+          f'({n_with_obs} with obs, {len(checkpoints) - n_with_obs} zero-obs)')
 
     if save_diagnostics:
         diag_path = os.path.join(output_dir, 'forcing_all_obs.nc4')

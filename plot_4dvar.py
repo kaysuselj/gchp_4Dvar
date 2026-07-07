@@ -481,6 +481,42 @@ def plot_daily_forcing(snap_dir, iter_first, iter_last, plot_dir):
     print(f'  Saved: {path}')
 
 
+def parse_log_history(log_path):
+    """Recover per-iteration (J, J_obs, |g|_inf) from the optimizer log.
+
+    Parses lbfgsb_step.py output lines:
+        [iter N]  J_obs=...  J_b=...  J=...
+                  |g_obs|_inf=...  |g_b|_inf=...  |g|_inf=...
+    Returns {iter: {'J':..., 'J_obs':..., 'g_inf':...}}.  If the log holds
+    several experiments (fresh restarts reuse iteration numbers), the last
+    occurrence of each iteration number wins — i.e. the most recent run.
+    """
+    import re
+    re_j = re.compile(r'\[iter\s+(\d+)\]\s+J_obs=([-+.\deE]+)\s+'
+                      r'J_b=([-+.\deE]+)\s+J=([-+.\deE]+)')
+    re_g = re.compile(r'\|g\|_inf=([-+.\deE]+)')
+
+    hist, cur_iter = {}, None
+    try:
+        with open(log_path, errors='replace') as fh:
+            for line in fh:
+                m = re_j.search(line)
+                if m:
+                    cur_iter = int(m.group(1))
+                    hist[cur_iter] = {'J_obs': float(m.group(2)),
+                                      'J':     float(m.group(4)),
+                                      'g_inf': None}
+                    continue
+                if cur_iter is not None:
+                    g = re_g.search(line)
+                    if g:
+                        hist[cur_iter]['g_inf'] = float(g.group(1))
+                        cur_iter = None
+    except OSError as exc:
+        print(f'  WARNING: could not read log {log_path}: {exc}')
+    return hist
+
+
 # -----------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------
@@ -496,6 +532,9 @@ def main():
     parser.add_argument('--forcing-dir', default=None,
                         help='Directory containing CO2_adjoint_forcing_*.nc4 files '
                              '(for obs time series plot)')
+    parser.add_argument('--log-file', default=None,
+                        help='Optimizer log; used to fill convergence history '
+                             'for iterations whose snapshot .npz is missing')
     parser.add_argument('--plot-dir',    default=None,
                         help='Where to save PNGs (default: same dir as state file)')
     parser.add_argument('--nlat', type=int, default=None,
@@ -575,16 +614,29 @@ def main():
         snap_files = sorted(glob.glob(
             os.path.join(snap_dir, '4dvar_state_iter*.npz')))
 
-        iters, Js, J_obss, g_infs = [], [], [], []
+        # hist: iter -> {'J', 'J_obs', 'g_inf'}.  Log entries first (if any),
+        # then snapshots overwrite — snapshot data is authoritative.
+        hist = {}
+        if args.log_file:
+            hist = parse_log_history(args.log_file)
+            if hist:
+                print(f'  Log history: iterations '
+                      f'{min(hist)} … {max(hist)} recovered from {args.log_file}')
         for f in snap_files:
             sv  = np.load(f)
             i   = int(sv['iteration']) - 1
             if i < 1:
                 continue
-            iters.append(i)
-            Js.append(float(sv['J_prev']))
-            J_obss.append(float(sv['J_obs_prev']) if 'J_obs_prev' in sv else None)
-            g_infs.append(float(np.abs(sv['g_prev']).max()))
+            hist[i] = {
+                'J':     float(sv['J_prev']),
+                'J_obs': float(sv['J_obs_prev']) if 'J_obs_prev' in sv else None,
+                'g_inf': float(np.abs(sv['g_prev']).max()),
+            }
+
+        iters  = sorted(hist)
+        Js     = [hist[i]['J']     for i in iters]
+        J_obss = [hist[i]['J_obs'] for i in iters]
+        g_infs = [hist[i]['g_inf'] for i in iters]
 
         if len(iters) >= 2:
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 7), sharex=True)
@@ -600,7 +652,9 @@ def main():
             ax1.legend(fontsize=9)
             ax1.grid(True, which='both', alpha=0.3)
 
-            ax2.semilogy(iters, g_infs, 'g-o', markersize=5, linewidth=1.5)
+            iters_g  = [iters[k] for k, v in enumerate(g_infs) if v is not None]
+            g_infs_g = [v for v in g_infs if v is not None]
+            ax2.semilogy(iters_g, g_infs_g, 'g-o', markersize=5, linewidth=1.5)
             ax2.set_ylabel('||∇J||∞')
             ax2.set_xlabel('Iteration')
             ax2.grid(True, which='both', alpha=0.3)

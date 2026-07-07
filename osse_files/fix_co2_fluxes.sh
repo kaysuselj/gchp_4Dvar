@@ -132,11 +132,18 @@ else
         ncatted -O -a unit,lon,d,, -a units,lon,c,c,"degrees_east" "${DEST_FILE}"
         ncatted -O -a unit,lat,d,, -a units,lat,c,c,"degrees_north" "${DEST_FILE}"
 
-        # ADD time coordinate (middle of month: day 15, 12:00)
-        HOURS_SINCE_1900=$(python3 -c "from datetime import datetime; d=datetime(${YEAR},${MONTH_NUM},15,12,0,0); ref=datetime(1900,1,1); print(int((d-ref).total_seconds()/3600))")
+        # ADD time coordinate (day 1 of month, hour 0 - matches HEMCO time spec 1-12/1/0)
+        HOURS_SINCE_1900=$(python3 -c "from datetime import datetime; d=datetime(${YEAR},${MONTH_NUM},1,0,0,0); ref=datetime(1900,1,1); print(int((d-ref).total_seconds()/3600))")
 
-        ncap2 -O -s "defdim(\"time\",1); time[time]=${HOURS_SINCE_1900}f; time@units=\"hours since 1900-01-01 00:00:00\"; time@long_name=\"time\"; time@calendar=\"proleptic_gregorian\"" "${DEST_FILE}" "${DEST_FILE}.tmp"
-        ncks -O -4 --mk_rec_dmn time "${DEST_FILE}.tmp" "${DEST_FILE}"
+        # ncecat adds time as record dimension to data variables (CO2_Flux becomes
+        # CO2_Flux(time,lat,lon)); coordinate variables lon(lon)/lat(lat) are preserved
+        ncecat -O -u time "${DEST_FILE}" "${DEST_FILE}.tmp"
+        ncap2 -O -s "time[time]=${HOURS_SINCE_1900}" "${DEST_FILE}.tmp" "${DEST_FILE}.tmp"
+        ncatted -O \
+            -a units,time,c,c,"hours since 1900-01-01 00:00:00" \
+            -a calendar,time,c,c,"proleptic_gregorian" \
+            -a long_name,time,c,c,"time" \
+            "${DEST_FILE}.tmp" "${DEST_FILE}"
         rm -f "${DEST_FILE}.tmp"
 
         echo "   Fixed: ${YEAR}/${MONTH}"
@@ -220,6 +227,7 @@ else
         fi
 
         MONTH=$(basename "${MONTH_FILE}")
+        MONTH_NUM=$(basename "${MONTH_FILE}" .nc | sed 's/^0*//')
         DEST_FILE="${DEST_GPP}/${MONTH}"
 
         # Copy file first
@@ -227,6 +235,20 @@ else
 
         # Rename longitude -> lon and latitude -> lat
         ncrename -O -v longitude,lon -v latitude,lat "${DEST_FILE}"
+
+        # ADD time coordinate (day 1 of month, hour 0 - matches HEMCO time spec 1-12/1/0)
+        HOURS_SINCE_1900=$(python3 -c "from datetime import datetime; d=datetime(${YEAR},${MONTH_NUM},1,0,0,0); ref=datetime(1900,1,1); print(int((d-ref).total_seconds()/3600))")
+
+        # ncecat adds time as record dimension to data variables (CO2_Flux becomes
+        # CO2_Flux(time,lat,lon)); coordinate variables lon(lon)/lat(lat) are preserved
+        ncecat -O -u time "${DEST_FILE}" "${DEST_FILE}.tmp"
+        ncap2 -O -s "time[time]=${HOURS_SINCE_1900}" "${DEST_FILE}.tmp" "${DEST_FILE}.tmp"
+        ncatted -O \
+            -a units,time,c,c,"hours since 1900-01-01 00:00:00" \
+            -a calendar,time,c,c,"proleptic_gregorian" \
+            -a long_name,time,c,c,"time" \
+            "${DEST_FILE}.tmp" "${DEST_FILE}"
+        rm -f "${DEST_FILE}.tmp"
 
         echo "   Fixed: ${YEAR}/${MONTH}"
     done
@@ -258,6 +280,7 @@ else
         fi
 
         MONTH=$(basename "${MONTH_FILE}")
+        MONTH_NUM=$(basename "${MONTH_FILE}" .nc | sed 's/^0*//')
         DEST_FILE="${DEST_TER}/${MONTH}"
 
         # Copy file first
@@ -265,6 +288,20 @@ else
 
         # Rename longitude -> lon and latitude -> lat
         ncrename -O -v longitude,lon -v latitude,lat "${DEST_FILE}"
+
+        # ADD time coordinate (day 1 of month, hour 0 - matches HEMCO time spec 1-12/1/0)
+        HOURS_SINCE_1900=$(python3 -c "from datetime import datetime; d=datetime(${YEAR},${MONTH_NUM},1,0,0,0); ref=datetime(1900,1,1); print(int((d-ref).total_seconds()/3600))")
+
+        # ncecat adds time as record dimension to data variables (CO2_Flux becomes
+        # CO2_Flux(time,lat,lon)); coordinate variables lon(lon)/lat(lat) are preserved
+        ncecat -O -u time "${DEST_FILE}" "${DEST_FILE}.tmp"
+        ncap2 -O -s "time[time]=${HOURS_SINCE_1900}" "${DEST_FILE}.tmp" "${DEST_FILE}.tmp"
+        ncatted -O \
+            -a units,time,c,c,"hours since 1900-01-01 00:00:00" \
+            -a calendar,time,c,c,"proleptic_gregorian" \
+            -a long_name,time,c,c,"time" \
+            "${DEST_FILE}.tmp" "${DEST_FILE}"
+        rm -f "${DEST_FILE}.tmp"
 
         echo "   Fixed: ${YEAR}/${MONTH}"
     done
