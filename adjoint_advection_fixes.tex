@@ -1,0 +1,574 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath, amssymb}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{subcaption}
+
+\geometry{margin=1in}
+
+\definecolor{codegray}{rgb}{0.95,0.95,0.95}
+\lstset{
+  backgroundcolor=\color{codegray},
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  language=Fortran,
+  keywordstyle=\color{blue},
+  commentstyle=\color{green!50!black},
+}
+
+\title{Correcting the Adjoint of Cubed-Sphere PPM Tracer Advection\\
+in GCHP: Diagnosis and Fixes}
+\author{Kay Suselj}
+\date{July 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Four-dimensional variational data assimilation (4D-Var) requires an
+\emph{adjoint model} that propagates observation-error information backward
+through time. A critical component is the adjoint of the tracer advection
+scheme. In GCHP, tracer advection uses the Piecewise Parabolic Method (PPM)
+on a cubed-sphere grid. We identified and corrected systematic errors in the
+adjoint of the PPM boundary stencil at cubed-sphere face edges. These errors
+caused the adjoint gradient to be inflated by a factor of 2--15 at face-edge
+cells. This document describes the diagnosis, the two attempted fixes, and
+the recommended corrected approach.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%% ============================================================
+\section{Background: Why the Adjoint Transport Matters}
+%% ============================================================
+
+In atmospheric CO$_2$ inverse modeling using 4D-Var, we seek surface flux
+corrections $\delta\boldsymbol{\sigma}$ that minimize a cost function:
+\begin{equation}
+  J(\boldsymbol{\sigma}) = \frac{1}{2}
+    \sum_{k}\left(\frac{y_k - H_k[\boldsymbol{\sigma}]}{\sigma_{\rm obs}}\right)^2
+  + \frac{1}{2}\left(\frac{\boldsymbol{\sigma} - \boldsymbol{\sigma}_b}{\sigma_b}\right)^2,
+  \label{eq:cost}
+\end{equation}
+where $y_k$ are satellite CO$_2$ observations, $H_k$ is the forward model
+operator mapping fluxes to concentrations, and $\boldsymbol{\sigma}_b$ is a
+background (prior) flux estimate.
+
+The gradient of $J$ with respect to the control vector $\boldsymbol{\sigma}$
+is computed by running the \emph{adjoint model}, which carries sensitivity
+information $\lambda$ (units of CO$_2$ concentration per unit of flux)
+backward through time. The adjoint of tracer transport---the dominant
+operator in $H_k$---must therefore accurately propagate $\lambda$ from
+observation locations back to source locations.
+
+If the adjoint gradient $\nabla J$ is wrong by a factor of $\sim$2--15 at
+face-edge cells (as we found), the gradient-descent optimizer (L-BFGS-B)
+takes incorrect steps, causing flux fields to grow to unphysical values and
+the cost function to oscillate rather than converge.
+
+%% ============================================================
+\section{The PPM Advection Scheme}
+%% ============================================================
+
+GCHP uses the Lin--Rood Finite-Volume dynamical core \citep{lin1996,putman2007},
+which advects tracers with the Piecewise Parabolic Method (PPM). In the
+simplified \emph{perfectly linear} variant (\texttt{mord=2}, \texttt{hord\_tr=2}),
+the flux at the left edge of cell $i$ (with Courant number $c$) is:
+\begin{equation}
+  F_i =
+  \begin{cases}
+    q_{i-1} + (1-c)\bigl[a_i - q_{i-1} - c(a_{i-1}+a_i - 2q_{i-1})\bigr]
+    & c > 0 \text{ (upwind from left)}, \\[6pt]
+    q_i + (1+c)\bigl[a_i - q_i + c(a_i+a_{i+1} - 2q_i)\bigr]
+    & c < 0 \text{ (upwind from right)},
+  \end{cases}
+  \label{eq:ppm_flux}
+\end{equation}
+where $q_i$ is the cell-mean tracer value in cell $i$ and $a_i$ is the
+reconstructed tracer value at the \emph{left edge} of cell $i$, computed
+from neighboring cell means:
+\begin{equation}
+  a_i = \frac{7}{12}(q_{i-1}+q_i) - \frac{1}{12}(q_{i-2}+q_{i+1})
+  \quad \text{(interior cells)}.
+  \label{eq:al_interior}
+\end{equation}
+
+%% ============================================================
+\section{The Cubed-Sphere Grid and Ghost Cells}
+%% ============================================================
+
+\subsection{Grid structure}
+
+The cubed-sphere grid partitions the sphere into six square faces, each
+discretized on a $N_x \times N_y$ grid. In GCHP at resolution C24, each
+face is $24 \times 24$ cells. The PPM stencil in Eq.~\eqref{eq:al_interior}
+requires values at $i-2, i-1, i, i+1$. For cells near a face edge (e.g.\
+$i=1$ or $i=N_x$), some of these neighbors lie on an \emph{adjacent face},
+which is stored on a different MPI rank.
+
+\subsection{Ghost cells (halo exchange)}
+
+Before each PPM sweep, a \emph{halo exchange} (\texttt{mpp\_update\_domains})
+copies data from neighboring MPI ranks into \emph{ghost cells}: the indices
+$i = 0, -1, \ldots$ (left halo) and $i = N_x+1, N_x+2, \ldots$ (right halo).
+These ghost cells hold valid, up-to-date field values and allow the PPM
+stencil to be evaluated uniformly across face edges.
+
+\subsection{Special boundary stencil for \texorpdfstring{$a_1$}{a(1)} and \texorpdfstring{$a_{N_x}$}{a(Nx)}}
+
+At the face edges the standard 4-point stencil of Eq.~\eqref{eq:al_interior}
+would extend two cells into the ghost region. Instead, the GCHP code uses a
+special \emph{boundary stencil} that averages a ghost-side and an
+interior-side second-order reconstruction:
+\begin{equation}
+  a_1 = \frac{1}{2}\underbrace{\left[
+    \frac{(2\,\Delta x_0 + \Delta x_{-1})\,q_0 - \Delta x_0\,q_{-1}}
+         {\Delta x_{-1} + \Delta x_0}
+  \right]}_{\text{LEFT: ghost cells (indices 0, --1)}}
+  + \frac{1}{2}\underbrace{\left[
+    \frac{(2\,\Delta x_1 + \Delta x_2)\,q_1 - \Delta x_1\,q_2}
+         {\Delta x_1 + \Delta x_2}
+  \right]}_{\text{RIGHT: interior cells (indices 1, 2)}},
+  \label{eq:al1_boundary}
+\end{equation}
+and symmetrically for $a_{N_x}$ at the right edge. The two remaining
+stencil cells, $a_0$ and $a_{N_x+1}$, are computed from the ghost region
+alone.
+
+%% ============================================================
+\section{The Reversed-Wind Adjoint Approach}
+%% ============================================================
+
+\subsection{Discrete transpose vs.\ reversed-wind adjoint}
+
+The \emph{exact} adjoint of the discretized transport operator is its
+matrix transpose. Computing this transpose requires either automatic
+differentiation of the entire PPM code (expensive) or storing intermediate
+states (checkpoint memory). An attractive approximation---used in GCHP---is
+the \textbf{reversed-wind adjoint}: run the \emph{same} PPM code with
+time reversed ($\Delta t \to -\Delta t$) and all wind fields negated. For
+smooth, slowly-varying flows this approximates the true adjoint well, at
+the cost of introducing errors proportional to flow nonlinearity and flux
+limiter activity.
+
+\subsection{Implication for Courant numbers at face boundaries}
+
+Under reversed winds, a cell face that had $c > 0$ (inward flow, from ghost
+to interior) in the forward pass now has $c < 0$ (outward flow, from
+interior to ghost). This matters because:
+\begin{itemize}
+  \item In the \textbf{forward} with $c > 0$ at face $i=1$: upwind cell is
+    the ghost cell $q_0$, and the flux depends on ghost-cell
+    reconstructions $a_0$ and $a_1$ (half-ghost).
+  \item In the \textbf{adjoint} with $c < 0$ at face $i=1$: upwind cell
+    should be the interior cell $q_1$, and the flux should depend only on
+    interior reconstructions.
+\end{itemize}
+The key problem is that neither the unmodified PPM code nor the first-attempt
+fixes fully respect this distinction.
+
+%% ============================================================
+\section{Diagnosis: Finite-Difference Gradient Validation}
+%% ============================================================
+
+We validated the adjoint gradient against finite differences of the cost
+function $J$. For each test cell $(f, j, i)$, we ran the forward model
+twice with $\sigma \pm \varepsilon$ and computed
+\begin{equation}
+  g_{\rm FD} = \frac{J(\sigma+\varepsilon) - J(\sigma-\varepsilon)}{2\varepsilon},
+  \label{eq:fd}
+\end{equation}
+and compared to the adjoint gradient $g_{\rm adj}$ at the same cell. For
+a quadratic cost function and exact adjoint, $g_{\rm adj}/g_{\rm FD} = 1$.
+
+\subsection{Baseline results (no adjoint fixes)}
+
+Without any boundary stencil correction, cell ratios $g_{\rm adj}/g_{\rm FD}$
+ranged from $-197$ to $+17$, with wrong signs at several face-edge cells.
+This confirmed that the standard reversed-wind PPM adjoint is severely
+incorrect at cubed-sphere face boundaries.
+
+\subsection{Identifying the root cause}
+
+Comparing cells at different positions from face edges revealed:
+\begin{itemize}
+  \item \textbf{Interior cells} (far from any face edge): ratio $\approx 1.1$,
+    nearly correct.
+  \item \textbf{Seam cells} (on one face edge, $i=0$ or $j=N_y-1$):
+    ratio $\approx 2$--$5$.
+  \item \textbf{Corner cells} (on two face edges simultaneously): ratio
+    $\approx 15$.
+\end{itemize}
+The spatial pattern clearly pointed to the cubed-sphere face boundary
+stencil as the source of error.
+
+%% ============================================================
+\section{Fix 1: MPI Adjoint Halo Exchange (Reverted)}
+%% ============================================================
+
+\subsection{Motivation}
+
+After the PPM step, sensitivity values that accumulated in the ghost cells
+(halo region) of the adjoint field $\lambda$ are never sent back to the
+neighboring face that owns those cells. This ``lost'' sensitivity could
+explain the large adjoint errors at face edges.
+
+\subsection{Implementation}
+
+We added a call to \texttt{mpp\_update\_domains\_ad} immediately after the
+PPM advection step in \texttt{fv\_tracer2d.F90}:
+\begin{lstlisting}
+! After offline_tracer_advection in adjoint mode:
+call mpp_update_domains_ad(q3, domain, ...)
+\end{lstlisting}
+This routine is the adjoint of the forward halo exchange: instead of
+\emph{copying} ghost values from neighbors, it \emph{accumulates} ghost-cell
+sensitivities into the owning cells on the neighboring face and zeros the
+halo.
+
+\subsection{Result and reason for reverting}
+
+No improvement in gradient ratios was observed. After further analysis, we
+determined that \texttt{mpp\_update\_domains\_ad} belongs to the
+\textbf{discrete-transpose} adjoint framework, which is \emph{incompatible}
+with the reversed-wind adjoint used in GCHP:
+\begin{itemize}
+  \item The reversed-wind adjoint propagates sensitivity by running the
+    \emph{forward PPM} with negated winds. In this framework, the
+    forward halo exchange already fills ghost cells with the correct
+    sensitivity values (from the reversed-wind field on the neighboring
+    face). Adding \texttt{mpp\_update\_domains\_ad} on top of this
+    double-counts the cross-face contributions.
+  \item The discrete-transpose approach requires storing all intermediate
+    states and transposing every operator, which is not how the GCHP
+    adjoint is implemented.
+\end{itemize}
+Fix 1 was reverted and is not re-applied.
+
+%% ============================================================
+\section{Fix 2: Ghost-Cell Boundary Stencil (Partial Improvement)}
+%% ============================================================
+
+\subsection{Motivation}
+
+The forward PPM at $i=1$ with $c > 0$ (inward) uses ghost-cell
+reconstructions $a_0$ and $a_1$ (half-ghost). Fix 2 hypothesized that the
+adjoint at the same face with $c < 0$ (outward) should ``mirror'' this
+by also using the ghost-cell stencil---symmetrically replacing the standard
+interior stencil.
+
+A runtime flag \texttt{tp\_core\_is\_adjoint} was added so that
+\texttt{xppm}/\texttt{yppm} can switch to the boundary stencil only during
+the adjoint run, leaving the forward model byte-identical.
+
+\subsection{Implementation}
+
+In the \texttt{mord=2} flux loop of \texttt{xppm}:
+\begin{lstlisting}
+#ifdef ADJOINT
+  if (tp_core_is_adjoint .and. .not.nested .and. grid_type<3) then
+    if (i==is .and. is==1 .and. xt < 0.) then
+      qtmp = q1(i-1)          ! ghost cell q(0)
+      flux(i,j) = qtmp + (1.+xt)*(al(i)-qtmp + xt*(al(i-1)+al(i)-(qtmp+qtmp)))
+      ! uses al(0) [ghost] and al(1) [half-ghost]
+    else if (i==ie+1 .and. (ie+1)==npx .and. xt > 0.) then
+      qtmp = q1(i-1)          ! interior q(npx-1)
+      flux(i,j) = qtmp + (1.-xt)*(al(i)-qtmp - xt*(al(i)+al(i+1)-(qtmp+qtmp)))
+      ! uses al(npx) [half-ghost] and al(npx+1) [ghost]
+    end if
+  end if
+#endif
+\end{lstlisting}
+
+\subsection{Results}
+
+\begin{table}[h]
+\centering
+\caption{Finite-difference gradient ratio $g_{\rm adj}/g_{\rm FD}$ for Fix 2
+  (5-day window, C24, hord\_tr=2, no convection/PBL).}
+\begin{tabular}{llcc}
+\toprule
+Cell tag & Location & Position & Ratio \\
+\midrule
+\texttt{f0j03i00} & $25.6^\circ$S, $306.6^\circ$E & corner (x+y edge) & 14.66 \\
+\texttt{f0j07i20} & $16.6^\circ$S, $16.1^\circ$E  & interior          & 0.71  \\
+\texttt{f1j14i00} & $1.5^\circ$S,  $36.6^\circ$E  & x-seam ($i=0$)   & 2.06  \\
+\texttt{f1j19i11} & $12.9^\circ$N, $22.3^\circ$E  & y-seam ($j=N_y$) & 2.06  \\
+\texttt{f4j18i15} & $13.0^\circ$S, $286.1^\circ$E & interior (H-dominated)& 0.52 \\
+Global uniform    & ---                            & ---               & 1.30  \\
+\bottomrule
+\end{tabular}
+\label{tab:fix2_results}
+\end{table}
+
+The overall correlation improved dramatically from baseline (near zero) to
+$r = 0.915$ (no conv/PBL) and $r = 0.866$ (with full physics). However, two
+systematic errors remain:
+
+\begin{enumerate}
+  \item \textbf{Seam cells: ratio $\approx 2.06$.} The ghost-cell mirror
+    stencil still propagates incorrect information at face edges. The root
+    cause is identified below.
+  \item \textbf{Corner cell: ratio $\approx 14.66$.} Compounding errors from
+    both $x$- and $y$-direction face edges, exacerbated by the
+    \texttt{copy\_corners} ghost operation.
+\end{enumerate}
+
+%% ============================================================
+\section{Why Fix 2 Has a Factor-of-2 Error at Seam Cells}
+%% ============================================================
+
+Consider the left-face flux in adjoint mode ($i=1$, $c < 0$, outward flow):
+
+\paragraph{Fix 2 formula:}
+\begin{equation}
+  F_1^{\rm Fix2} = q_0 + (1+c)\bigl[a_1 - q_0 + c(a_0 + a_1 - 2q_0)\bigr],
+  \label{eq:fix2_left}
+\end{equation}
+where $q_0$, $a_0$ are ghost-cell values and $a_1$ is the half-ghost
+boundary reconstruction from Eq.~\eqref{eq:al1_boundary}.
+
+\paragraph{Correct interior-upwind formula:}
+In the reversed-wind adjoint, $c < 0$ at face $i=1$ means flow is directed
+\emph{outward} (from the interior toward the ghost region). The physical
+upwind cell is therefore $q_1$ (interior, not ghost), and the reconstruction
+should be computed from interior cells only. The correct formula is
+\begin{equation}
+  F_1^{\rm correct} = q_1 + (1+c)\bigl[a_1^{\rm loc} - q_1 +
+    c(a_1^{\rm loc} + a_2 - 2q_1)\bigr],
+  \label{eq:fix3_left}
+\end{equation}
+where
+\begin{equation}
+  a_1^{\rm loc} = \frac{(2\,\Delta x_1 + \Delta x_2)\,q_1 - \Delta x_1\,q_2}
+                       {\Delta x_1 + \Delta x_2}
+  \label{eq:al_loc_left}
+\end{equation}
+is the \textbf{interior-only half} of Eq.~\eqref{eq:al1_boundary} (the RIGHT
+term alone, discarding the ghost LEFT term), and $a_2 = c_3 q_1 + c_2 q_2 +
+c_1 q_3$ is already interior-only.
+
+\paragraph{Why the ratio is $\approx 2$:}
+Since $a_1 = \tfrac{1}{2}(A_{\rm ghost} + a_1^{\rm loc})$, Fix 2 effectively
+uses a ghost+interior mixture where only the interior part is physically
+meaningful for the adjoint. For smooth gradients where $A_{\rm ghost} \approx
+a_1^{\rm loc}$ (which holds when the tracer field is symmetric across the
+face), Fix 2's formula gives roughly $2 \times$ the correct interior
+reconstruction---hence the observed ratio of $\approx 2.06$.
+
+%% ============================================================
+\section{Fix 3 (First Attempt, Incorrect): al\_loc as Half of al(1)}
+%% ============================================================
+
+\subsection{Idea}
+
+Fix 3 attempted to correct the ratio-2 error by computing $a_1^{\rm loc}$
+as the interior-only part of $a_1$. The implementation subtracted the ghost
+half:
+\begin{equation}
+  a_1^{\rm loc,\,wrong} = 2\,a_1 - A_{\rm ghost}.
+\end{equation}
+
+\subsection{Error}
+
+Unfortunately $a_1 = \tfrac{1}{2}(A_{\rm ghost} + a_1^{\rm loc})$ means
+$2a_1 - A_{\rm ghost} = a_1^{\rm loc}$ is correct in principle, but the
+implementation incorrectly computed $A_{\rm ghost}$ with wrong index offsets,
+producing $a_1^{\rm loc,\,wrong} \approx 2\,a_1^{\rm loc}$---a factor-of-2
+error in the other direction.
+
+\subsection{Result}
+
+The gradient correlation dropped from $r = 0.866$ (Fix 2) to $r = 0.711$
+(Fix 3), with the slope falling from 0.97 to 0.46. Fix 3 was reverted.
+
+%% ============================================================
+\section{Fix 3 (Corrected): Interior-Only Boundary Reconstruction}
+%% ============================================================
+
+\subsection{Implementation}
+
+Rather than subtracting the ghost contribution from $a_1$, compute
+$a_1^{\rm loc}$ directly from interior cells using the same differencing
+weights as the RIGHT term of Eq.~\eqref{eq:al1_boundary}:
+
+\begin{equation}
+  a_1^{\rm loc} = \frac{(2\,\Delta x_1 + \Delta x_2)\,q_1 - \Delta x_1\,q_2}
+                       {\Delta x_1 + \Delta x_2},
+  \label{eq:al_loc_correct_left}
+\end{equation}
+and for the right boundary:
+\begin{equation}
+  a_{N_x}^{\rm loc} = \frac{(2\,\Delta x_{N_x-1} + \Delta x_{N_x-2})\,q_{N_x-1}
+                       - \Delta x_{N_x-1}\,q_{N_x-2}}
+                      {\Delta x_{N_x-2} + \Delta x_{N_x-1}}.
+  \label{eq:al_loc_correct_right}
+\end{equation}
+
+The complete adjoint flux formulas become:
+
+\paragraph{Left face ($i=1$, $c < 0$, outward):}
+\begin{equation}
+  F_1 = q_1 + (1+c)\bigl[a_1^{\rm loc} - q_1 + c(a_1^{\rm loc} + a_2 - 2q_1)\bigr].
+  \label{eq:fix3_correct_left}
+\end{equation}
+
+\paragraph{Right face ($i=N_x$, $c > 0$, outward):}
+\begin{equation}
+  F_{N_x} = q_{N_x-1} + (1-c)\bigl[a_{N_x}^{\rm loc} - q_{N_x-1}
+    - c(a_{N_x-1} + a_{N_x}^{\rm loc} - 2q_{N_x-1})\bigr].
+  \label{eq:fix3_correct_right}
+\end{equation}
+
+The same correction applies in the $y$-direction in \texttt{yppm}, replacing
+$q_1, q_2, \Delta x_1, \Delta x_2$ with $q_{(i,1)}, q_{(i,2)},
+\Delta y_1, \Delta y_2$ and so on.
+
+\subsection{Key properties}
+
+\begin{enumerate}
+  \item \textbf{No ghost cells.} Equations \eqref{eq:fix3_correct_left} and
+    \eqref{eq:fix3_correct_right} involve only indices $i \geq 1$ (interior)
+    or $j \geq 1$ (interior). No MPI communication is required beyond what
+    the standard forward halo exchange already provides for the reversed-wind
+    adjoint sensitivity field.
+  \item \textbf{Correct upwind cell.} For $c < 0$ (outward at left face), the
+    upwind cell $q_1$ is interior. For $c > 0$ (outward at right face), the
+    upwind cell $q_{N_x-1}$ is interior.
+  \item \textbf{Consistent with reversed-wind framework.} The formula
+    matches the standard mord=2 interior formula (Eq.~\ref{eq:ppm_flux},
+    $c < 0$ branch) with $a_i$ replaced by $a_i^{\rm loc}$, which is the
+    natural substitution when ghost cells are unavailable.
+  \item \textbf{Forward model unchanged.} The fix is guarded by
+    \texttt{\#ifdef ADJOINT} and the runtime flag \texttt{tp\_core\_is\_adjoint},
+    so the forward PPM is byte-identical to the original.
+\end{enumerate}
+
+\subsection{Fortran implementation (xppm)}
+
+\begin{lstlisting}
+#ifdef ADJOINT
+  if (tp_core_is_adjoint .and. .not.nested .and. grid_type<3) then
+    if (i==is .and. is==1 .and. xt < 0.) then
+      ! Left face outward: upwind = q1(1) = interior.
+      ! al_loc = interior-only right half of al(1) formula.
+      al_loc = ((2.*dxa(i,j)+dxa(i+1,j))*q1(i) - dxa(i,j)*q1(i+1)) &
+             / (dxa(i,j) + dxa(i+1,j))
+      qtmp = q1(i)
+      flux(i,j) = qtmp + (1.+xt)*(al_loc - qtmp &
+                + xt*(al_loc + al(i+1) - (qtmp+qtmp)))
+    else if (i==ie+1 .and. (ie+1)==npx .and. xt > 0.) then
+      ! Right face outward: upwind = q1(npx-1) = interior.
+      ! al_loc = interior-only left half of al(npx) formula.
+      al_loc = ((2.*dxa(i-1,j)+dxa(i-2,j))*q1(i-1) - dxa(i-1,j)*q1(i-2)) &
+             / (dxa(i-2,j) + dxa(i-1,j))
+      qtmp = q1(i-1)
+      flux(i,j) = qtmp + (1.-xt)*(al_loc - qtmp &
+                - xt*(al(i-1) + al_loc - (qtmp+qtmp)))
+    else if (xt > 0.) then
+      ...standard interior formula...
+#endif
+\end{lstlisting}
+
+%% ============================================================
+\section{Summary of All Changes}
+%% ============================================================
+
+\begin{table}[h]
+\centering
+\caption{Summary of adjoint advection fixes.}
+\begin{tabular}{p{1.5cm} p{3.5cm} p{4.5cm} p{2.5cm}}
+\toprule
+Fix & Description & Outcome & Status \\
+\midrule
+Fix 1 & \texttt{mpp\_update\_domains\_ad} after PPM in \texttt{fv\_tracer2d.F90}
+  & No improvement; double-counts cross-face sensitivity in reversed-wind framework
+  & \textbf{Reverted} \\[6pt]
+Fix 2 & Ghost-cell mirror stencil at face boundaries in \texttt{tp\_core.F90};
+  added \texttt{tp\_core\_is\_adjoint} flag
+  & Corr $= 0.915$ (no conv/PBL); seam ratio $\approx 2.06$; corner ratio $\approx 14.66$
+  & \textbf{Current baseline} \\[6pt]
+Fix 3a & Interior-only $a_1^{\rm loc}$ via wrong subtraction formula
+  & Corr $= 0.711$ (worse than Fix 2); factor-of-2 error in $a_1^{\rm loc}$
+  & \textbf{Reverted} \\[6pt]
+Fix 3b & Interior-only $a_1^{\rm loc}$ from Eq.~\eqref{eq:al_loc_correct_left}--\eqref{eq:al_loc_correct_right};
+  correct upwind cell
+  & Pending validation; expected seam ratio $\to 1$
+  & \textbf{Proposed} \\
+\bottomrule
+\end{tabular}
+\label{tab:summary}
+\end{table}
+
+%% ============================================================
+\section{Remaining Known Issues}
+%% ============================================================
+
+\subsection{Corner cells}
+
+Cells at the intersection of two face edges ($i=0$ AND $j \approx 0$, for
+example) show ratio $\approx 14.66$ even after Fix 2. These cells are
+affected by three compounding sources:
+\begin{enumerate}
+  \item The $x$-direction seam stencil error (addressed by Fix 3b).
+  \item The $y$-direction seam stencil error (also addressed by Fix 3b for \texttt{yppm}).
+  \item The \texttt{copy\_corners} operation in GCHP, which fills corner ghost
+    cells using rotational transforms. The adjoint of this operation is not
+    currently implemented, leaving corner sensitivities unaccounted for.
+\end{enumerate}
+The corner cell fix requires additional work beyond the seam stencil and will
+be addressed separately.
+
+\subsection{Full-physics adjoint noise}
+
+With convection and planetary boundary layer (PBL) mixing enabled, the
+adjoint gradient becomes noisier because these processes are strongly
+nonlinear and chaotic. Convective hot spots (e.g.\ the Maritime Continent)
+amplify sensitivity values by factors of $\sim 10^3$ or more over a 5-day
+adjoint run. This is a known limitation of the reversed-wind adjoint for
+parameterized physics and is separate from the advection stencil issue.
+
+%% ============================================================
+\section{Practical Impact on 4D-Var Convergence}
+%% ============================================================
+
+The seam-cell gradient inflation ($\sim 2$) causes L-BFGS-B to take
+$\sim 2\times$ too-large steps in the sigma (flux scaling) control variable
+near face boundaries. Over several iterations this leads to:
+\begin{itemize}
+  \item Sigma values growing to unphysical magnitudes ($> 5$ in some OSSE runs).
+  \item Cost function oscillation rather than monotonic decrease.
+  \item Poor agreement between inferred and true fluxes in the OSSE validation.
+\end{itemize}
+After Fix 3b, the seam-cell ratios are expected to approach 1, which should
+improve optimizer behavior significantly. The corner-cell error ($\sim 15$)
+affects only a small number of cells but may still cause localized spikes in
+the flux analysis.
+
+%% ============================================================
+\section*{Acknowledgments}
+%% ============================================================
+
+This work was carried out as part of the GCHP 4D-Var CO$_2$ OSSE at JPL,
+with support from NASA.
+
+%% ============================================================
+\begin{thebibliography}{9}
+\bibitem{lin1996}
+  Lin, S.-J., and R.~B. Rood, 1996: Multidimensional flux-form
+  semi-Lagrangian transport schemes. \textit{Mon. Wea. Rev.}, \textbf{124},
+  2046--2070.
+
+\bibitem{putman2007}
+  Putman, W.~M., and S.-J. Lin, 2007: Finite-volume transport on various
+  cubed-sphere grids. \textit{J. Comput. Phys.}, \textbf{227}, 55--78.
+\end{thebibliography}
+
+\end{document}

@@ -1,0 +1,666 @@
+% =============================================================================
+% Adjoint-Based CO2 Surface Flux Inversion in GCHP: Technical Description
+% =============================================================================
+\documentclass[12pt]{article}
+
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{bm}
+\usepackage{physics}
+\usepackage{siunitx}
+
+\geometry{margin=1in}
+
+\newcommand{\TER}{F_{\mathrm{TER}}}
+\newcommand{\SFC}{F_{\mathrm{sfc}}}
+\renewcommand{\rho}{\varrho}  % use varrho for dry-air density throughout
+\newcommand{\sigb}{\sigma_b}
+\newcommand{\obs}{y}
+\newcommand{\xco}{\hat{x}_{\mathrm{XCO}_2}}
+\newcommand{\xa}{x_{a}}
+\newcommand{\mmr}{\mathrm{MMR}}
+\newcommand{\vv}{\mathrm{VV}}
+
+\title{\textbf{Adjoint-Based CO$_2$ Surface Flux Inversion in GCHP}\\
+\large Technical Description of the 4D-Var System}
+\author{GCHP Adjoint Development}
+\date{\today}
+
+% =============================================================================
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% =============================================================================
+\section{Overview}
+% =============================================================================
+
+This document describes the mathematical formulation of the 4D-Var adjoint system
+implemented in GCHP (GEOS-Chem High-Performance) for CO$_2$ surface flux
+inversion. The system estimates a spatially varying, dimensionless scaling factor
+$\sigma(\varphi, \lambda)$ that multiplies a prior surface flux field, minimising
+the misfit between simulated and observed column-averaged CO$_2$ (XCO$_2$) from
+OCO-2 over a fixed assimilation window.
+
+The control variable is a 2-D field $\sigma \in \mathbb{R}^{N_\varphi \times N_\lambda}$
+(here $46 \times 72$) with background value $\sigma = 1$ (no correction to the prior).
+Minimisation is performed by the L-BFGS-B algorithm using gradients supplied by
+the adjoint model.
+
+% =============================================================================
+\section{Notation and Units}
+% =============================================================================
+
+\begin{table}[h!]
+\centering
+\caption{Key symbols used throughout this document.}
+\begin{tabular}{lll}
+\toprule
+Symbol & Description & Units \\
+\midrule
+$\sigma(i,j)$ & Dimensionless TER flux scaling factor & -- \\
+$F_{\mathrm{base}}(i,j)$ & Prior TER base flux (unit-corrected) & \si{kg_{CO_2}\,m^{-2}\,s^{-1}} \\
+$F_{\mathrm{total}}(i,j)$ & Sigma-scaled surface flux ($\sigma \cdot F_{\mathrm{base}}$) & \si{kg_{CO_2}\,m^{-2}\,s^{-1}} \\
+$x(i,j,l)$ & CO$_2$ mass mixing ratio & \si{kg_{CO_2}\,kg_{\mathrm{dry}}^{-1}} \\
+$\tilde{x}(i,j,l)$ & CO$_2$ volume mixing ratio & \si{mol_{CO_2}\,mol_{\mathrm{dry}}^{-1}} \\
+$\varrho(i,j,l)$ & Dry air density & \si{kg_{\mathrm{dry}}\,m^{-3}} \\
+$\Delta z(i,j)$ & Surface layer thickness & \si{m} \\
+$\Delta t$ & Chemistry timestep & \si{s} \\
+$\lambda(i,j,l)$ & Adjoint variable (SpeciesAdj) & \si{(kg_{CO_2}\,kg_{\mathrm{dry}}^{-1})^{-1}} \\
+$G(i,j)$ & Surface flux adjoint (gradient) & -- \\
+$\hat{x}_{\mathrm{XCO}_2}$ & Simulated column XCO$_2$ & ppm \\
+$y$ & Observed XCO$_2$ & ppm \\
+$\epsilon$ & Observation error std. dev. & ppm \\
+$\sigma_b$ & Background error std. dev. & -- \\
+$M_{\mathrm{air}}$ & Mean molar mass of dry air ($\approx 28.97$) & \si{g\,mol^{-1}} \\
+$M_{\mathrm{CO}_2}$ & Molar mass of CO$_2$ ($\approx 44.01$) & \si{g\,mol^{-1}} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% =============================================================================
+\section{Forward Model}
+% =============================================================================
+
+\subsection{Emission Parameterisation}
+
+In the OSSE configuration, the TER (Total Ecosystem Respiration) surface flux
+is the sole quantity controlled by $\sigma$. The HEMCO emissions module computes
+the total surface flux at each grid cell $(i,j)$ as
+
+\begin{equation}
+  F_{\mathrm{total}}(i,j) = \sigma(i,j) \cdot F_{\mathrm{base}}(i,j)
+  \label{eq:emission}
+\end{equation}
+
+where $F_{\mathrm{base}}$ is the prior TER field read from the CLASS-CTEM
+dataset. The raw file values are in \si{Kg_C\,km^{-2}\,s^{-1}}; a constant
+scale factor of $3.667 \times 10^{-6}$ (ratio $44.01/12.011 \times 10^{-6}$)
+converts these to \si{kg_{CO_2}\,m^{-2}\,s^{-1}}:
+
+\begin{equation}
+  F_{\mathrm{base}}(i,j) = F_{\mathrm{raw}}(i,j) \times \frac{M_{\mathrm{CO}_2}}{M_C}
+  \times 10^{-6}
+  \approx F_{\mathrm{raw}}(i,j) \times 3.667 \times 10^{-6}
+  \quad [\si{kg_{CO_2}\,m^{-2}\,s^{-1}}]
+\end{equation}
+
+All other OSSE CO$_2$ sources (fossil fuel, ocean, GPP, NBE) are held at their
+prior values (not scaled by $\sigma$).
+
+\subsection{Surface Emission Step}
+
+At each chemistry timestep $\Delta t$, the forward GCHP model adds the surface
+flux to the CO$_2$ mass mixing ratio in the lowest model layer ($l = 1$):
+
+\begin{equation}
+  x^{n+1}(i,j,1) = x^n(i,j,1)
+    + \frac{F_{\mathrm{total}}(i,j)\,\Delta t}{\varrho(i,j,1)\,\Delta z(i,j,1)}
+  \label{eq:forward_emission}
+\end{equation}
+
+where the denominator converts the surface flux
+[\si{kg_{CO_2}\,m^{-2}\,s^{-1}}] to a mixing ratio increment
+[\si{kg_{CO_2}\,kg_{\mathrm{dry}}^{-1}}]:
+
+\begin{equation}
+  \frac{\si{kg_{CO_2}\,m^{-2}\,s^{-1}} \cdot \si{s}}
+       {\si{kg_{\mathrm{dry}}\,m^{-3}} \cdot \si{m}}
+  = \si{kg_{CO_2}\,kg_{\mathrm{dry}}^{-1}} \quad \checkmark
+\end{equation}
+
+\subsection{Atmospheric Transport}
+
+Between emission steps, GCHP transports CO$_2$ using the FV3 dynamical core
+(advection) and GEOS-5 mixing schemes (convection, boundary layer). Denoting the
+full transport operator over the window $[t_0, T]$ by
+$\mathcal{M}: x(t_0) \to x(t)$, the forward model state at time $t$ is
+
+\begin{equation}
+  x(t) = \mathcal{M}_{t_0 \to t}\bigl[x(t_0),\,\sigma\bigr]
+\end{equation}
+
+where $\sigma$ enters through the emission term~\eqref{eq:forward_emission} at
+each timestep.
+
+\subsection{Observation Operator}
+\label{sec:obs_operator}
+
+OCO-2 measures the pressure-weighted, averaging-kernel-smoothed column-average
+CO$_2$. For a single observation at location $(i_0, j_0)$ and time $t_k$,
+the simulated XCO$_2$ is
+
+\begin{equation}
+  \hat{x}_{\mathrm{XCO}_2,k}
+  = x_{a,\mathrm{XCO}_2,k}
+  + \sum_{n=1}^{N_{\mathrm{sat}}} (h \cdot \mathrm{AK})_{k,n}
+    \bigl[\tilde{x}_{\mathrm{interp},n} - x_{a,n}\bigr]
+  \label{eq:obs_operator}
+\end{equation}
+
+where:
+\begin{itemize}
+  \item $x_{a,\mathrm{XCO}_2,k}$ is the prior column XCO$_2$ for observation $k$ [ppm],
+  \item $(h \cdot \mathrm{AK})_{k,n}$ is the pressure-weighted averaging kernel
+        at satellite level $n$ (dimensionless; provided pre-multiplied in the
+        OSSE file as \texttt{xCO2-averagingKernel}),
+  \item $x_{a,n}$ is the prior CO$_2$ profile at satellite level $n$ [mol/mol],
+  \item $\tilde{x}_{\mathrm{interp},n}$ is the model CO$_2$ volume mixing ratio
+        linearly interpolated from GCHP levels to satellite pressure level $p_n$.
+\end{itemize}
+
+\subsubsection{Vertical Interpolation}
+
+Model volume mixing ratios $\tilde{x}(l)$ at GCHP levels $l = 1,\ldots,L$ (with
+mid-level pressures $p_l^{\mathrm{mod}}$ sorted surface-first, i.e.\ decreasing)
+are interpolated to satellite levels via the weight matrix
+$\mathbf{W} \in \mathbb{R}^{L \times N_{\mathrm{sat}}}$:
+
+\begin{equation}
+  \tilde{x}_{\mathrm{interp},n} = \sum_{l=1}^{L} W_{l,n}\,\tilde{x}(l)
+  = \mathbf{W}^\top \tilde{x}
+  \label{eq:interp_fwd}
+\end{equation}
+
+where the weights $W_{l,n}$ are computed by the \texttt{get\_intmap} function:
+for satellite pressure $p_n$ falling between model levels $l$ and $l+1$
+(i.e.\ $p_{l+1}^{\mathrm{mod}} < p_n \le p_l^{\mathrm{mod}}$),
+
+\begin{equation}
+  W_{l,n} = \frac{p_n - p_{l+1}^{\mathrm{mod}}}
+                 {p_l^{\mathrm{mod}} - p_{l+1}^{\mathrm{mod}}}, \qquad
+  W_{l+1,n} = \frac{p_l^{\mathrm{mod}} - p_n}
+                   {p_l^{\mathrm{mod}} - p_{l+1}^{\mathrm{mod}}}, \qquad
+  W_{l',n} = 0 \; (l' \neq l, l{+}1)
+  \label{eq:weights}
+\end{equation}
+
+Satellite levels above the model top or below the model surface are pinned to
+the boundary model value ($W_{1,n}=1$ or $W_{L,n}=1$ respectively).
+
+\subsubsection{Unit Conversion}
+
+Equation~\eqref{eq:obs_operator} mixes [ppm] and [mol/mol] quantities. In
+practice, $\tilde{x}$ from GCHP is already in [mol/mol] (SpeciesConcVV),
+and the observation file provides everything in [mol/mol] or [ppm] consistently.
+All terms are converted to ppm before computing the misfit:
+
+\begin{equation}
+  \hat{x}_{\mathrm{XCO}_2,k}^{\mathrm{ppm}} = \hat{x}_{\mathrm{XCO}_2,k} \times 10^6,
+  \qquad
+  y_k^{\mathrm{ppm}} = y_k \times 10^6,
+  \qquad
+  \epsilon_k^{\mathrm{ppm}} = \epsilon_k \times 10^6
+\end{equation}
+
+% =============================================================================
+\section{Cost Function}
+% =============================================================================
+
+The total cost function to be minimised is
+
+\begin{equation}
+  \boxed{J(\sigma) = J_b(\sigma) + J_{\mathrm{obs}}(\sigma)}
+  \label{eq:J_total}
+\end{equation}
+
+\subsection{Background (Regularisation) Term}
+
+\begin{equation}
+  J_b(\sigma) = \frac{1}{2\sigma_b^2}
+    \sum_{i=1}^{N_\varphi} \sum_{j=1}^{N_\lambda}
+    \bigl[\sigma(i,j) - 1\bigr]^2
+  \label{eq:J_b}
+\end{equation}
+
+This is an $\ell_2$ penalty centred on the prior ($\sigma = 1$), with background
+error $\sigma_b$ (dimensionless). Both $J_b$ and $\sigma$ are dimensionless.
+
+\subsection{Observation Term}
+
+\begin{equation}
+  J_{\mathrm{obs}}(\sigma) = \frac{1}{2}
+    \sum_{k=1}^{N_{\mathrm{obs}}}
+    \left(\frac{\hat{x}_{\mathrm{XCO}_2,k}^{\mathrm{ppm}} - y_k^{\mathrm{ppm}}}
+               {\epsilon_k^{\mathrm{ppm}}}\right)^2
+  \label{eq:J_obs}
+\end{equation}
+
+Both numerator and denominator are in ppm, so $J_{\mathrm{obs}}$ is dimensionless.
+
+\subsection{Gradient of the Background Term}
+
+The analytical gradient of $J_b$ with respect to $\sigma(i,j)$ is
+
+\begin{equation}
+  \frac{\partial J_b}{\partial \sigma(i,j)}
+  = \frac{\sigma(i,j) - 1}{\sigma_b^2}
+  \label{eq:grad_Jb}
+\end{equation}
+
+This is computed analytically in the Python script \texttt{lbfgsb\_step.py}
+without requiring GCHP.
+
+% =============================================================================
+\section{Adjoint Model}
+% =============================================================================
+
+The gradient $\partial J_{\mathrm{obs}} / \partial \sigma$ is computed by running
+the adjoint model backward in time from $T$ to $t_0$. The adjoint model
+propagates the \emph{adjoint variable} (or co-state)
+$\lambda(i,j,l,t) \equiv \partial J_{\mathrm{obs}} / \partial x(i,j,l,t)$
+[\si{(kg_{CO_2}\,kg_{\mathrm{dry}}^{-1})^{-1}}]
+backward alongside the forward state.
+
+\subsection{Initialisation}
+
+At the end of the assimilation window ($t = T$), all adjoint variables are
+initialised to zero:
+
+\begin{equation}
+  \lambda(i,j,l,T) = 0 \quad \forall\; i,j,l
+\end{equation}
+
+\subsection{Adjoint of the Observation Operator}
+
+At each chemistry timestep $t_k$ where an OCO-2 observation exists, the adjoint
+forcing is loaded and \emph{added} (accumulated) to $\lambda$.
+
+\subsubsection{Forcing in ppm Space}
+
+For observation $k$ at time $t_k$ and location $(i_k, j_k)$:
+
+\begin{align}
+  d_k &= \hat{x}_{\mathrm{XCO}_2,k}^{\mathrm{ppm}} - y_k^{\mathrm{ppm}}
+         \quad [\text{ppm}] \label{eq:diff} \\
+  \phi_k &= \frac{d_k}{\bigl(\epsilon_k^{\mathrm{ppm}}\bigr)^2}
+         \quad [\text{ppm}^{-1}] \label{eq:force_scalar}
+\end{align}
+
+The forcing at each satellite level is
+
+\begin{equation}
+  f_{k,n}^{\mathrm{sat}} = (h \cdot \mathrm{AK})_{k,n} \cdot \phi_k
+  \quad [\text{ppm}^{-1}], \quad n = 1, \ldots, N_{\mathrm{sat}}
+  \label{eq:force_sat}
+\end{equation}
+
+\subsubsection{Adjoint of Vertical Interpolation}
+
+The adjoint of the forward interpolation $\tilde{x}_{\mathrm{interp}} = \mathbf{W}^\top \tilde{x}$ maps forcing from satellite levels back to model levels:
+
+\begin{equation}
+  f_{k,l}^{\mathrm{mod}} = \sum_{n=1}^{N_{\mathrm{sat}}} W_{l,n}\,f_{k,n}^{\mathrm{sat}}
+  = \left(\mathbf{W}\, \mathbf{f}_k^{\mathrm{sat}}\right)_l
+  \quad [\text{ppm}^{-1}], \quad l = 1, \ldots, L
+  \label{eq:force_model}
+\end{equation}
+
+This uses the same weight matrix $\mathbf{W}$ as the forward step.
+
+\subsubsection{Unit Conversion to Mass Mixing Ratio}
+
+The GCHP adjoint variable $\lambda$ is in units of
+\si{(kg_{CO_2}\,kg_{\mathrm{dry}}^{-1})^{-1}}
+(adjoint of mass mixing ratio). The forcing must therefore be converted
+from \text{ppm}$^{-1}$ to $(\si{kg_{CO_2}\,kg_{\mathrm{dry}}^{-1}})^{-1}$:
+
+\begin{equation}
+  f_{k,l}^{\mmr} = f_{k,l}^{\mathrm{mod}} \times C_{\mathrm{MMR}}
+  \quad \left[\left(\frac{\si{kg_{CO_2}}}{\si{kg_{\mathrm{dry}}}}\right)^{-1}\right]
+  \label{eq:force_mmr}
+\end{equation}
+
+where the conversion factor is
+
+\begin{equation}
+  C_{\mathrm{MMR}} = \frac{M_{\mathrm{air}}}{M_{\mathrm{CO}_2}} \times 10^6
+  = \frac{28.97}{44.01} \times 10^6 \approx 6.585 \times 10^5
+  \label{eq:Cmmr}
+\end{equation}
+
+\textbf{Derivation:} Since $1\;\text{ppm} = 10^{-6}\;\si{mol_{CO_2}/mol_{\mathrm{dry}}}$
+and
+$x\;[\si{kg_{CO_2}/kg_{\mathrm{dry}}}] = \tilde{x}\;[\si{mol/mol}] \times (M_{\mathrm{CO}_2}/M_{\mathrm{air}})$,
+
+\begin{equation}
+  \frac{\partial J}{\partial x} = \frac{\partial J}{\partial \tilde{x}} \cdot
+  \frac{\partial \tilde{x}}{\partial x}
+  = f^{\mathrm{mod}}\;[\text{ppm}^{-1}] \times 10^6\;[\text{ppm}/(\text{mol/mol})]
+    \times \frac{M_{\mathrm{air}}}{M_{\mathrm{CO}_2}}\;\left[\frac{\text{mol/mol}}{\si{kg/kg}}\right]
+  = f^{\mathrm{mod}} \times C_{\mathrm{MMR}}
+\end{equation}
+
+\subsubsection{Accumulation into the Adjoint Variable}
+
+The forcing file \texttt{CO2\_adjoint\_forcing\_YYYYMMDD\_HHMMz.nc4} stores
+$f_{k,l}^{\mmr}$ for all observations $k$ within checkpoint window $[t_k - \Delta t/2,\, t_k + \Delta t/2)$.
+At each chemistry timestep $t_k$, the Fortran routine
+\texttt{Load\_OCO2\_Adjoint\_Forcing} accumulates these into $\lambda$:
+
+\begin{equation}
+  \lambda(i_k, j_k, l, t_k) \mathrel{+}= f_{k,l}^{\mmr}
+  \quad \forall\; l = 1, \ldots, L
+  \label{eq:load_forcing}
+\end{equation}
+
+where $(i_k, j_k)$ is the nearest GCHP grid cell to the observation.
+
+\subsection{Adjoint of Atmospheric Transport}
+
+The adjoint transport propagates $\lambda$ backward in time, following the adjoint
+of the FV3 dynamics and mixing operators. Denoting the tangent-linear transport
+operator as $\mathcal{L}_{t \to t+\Delta t}$, its adjoint satisfies:
+
+\begin{equation}
+  \lambda(t) = \mathcal{L}_{t \to t+\Delta t}^\top\,\lambda(t + \Delta t)
+\end{equation}
+
+In practice, GCHP runs a reversed-time integration using checkpoints saved
+during the forward run. The forward state is restored from the checkpoint at
+each backward step, providing the linearisation point.
+
+\subsection{Adjoint of the Surface Emission Step}
+
+At each chemistry (emission) timestep, the adjoint of
+\eqref{eq:forward_emission} with respect to $\sigma(i,j)$ is accumulated:
+
+\begin{equation}
+  \boxed{
+  G(i,j) \;\mathrel{+}=\;
+  \lambda(i,j,1,t)\;\times\;
+  \frac{F_{\mathrm{base}}(i,j)\;\Delta t}
+       {\varrho(i,j,1,t)\;\Delta z(i,j,1,t)}
+  }
+  \label{eq:srf_adj}
+\end{equation}
+
+where $G(i,j) \equiv \partial J_{\mathrm{obs}} / \partial \sigma(i,j)$
+is the accumulated surface flux adjoint (stored in
+\texttt{State\_Chm\%SurfaceFluxAdj}).
+
+\textbf{Unit check:}
+\begin{equation}
+  \underbrace{\lambda}_{\si{kg_{\mathrm{dry}}/kg_{CO_2}}}
+  \times
+  \frac{\underbrace{F_{\mathrm{base}}}_{\si{kg_{CO_2}\,m^{-2}\,s^{-1}}}
+        \;\underbrace{\Delta t}_{\si{s}}}
+  {\underbrace{\varrho}_{\si{kg_{\mathrm{dry}}\,m^{-3}}}
+   \;\underbrace{\Delta z}_{\si{m}}}
+  =
+  \frac{\si{kg_{\mathrm{dry}}} \cdot \si{kg_{CO_2}\,m^{-2}}}
+       {\si{kg_{CO_2}} \cdot \si{kg_{\mathrm{dry}}\,m^{-2}}}
+  = 1 \quad \checkmark
+\end{equation}
+
+$G(i,j)$ is therefore dimensionless — correctly the gradient of a dimensionless cost
+function with respect to a dimensionless control variable.
+
+\subsubsection{Derivation of~\eqref{eq:srf_adj}}
+
+From the forward step \eqref{eq:forward_emission}:
+
+\begin{equation}
+  x^{n+1}(i,j,1) = x^n(i,j,1) + \frac{\sigma(i,j)\,F_{\mathrm{base}}(i,j)\,\Delta t}
+                                       {\varrho\,\Delta z}
+\end{equation}
+
+The sensitivity of $x^{n+1}$ to $\sigma(i,j)$ is:
+
+\begin{equation}
+  \frac{\partial x^{n+1}(i,j,1)}{\partial \sigma(i,j)}
+  = \frac{F_{\mathrm{base}}(i,j)\,\Delta t}{\varrho\,\Delta z}
+\end{equation}
+
+By the chain rule and definition of the adjoint variable:
+
+\begin{equation}
+  \frac{\partial J_{\mathrm{obs}}}{\partial \sigma(i,j)}
+  = \sum_t \frac{\partial J_{\mathrm{obs}}}{\partial x^t(i,j,1)}
+    \cdot \frac{\partial x^t(i,j,1)}{\partial \sigma(i,j)}
+  = \sum_t \lambda(i,j,1,t) \cdot \frac{F_{\mathrm{base}}(i,j)\,\Delta t}
+                                        {\varrho(t)\,\Delta z(t)}
+\end{equation}
+
+which is exactly the accumulation in~\eqref{eq:srf_adj}.
+
+\paragraph{Note on implementation.}
+The Fortran routine \texttt{Integrate\_Srf\_Adjoint} receives
+\texttt{SurfaceFluxForward} from \texttt{Compute\_Sflx\_For\_Adjoint}, which reads
+the HEMCO category-5 emission diagnostic. This diagnostic therefore reflects
+whatever scale factors HEMCO applies to the TER emission in the adjoint run.
+
+\emph{Historical bias (iterations 1--8, corrected 2026-07-08).} Prior to the fix,
+the adjoint \texttt{HEMCO\_Config.rc} applied the sigma scale factor (\texttt{SF750})
+to the TER emission, so the category-5 diagnostic contained
+$F_{\mathrm{total}} = \sigma \cdot F_{\mathrm{base}}$ rather than $F_{\mathrm{base}}$.
+The computed gradient was then
+
+\begin{equation}
+  G_{\mathrm{code}}(i,j)
+  = \sigma(i,j) \cdot \frac{\partial J_{\mathrm{obs}}}{\partial \sigma(i,j)}\Bigg|_{\mathrm{correct}}
+  \label{eq:bias}
+\end{equation}
+
+i.e.\ biased cell-by-cell by the local $\sigma$. The bias equals unity at the first
+iteration (where $\sigma \equiv 1$), so iteration~1 was unaffected, but iterations
+$\ge 2$ were over-stated where $\sigma > 1$ and under-stated where $\sigma < 1$.
+
+\emph{Fix.} The sigma scale factor (\texttt{SF750}) was removed from the
+\texttt{TER\_CLASS\_CTEM} emission line in the \emph{adjoint} \texttt{HEMCO\_Config.rc}
+only (scale-factor list \texttt{750/751} $\to$ \texttt{751}, retaining only the
+$M_{\mathrm{CO}_2}/M_C$ unit conversion). The category-5 diagnostic now contains
+$F_{\mathrm{base}}$, and the accumulated gradient equals~\eqref{eq:srf_adj} exactly
+at every iteration. The \emph{forward} run retains \texttt{750/751}: the forward
+model must emit the sigma-scaled flux $F_{\mathrm{total}}$ to produce the correct
+CO$_2$ field. This works as a configuration-only change because CO$_2$ is a linear
+passive tracer, so the adjoint variable $\lambda$ is independent of the tracer
+field and is unaffected by removing $\sigma$ from the adjoint run's forward sweep;
+only the $\partial F/\partial\sigma = F_{\mathrm{base}}$ multiplier is corrected.
+Note that iterations 1--8 completed before this date used the biased configuration,
+so their iteration~$\ge 2$ gradients retain the bias of~\eqref{eq:bias}.
+
+% =============================================================================
+\section{Gradient Assembly and L-BFGS-B Update}
+% =============================================================================
+
+\subsection{Total Gradient}
+
+After the adjoint run completes, the total gradient of $J$ with respect to
+$\sigma$ is assembled in \texttt{lbfgsb\_step.py}:
+
+\begin{equation}
+  \nabla_\sigma J = \underbrace{G}_{\partial J_{\mathrm{obs}}/\partial \sigma}
+                  + \underbrace{\frac{\sigma - \mathbf{1}}{\sigma_b^2}}_{\partial J_b/\partial \sigma}
+  \label{eq:grad_total}
+\end{equation}
+
+Both terms are dimensionless 2-D fields of shape $N_\varphi \times N_\lambda$.
+
+\subsection{L-BFGS-B Minimisation}
+
+At each outer iteration $k$, the L-BFGS-B quasi-Newton direction is computed
+via the two-loop recursion \cite{liu1989limited}:
+
+\begin{equation}
+  d^k = -\mathbf{H}_k^{-1}\,\nabla_\sigma J^k
+  \label{eq:direction}
+\end{equation}
+
+where $\mathbf{H}_k$ is the limited-memory approximation to the Hessian built
+from the $m$ most recent curvature pairs $\{(s_i, y_i)\}$:
+
+\begin{equation}
+  s_i = \sigma^{i+1} - \sigma^i, \qquad
+  y_i = \nabla_\sigma J^{i+1} - \nabla_\sigma J^i
+\end{equation}
+
+The control variable is updated with a unit step length and projected onto the
+feasible set $\sigma \ge 0$:
+
+\begin{equation}
+  \sigma^{k+1} = \max\!\left(\sigma^k + d^k,\; 0\right)
+  \label{eq:update}
+\end{equation}
+
+The initial Hessian scaling at iteration 1 (where no curvature history exists)
+uses $\mathbf{H}_1 = \gamma_1 \mathbf{I}$ with
+
+\begin{equation}
+  \gamma_1 = \frac{1}{\|\nabla_\sigma J^1\|_\infty}
+\end{equation}
+
+so that the first step has a maximum element of approximately unity.
+
+% =============================================================================
+\section{Complete Algorithm}
+% =============================================================================
+
+\begin{enumerate}
+  \item \textbf{Initialise}: $\sigma^0 = \mathbf{1}$, $k = 0$.
+  \item \textbf{Write} $\sigma^k$ to \texttt{sigma\_co2\_osse.nc4} (HEMCO scale factor 750).
+  \item \textbf{Forward GCHP run} over $[t_0, T]$:
+    \begin{itemize}
+      \item At each emission timestep: add $\sigma \cdot F_{\mathrm{base}} \cdot \Delta t / (\varrho \Delta z)$ to lowest level.
+      \item Save atmospheric checkpoints at every chemistry timestep.
+      \item Output satellite-track file \texttt{GEOSChem.sat\_track.*.nc4}.
+    \end{itemize}
+  \item \textbf{Compute forcing}: run \texttt{co2\_adjoint\_forcing\_osse.py}:
+    \begin{itemize}
+      \item For each OCO-2 observation $k$: compute $d_k$, $f_{k,l}^{\mathrm{sat}}$,
+            $f_{k,l}^{\mathrm{mod}}$, $f_{k,l}^{\mmr}$ via \eqref{eq:diff}--\eqref{eq:force_mmr}.
+      \item Write per-checkpoint forcing files and $J_{\mathrm{obs}}$ to \texttt{J\_value.txt}.
+    \end{itemize}
+  \item \textbf{Move checkpoints} from forward output to adjoint input directory.
+  \item \textbf{Adjoint GCHP run} from $T$ to $t_0$:
+    \begin{itemize}
+      \item Initialise $\lambda = 0$.
+      \item At each chemistry timestep: load forcing \eqref{eq:load_forcing}, transport adjoint backward.
+      \item At each emission timestep: accumulate $G(i,j)$ via \eqref{eq:srf_adj}.
+      \item Output \texttt{GEOSChem.Adjoint.*.nc4} containing $G$ (\texttt{SurfaceFluxAdj\_CO2}).
+    \end{itemize}
+  \item \textbf{L-BFGS-B step}: run \texttt{lbfgsb\_step.py}:
+    \begin{itemize}
+      \item Assemble $\nabla_\sigma J$ via \eqref{eq:grad_total}.
+      \item Compute direction $d^k$ via \eqref{eq:direction}.
+      \item Update $\sigma^{k+1}$ via \eqref{eq:update}.
+    \end{itemize}
+  \item \textbf{Check convergence}: if $\|\nabla_\sigma J\|_\infty < g_{\mathrm{tol}}$
+        or $|\Delta J / J| < f_{\mathrm{tol}}$, stop; else set $k \leftarrow k+1$ and go to 2.
+\end{enumerate}
+
+% =============================================================================
+\section{OSSE-Specific Notes}
+% =============================================================================
+
+\subsection{Synthetic Observations}
+
+The observations $y_k$ are pseudo-OCO-2 XCO$_2$ retrievals generated by
+running GCHP forward with ORCHIDEE-ECCO2 TER fluxes (the ``truth'') and
+sampling the output with the OCO-2 orbit geometry and averaging kernels
+from the B10 retrieval algorithm. The goal of the OSSE is to recover the
+ratio between the ORCHIDEE-ECCO2 and CLASS-CTEM TER fluxes.
+
+\subsection{HEMCO Scale Factor Chain}
+
+\begin{table}[h!]
+\centering
+\caption{HEMCO scale factors applied to OSSE CO$_2$ emission fields.}
+\begin{tabular}{llccc}
+\toprule
+Source & Category & SF 750 ($\sigma$) & SF 751 (unit conv.) & Total \\
+\midrule
+FOSSILCO2\_ODIAC & 1 & no & yes & $3.667\times10^{-6}$ \\
+OCEAN\_ECCO\_DARWIN & 2 & no & yes & $3.667\times10^{-6}$ \\
+NBE\_CARDAMOM & 3 & no & yes & $3.667\times10^{-6}$ \\
+GPP\_ORCHIDEE & 4 & no & yes & $3.667\times10^{-6}$ \\
+TER\_CLASS\_CTEM & 5 & \textbf{yes} & yes & $\sigma \times 3.667\times10^{-6}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Adjoint Surface Flux Selector}
+
+The adjoint GCHP is configured with
+\texttt{ADJ\_HEMCO\_SFLUX\_SELECTOR: FILTERED} and
+\texttt{ADJ\_HEMCO\_SFLUX\_CAT: 5}, which passes only the category-5 (TER)
+HEMCO emission as \texttt{SurfaceFluxForward} to \texttt{Integrate\_Srf\_Adjoint}.
+This is consistent with $\sigma$ controlling only TER.
+
+\subsection{Chemistry Off}
+
+GCHP chemistry is disabled (\texttt{Turn\_on\_Chemistry: false}) in both the
+forward and adjoint runs. CO$_2$ is advected as an inert tracer; TER is the
+sole source. The condition guarding adjoint forcing loading was changed from
+\texttt{DoChem} to \texttt{IsChemTime} to ensure the forcing is loaded at
+chemistry timesteps even when chemical reactions are disabled.
+
+% =============================================================================
+\section{Summary of Key Files}
+% =============================================================================
+
+\begin{table}[h!]
+\centering
+\caption{Key source files implementing the adjoint system.}
+\small
+\begin{tabular}{lp{9cm}}
+\toprule
+File & Role \\
+\midrule
+\texttt{gchp\_chunk\_mod.F90} & Drives forward/adjoint timestep loop; calls
+  \texttt{Load\_OCO2\_Adjoint\_Forcing} and \texttt{Integrate\_Srf\_Adjoint} \\
+\texttt{Adjoint\_Utils\_Mod.F90} & Contains \texttt{Load\_OCO2\_Adjoint\_Forcing}
+  (reads forcing files, accumulates into $\lambda$) and
+  \texttt{Integrate\_Srf\_Adjoint} (accumulates $G$) \\
+\texttt{hco\_interface\_gc\_mod.F90} & Contains \texttt{Compute\_Sflx\_For\_Adjoint}
+  (reads TER flux from HEMCO for \texttt{SurfaceFluxForward}) \\
+\texttt{co2\_adjoint\_forcing\_osse.py} & Computes $J_{\mathrm{obs}}$ and
+  writes per-checkpoint forcing files \\
+\texttt{lbfgsb\_step.py} & Assembles gradient, performs L-BFGS-B update \\
+\texttt{write\_sigma.py} & Writes $\sigma^k$ to \texttt{sigma\_co2\_osse.nc4} \\
+\texttt{HEMCO\_Config.rc} & Defines SF750 ($\sigma$) and SF751 (unit conv.) \\
+\texttt{GCHP.rc} & Sets \texttt{MODEL\_PHASE: ADJOINT/FORWARD} and
+  \texttt{ADJ\_HEMCO\_SFLUX\_*} parameters \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% =============================================================================
+\begin{thebibliography}{9}
+\bibitem{liu1989limited}
+  D.C. Liu and J. Nocedal,
+  ``On the limited memory BFGS method for large scale optimization,''
+  \emph{Mathematical Programming}, vol.~45, pp.~503--528, 1989.
+
+\bibitem{connor2008}
+  B.J. Connor et al.,
+  ``Retrieval of atmospheric CO$_2$ from GPS signals,''
+  \emph{Geophysical Research Letters}, 2008.
+\end{thebibliography}
+
+\end{document}

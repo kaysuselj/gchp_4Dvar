@@ -1,0 +1,415 @@
+% =============================================================================
+% The GCHP CO2 4D-Var software: architecture, data flow and workflow
+% Companion to:
+%   monthly_4dvar_science.tex   - scientific formulation and results
+%   monthly_sigma_gradient.tex  - derivation of the monthly adjoint gradient
+% =============================================================================
+\documentclass[11pt]{article}
+
+% Latin Modern ships Type 1 outlines; plain Computer Modern needs MetaFont (mf),
+% absent on the NAS hosts.  Do not add T1 fontenc or the bm package.
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb}
+\usepackage{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{enumitem}
+
+\geometry{margin=1in}
+\hypersetup{colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black}
+
+% Compact monospace helper
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{\textbf{The GCHP CO$_2$ 4D-Var System:\\
+Software Architecture and Workflow}}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This document describes the software that implements the monthly 4D-Var CO$_2$
+flux assimilation: the directory layout, the programs and their interfaces, the
+per-iteration workflow, the on-disk data formats, the GCHP configuration
+(including the forward/adjoint asymmetry that makes the adjoint gradient correct),
+the monthly-specific plumbing, the variable-window parameterisation, the
+validation tooling, and the operational concerns (job chaining, walltime budgets,
+checkpoint disk usage). It is a reference for running, debugging, and extending
+the system. The scientific formulation is in \code{monthly\_4dvar\_science.tex}
+and the gradient derivation in \code{monthly\_sigma\_gradient.tex}.
+\end{abstract}
+
+\tableofcontents
+
+% =============================================================================
+\section{Overview}
+% =============================================================================
+
+The system is a driver script that orchestrates repeated forward and adjoint
+GCHP integrations and a quasi-Newton update, plus a set of Python programs that
+handle the control variable, the observation forcing, the gradient, and the
+diagnostics. One outer iteration of the assimilation consists of four phases:
+
+\begin{enumerate}[nosep]
+  \item \textbf{sigma + forward}: write the monthly scaling fields from the
+        current state, run the forward GCHP integration, and move the adjoint
+        checkpoints into place;
+  \item \textbf{forcing}: compute the observation cost $J_{\mathrm{obs}}$ and the
+        adjoint forcing from the simulated satellite tracks;
+  \item \textbf{adjoint}: run the backward GCHP integration to produce the surface
+        adjoint accumulator, then free the consumed checkpoints;
+  \item \textbf{update}: form the gradient, take one L-BFGS-B step, snapshot the
+        state, and generate diagnostic plots.
+\end{enumerate}
+
+Two variants coexist and are fully isolated from one another: a single-window
+(``one-month'') optimiser and the monthly optimiser. They share the Python
+components wherever possible; the monthly optimiser differs in the control
+variable (twelve fields), the forward input plumbing (a time-varying monthly
+field), and the gradient (boundary differencing).
+
+% =============================================================================
+\section{Directory layout}
+% =============================================================================
+
+Paths below are relative to the project root
+\code{gchp\_14.5.3\_adjoint\_surfaceF/}. The scripts live in \code{gchp\_4Dvar/};
+the run trees are siblings.
+
+\begin{center}
+\small
+\begin{longtable}{@{}p{0.42\textwidth}p{0.52\textwidth}@{}}
+\toprule
+Path & Role \\
+\midrule
+\endhead
+\code{gchp\_4Dvar/} & scripts, control-file templates, this documentation \\
+\code{gchp\_4Dvar/control\_files/forward\_osse\_monthly/} & forward GCHP config (monthly) \\
+\code{gchp\_4Dvar/control\_files/adjoint\_osse\_monthly/} & adjoint GCHP config (monthly) \\
+\code{gchp\_4Dvar/control\_files/forward\_osse\_monthly\_test/} & forward config for the plumbing test \\
+\code{4dvar\_design\_osse\_monthly/} & monthly run tree (work dir) \\
+\quad \code{forward\_run/} & forward executable, restarts, \code{OutputDir} \\
+\quad \code{adjoint/} & adjoint executable, restarts, \code{OutputDir}, checkpoints \\
+\quad \code{sigma\_monthly/YYYY/MM.nc4} & monthly control fields \\
+\quad \code{forcing\_files\_osse/} & adjoint forcing read by the adjoint run \\
+\quad \code{4dvar\_output\_osse/} & per-iteration state snapshots and forcing archives \\
+\quad \code{plots\_osse/<stamp>/} & diagnostic figures, one subdir per job \\
+\code{4dvar\_design\_osse/} & the single-window run tree (one-month variant) \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+% =============================================================================
+\section{Programs and interfaces}
+% =============================================================================
+
+\subsection{Driver: \code{4dvar\_optimizer.osse.monthly.run}}
+
+A PBS batch script that runs the outer loop. Responsibilities: source the GCHP
+and Python environments; sync control-file templates into the run tree; patch the
+run timing from the window; run the four phases per iteration; checkpoint progress
+and chain jobs when the walltime budget is spent. It is fully parameterised
+through environment variables (Section~\ref{sec:running}).
+
+\subsection{Control variable: \code{write\_sigma\_monthly.py}}
+
+Writes the monthly scaling fields from the current state vector. Each month is a
+single-record NetCDF file \code{sigma\_monthly/YYYY/MM.nc4} holding the variable
+\code{Sigma\_CO2} on the $72\times46$ lat--lon grid, stamped at the month start.
+The twelve-single-file layout (rather than one twelve-record file) mirrors an
+existing input dataset known to work with the GCHP input component under a
+monthly refresh template. Key options:
+\begin{itemize}[nosep]
+  \item \code{--state-file}: read the control vector \code{x\_next}; absent, write
+        the prior $\sigma\equiv1$;
+  \item \code{--n-months} (default 12) and \code{--start-month} (default 1):
+        number of monthly fields and the calendar month of the first, with year
+        rollover---this is what makes a shorter window possible;
+  \item \code{--const-per-month}: bypass the state file with explicit per-month
+        constants (used only by the plumbing test).
+\end{itemize}
+The control vector is $(\code{n\_months}\times\code{nlat}\times\code{nlon})$
+flattened in C order with month index $0$ = the start month.
+
+\subsection{Observation cost and forcing: \code{co2\_adjoint\_forcing\_osse.py}}
+
+Given the simulated satellite-track files and the observations, computes
+$J_{\mathrm{obs}}$ (equation~\eqref{eq:jobs} of the science note) and writes the
+per-timestep adjoint forcing that the backward run injects. It accepts \emph{all}
+monthly satellite-track files for the window as separate arguments, processes them
+one at a time (a year of tracks is never concatenated in memory), and sums $J$
+across files. Before the heavy observation matching it performs cheap, loud
+pre-checks on the file time coordinates:
+\begin{itemize}[nosep]
+  \item the number of files must equal the number of months spanned by the window;
+  \item every window month must be covered by exactly one file (a month in two
+        files signals a stale track from a previous run; a month in none signals
+        silently dropped observations---both are hard errors);
+  \item stale forcing outputs from a previous window/timestep are deleted.
+\end{itemize}
+It also writes \code{J\_value.txt} and \code{N\_obs.txt} (the matched-observation
+count, used for the chi-square diagnostic). An \code{--obs-error-inflation}
+factor multiplies all observation uncertainties, to account for correlated
+retrieval errors.
+
+\subsection{Gradient and update: \code{lbfgsb\_step\_monthly.py}}
+
+Reads the adjoint accumulator \code{SurfaceFluxAdj\_CO2} at the month boundaries,
+forms the monthly gradient by differencing (Section~\ref{sec:formats}), adds the
+background gradient, performs one L-BFGS-B two-loop update with a unit step, and
+writes the next state. Guards enforce correctness at runtime:
+\begin{itemize}[nosep]
+  \item each boundary record must exist at its exact timestamp (no nearest-record
+        fallback, which could bias every monthly gradient by half a timestep);
+  \item the accumulator must be $\approx 0$ at the window end (it is $0$ by
+        construction);
+  \item the monthly gradients must telescope to the whole-window gradient.
+\end{itemize}
+It also prints chi-square ($2J_{\mathrm{obs}}/N_{\mathrm{obs}}$) and
+observation-vs-background gradient-balance diagnostics each iteration. The
+\code{--n-months} option matches the control-vector length to the window.
+
+\subsection{Diagnostics: \code{plot\_4dvar.py}}
+
+Renders the state and convergence diagnostics. It infers the month count from the
+state-vector size, so a monthly state is drawn as multi-panel (one map per month)
+figures for the scaling field $\sigma$, the departure $\sigma-1$, and the
+gradient, with a shared colour scale; panels are labelled by calendar month from
+the window start. It also produces convergence histories, observation-minus-model
+innovation maps and histograms, and animations across iterations. A plotting
+failure is caught and never aborts the optimisation.
+
+\subsection{Validation tooling}
+
+\begin{itemize}[nosep]
+  \item \code{check\_monthly\_sigma.py}: from a forward test run, verifies that
+        the correct monthly field is applied to TER in the correct month, that no
+        other flux component is affected, and that no wrong-month field leaks in.
+  \item \code{fd\_validate\_gradient.run} + \code{fd\_gradient\_tools.py}: a
+        finite-difference check that the differenced gradient (not the raw
+        accumulator) matches a brute-force perturbation of $J$.
+  \item \code{test\_monthly\_sigma.run}: the forward-only plumbing test that
+        \code{check\_monthly\_sigma.py} evaluates.
+  \item \code{adjoint\_determinism\_test.run}: reruns one adjoint twice from
+        identical inputs to distinguish chaotic gradient noise from a
+        nondeterminism bug.
+\end{itemize}
+
+% =============================================================================
+\section{Per-iteration workflow}
+\label{sec:workflow}
+% =============================================================================
+
+Each iteration runs the four phases in order. The last completed phase is written
+to a progress file so that a killed or resubmitted job resumes at the right point.
+
+\paragraph{Phase 1 --- sigma + forward.}
+\code{write\_sigma\_monthly.py} writes the monthly fields from the current state.
+The forward run directory is cleaned of stale checkpoints and outputs, the forward
+GCHP integration runs over the window, and the emission-time adjoint checkpoints
+it produces are moved (renamed, not copied) into the adjoint directory. The final
+model state is moved to the adjoint restart.
+
+\paragraph{Phase 2 --- forcing.}
+Stale forcing files are deleted; all satellite-track files from \code{OutputDir}
+(which was wiped before the forward run, so every track belongs to this iteration)
+are passed to \code{co2\_adjoint\_forcing\_osse.py}, which writes $J_{\mathrm{obs}}$
+and the per-timestep forcing. The observation-diagnostic archive is copied into the
+per-iteration output directory.
+
+\paragraph{Phase 3 --- adjoint.}
+The adjoint run directory is cleaned, the backward GCHP integration runs (reading
+the forcing and the moved checkpoints), and on success the consumed checkpoints are
+deleted to bound disk usage. Deletion happens only \emph{after} the adjoint
+succeeds, so a redo of this phase still has its inputs.
+
+\paragraph{Phase 4 --- update.}
+\code{lbfgsb\_step\_monthly.py} forms the gradient and the L-BFGS-B step and writes
+the next state, which is snapshotted; plots are generated. Convergence
+(gradient-norm or relative-cost tolerance) ends the run; otherwise the iteration
+counter advances and the loop returns to Phase 1.
+
+% =============================================================================
+\section{On-disk data formats}
+\label{sec:formats}
+% =============================================================================
+
+\paragraph{Monthly scaling fields.} \code{sigma\_monthly/YYYY/MM.nc4}, one
+single-record file per month, variable \code{Sigma\_CO2}$(t,\mathrm{lat},
+\mathrm{lon})$, \code{float32}, stamped at the month start.
+
+\paragraph{State file.} A NumPy \code{.npz} with the L-BFGS-B state:
+\code{x\_next} (next control vector), \code{x\_prev}, \code{g\_prev},
+\code{J\_prev}, the limited-memory history \code{s\_hist}/\code{y\_hist},
+\code{m\_used}, \code{iteration}, and the grid metadata
+\code{nlat}/\code{nlon}/\code{nmon}/\code{start\_month}. The control vector is
+$\code{nmon}\times\code{nlat}\times\code{nlon}$ in C order.
+
+\paragraph{Adjoint output.} \code{GEOSChem.Adjoint.*.nc4} in the adjoint
+\code{OutputDir}, containing \code{SurfaceFluxAdj\_CO2} on a $72\times46$ lat--lon
+grid at the model timestep. The monthly gradient reads this at the thirteen month
+boundaries $t_1,\dots,t_{12},t_{\mathrm{end}}$ and differences consecutive
+boundaries:
+%
+\begin{equation}
+  g_m(x) = A(x,t_m) - A(x,t_{m+1}),\qquad A(x,t_{\mathrm{end}})=0.
+  \label{eq:gm}
+\end{equation}
+
+\paragraph{Forcing.} \code{CO2\_adjoint\_forcing\_*.nc4} in the forcing directory,
+one per model timestep, read by the adjoint run via its input configuration; plus
+\code{J\_value.txt} and \code{N\_obs.txt}.
+
+% =============================================================================
+\section{GCHP configuration and the forward/adjoint asymmetry}
+% =============================================================================
+
+The control variable is HEMCO scale factor \code{750} (\code{Sigma\_CO2}) applied
+to the \code{TER\_CLASS\_CTEM} base entry. Of the active flux components, only TER
+carries it. The forward and adjoint configurations differ in a way that is
+essential to the gradient's correctness:
+
+\begin{itemize}[nosep]
+  \item \textbf{Forward} \code{HEMCO\_Config.rc}: the TER entry carries
+        \code{750/751}, i.e.\ the monthly scaling (\code{750}) times the unit
+        conversion (\code{751}). The forward \code{ExtData.rc} reads
+        \code{Sigma\_CO2} from \code{sigma\_monthly/\%y4/\%m2.nc4} under a monthly
+        refresh template, so the field changes at each month boundary.
+  \item \textbf{Adjoint} \code{HEMCO\_Config.rc}: the TER entry carries \code{751}
+        \emph{only}. The adjoint accumulator is weighted by
+        \code{EmisCO2\_NetTerrExch} evaluated as the \emph{unscaled prior} TER flux
+        at every timestep and every iteration. This is why the differenced gradient
+        \eqref{eq:gm} needs no $1/\sigma_m$ factor, and why the adjoint never reads
+        the monthly scaling.
+\end{itemize}
+
+\noindent\textbf{Corollary.} Only the forward control files require the monthly
+plumbing; the adjoint configuration is unchanged from the single-window case
+except that its output collection writes \code{SurfaceFluxAdj\_CO2} at the model
+timestep (so a record exists at every month boundary) on the lat--lon grid.
+
+% =============================================================================
+\section{Monthly-specific plumbing and timing conventions}
+% =============================================================================
+
+\paragraph{Monthly input refresh.} The forward \code{ExtData.rc} entry for
+\code{Sigma\_CO2} uses a monthly refresh template, reading a new file at each month
+start. There is a one-timestep lag: the input component applies a new monthly file
+one timestep after its nominal refresh stamp. On an instantaneous emissions
+diagnostic this means the snapshot stamped exactly at a month boundary still
+carries the previous month's scaling; the following record carries the new one.
+This lag is benign (it is the same lag seen for other monthly inputs) but must be
+accounted for when verifying the plumbing---the plumbing checker classifies the
+boundary snapshot as belonging to the previous month for exactly this reason.
+
+\paragraph{Month boundaries and the gradient.} With the emissions/output timesteps
+at $30$ minutes, every month start is a multiple of the timestep, so an adjoint
+record exists at each boundary and the exact-timestamp read in
+\code{lbfgsb\_step\_monthly.py} always succeeds. The window ends on a month
+boundary; because no integration step \emph{starts} at the window end, the input
+component does not read a scaling file for the month after the window.
+
+\paragraph{Multi-file forcing.} The forcing program consumes the monthly
+satellite-track files separately and sums $J$; its month-coverage pre-checks are
+the tripwire against stale or missing monthly tracks.
+
+% =============================================================================
+\section{Variable window parameterisation}
+% =============================================================================
+
+The month count is derived from the window rather than hard-coded. The driver
+computes
+\[
+  \code{NMON} = (\text{end year}\times 12 + \text{end month})
+              - (\text{start year}\times 12 + \text{start month}),
+\]
+and the start month from the window start, and passes \code{--n-months} (and
+\code{--start-month}) to \code{write\_sigma\_monthly.py} and \code{--n-months} to
+\code{lbfgsb\_step\_monthly.py}. The Python programs default to twelve months (the
+full-year run) so existing callers are unaffected; the module-level constant is
+retained for the finite-difference tooling that imports it. This is what allows a
+short integration test (e.g.\ a three-month window) to exercise the entire
+iteration at a fraction of the full-year cost. The window itself
+(\code{T\_START}/\code{T\_END}) is overridable at submission and is propagated
+across chained jobs.
+
+% =============================================================================
+\section{Running the system}
+\label{sec:running}
+% =============================================================================
+
+The driver is submitted from \code{gchp\_4Dvar/}. Common invocations:
+
+\begin{center}
+\small
+\begin{longtable}{@{}p{0.5\textwidth}p{0.44\textwidth}@{}}
+\toprule
+Command (\code{qsub \dots 4dvar\_optimizer.osse.monthly.run}) & Effect \\
+\midrule
+\endhead
+(no options) & fresh full-year run, self-chaining \\
+\code{-v RESTART=true} & resume at the recorded phase after a kill \\
+\code{-v CHAIN=false} & do not self-resubmit when walltime is spent \\
+\code{-v T\_END=2016-04-01,MAX\_ITER=1,CHAIN=false} & three-month, single-iteration integration test \\
+\code{-v SIGMA\_B=0.2,MAX\_ITER=20} & set background error and iteration cap \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\noindent
+Selected environment variables: \code{T\_START}/\code{T\_END} (window; must be
+month boundaries), \code{NLAT}/\code{NLON} (control grid), \code{SIGMA\_B}
+(background error), \code{MAX\_ITER} (global iteration cap across chained jobs),
+\code{GTOL}/\code{FTOL} (convergence tolerances), \code{CHAIN} and \code{MAX\_CHAIN}
+(self-chaining), \code{EST\_FORWARD\_S}/\code{EST\_ADJOINT\_S} (per-phase walltime
+budget estimates).
+
+% =============================================================================
+\section{Operational notes}
+% =============================================================================
+
+\paragraph{Job chaining and walltime budgets.} A full-year iteration does not fit
+in a single job's walltime, so the driver checkpoints phases and self-resubmits
+with \code{RESTART=true} when the remaining walltime cannot accommodate the next
+GCHP phase (gauged by \code{EST\_FORWARD\_S}/\code{EST\_ADJOINT\_S}). A killed job
+redoes only the interrupted phase. \code{MAX\_CHAIN} caps runaway chains. When
+running with \code{CHAIN=false}, the phase-budget estimates must be set below the
+walltime, or the adjoint phase can be skipped: with chaining off, a failed budget
+check exits cleanly rather than resubmitting, so a too-large estimate would end the
+job after the forward without running the adjoint.
+
+\paragraph{Checkpoint disk usage.} The forward run writes a large volume of
+emission-time checkpoints for the adjoint (order a terabyte for a full-year run at
+the fine timestep). The monthly driver deletes them after each successful adjoint,
+so steady-state usage is bounded by one iteration in flight. The single-window
+driver now does the same. Checkpoints are read by exact clock datestamp, so a run
+at one timestep never reads checkpoints written at another---stale checkpoints from
+a different timestep are inert but waste space and should be removed.
+
+\paragraph{Isolation of variants.} The monthly and single-window optimisers use
+separate run trees, control files, state files, forcing directories, logs, and
+output directories. The finite-difference and plumbing-test jobs share the monthly
+run tree with the optimiser and must not run concurrently with it; sequence them
+with a job dependency.
+
+\paragraph{Determinism.} The adjoint is bitwise-deterministic given identical
+inputs; observed gradient noise is a genuine property of the convective adjoint,
+not nondeterminism. This was established by rerunning an adjoint twice from
+identical inputs.
+
+% =============================================================================
+\section{Cross-references}
+% =============================================================================
+
+\begin{itemize}[nosep]
+  \item Scientific formulation, results, and outlook:
+        \code{monthly\_4dvar\_science.tex}.
+  \item Derivation and finite-difference verification of the monthly gradient
+        \eqref{eq:gm}: \code{monthly\_sigma\_gradient.tex}.
+\end{itemize}
+
+\end{document}

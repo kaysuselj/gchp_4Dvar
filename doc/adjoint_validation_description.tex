@@ -1,0 +1,557 @@
+% =============================================================================
+% Offline Adjoint Validation for GCHP 4D-Var: Technical Description
+% =============================================================================
+\documentclass[12pt]{article}
+
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{bm}
+\usepackage{physics}
+\usepackage{listings}
+\usepackage{enumitem}
+
+\geometry{margin=1in}
+
+\newcommand{\sigb}{\sigma_b}
+\newcommand{\gfd}{g^{\mathrm{FD}}}
+\newcommand{\gadj}{g^{\mathrm{adj}}}
+\newcommand{\gfit}{g^{\mathrm{fit}}}
+\newcommand{\ek}{\mathbf{e}_k}
+\newcommand{\eps}{\varepsilon}
+
+\lstset{basicstyle=\small\ttfamily, breaklines=true,
+        frame=single, backgroundcolor=\color{gray!8}}
+
+\title{\textbf{Offline Adjoint Validation in GCHP 4D-Var}\\
+\large Finite-Difference Gradient Test on the Native Cubed-Sphere Grid}
+\author{GCHP Adjoint Development}
+\date{\today}
+
+% =============================================================================
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% =============================================================================
+\section{Overview}
+% =============================================================================
+
+The adjoint model must satisfy the identity
+\begin{equation}
+  \langle \mathbf{M}\,\mathbf{u},\,\mathbf{v} \rangle
+  = \langle \mathbf{u},\,\mathbf{M}^{\top}\mathbf{v} \rangle
+\end{equation}
+for all vectors $\mathbf{u}$, $\mathbf{v}$, where $\mathbf{M}$ is the
+tangent-linear model and $\mathbf{M}^{\top}$ is its adjoint.  In practice,
+the adjoint is coded by hand and errors in the adjoint chain (incorrect
+accumulation, missing terms, sign errors) produce a gradient
+$\gadj = \partial J/\partial \sigma$ that disagrees with the true gradient.
+
+This document describes the \emph{offline} validation framework implemented in
+\texttt{test\_adjoint\_vs\_forward.run} and \texttt{cs\_fd\_tools.py}.  The
+approach constructs the exact finite-difference (FD) gradient from perturbed
+forward runs, then compares it cell by cell with the adjoint gradient.  Because
+the cost function is \emph{exactly quadratic} in the control variable $\sigma$
+under the conditions of the test (linear transport with no flux limiter), the
+symmetric FD estimate is exact --- any discrepancy is a true adjoint bug, not a
+FD approximation error.
+
+All perturbations and gradient comparisons are performed on the \emph{native
+cubed-sphere} (CS) grid.  This eliminates both the lat-lon-to-CS emission
+regrid and the CS-to-lat-lon gradient regrid from the comparison, isolating
+errors in the adjoint chain itself.
+
+% =============================================================================
+\section{Mathematical Framework}
+% =============================================================================
+
+\subsection{Forward Model}
+
+Let $\sigma(f,j,i) \in \mathbb{R}$ be the dimensionless emission scaling
+factor at cubed-sphere cell $(f,j,i)$, where $f\in\{0,\ldots,5\}$ is the face
+index and $(j,i)$ are the within-face row and column.  The prior TER flux
+$F_{\mathrm{base}}(f,j,i)$ is fixed; the actual flux applied by HEMCO is
+\begin{equation}
+  F_{\mathrm{total}}(f,j,i) = \sigma(f,j,i)\cdot F_{\mathrm{base}}(f,j,i).
+\end{equation}
+
+The forward model $\mathcal{M}$ integrates the CO$_2$ transport equations
+forced by $F_{\mathrm{total}}$ over the assimilation window
+$[t_0, T]$:
+\begin{equation}
+  \mathbf{x}(t) = \mathcal{M}_{t_0 \to t}(\mathbf{x}_0,\,\sigma).
+\end{equation}
+With chemistry, convection, and PBL mixing disabled and the PPM advection
+limiter switched off (\texttt{hord\_tr=2}), $\mathcal{M}$ is \emph{exactly
+linear} in $\sigma$:
+\begin{equation}
+  \mathbf{x}(t;\sigma) = \mathbf{x}^{(0)}(t) + \mathbf{A}(t)\,\bm{\sigma},
+  \label{eq:linearity}
+\end{equation}
+where $\mathbf{x}^{(0)}$ is the state driven by all non-TER fluxes,
+$\bm{\sigma}$ is the vectorised scaling field, and $\mathbf{A}$ is the linear
+transport operator mapping emission scalings to CO$_2$ concentrations.
+
+\subsubsection*{Role of the PPM limiter}
+
+The default advection scheme (\texttt{hord\_tr=12}) applies a monotone PPM
+limiter that is a non-linear function of the tracer concentration.  This
+renders $\mathcal{M}$ non-linear in $\sigma$, breaking the quadraticity
+argument below.  By setting \texttt{hord\_tr=2} (unlimited PPM), the transport
+operator becomes exactly linear in the tracer and hence in $\sigma$, restoring
+quadraticity.
+
+\subsection{Cost Function}
+
+The observation term of the cost function is
+\begin{equation}
+  J(\sigma) = \frac{1}{2} \sum_{k=1}^{N_{\mathrm{obs}}}
+  \left(\frac{\hat{x}_{\mathrm{XCO}_2,k}(\sigma) - y_k}{\epsilon_k}
+  \right)^2,
+  \label{eq:J}
+\end{equation}
+where $\hat{x}_{\mathrm{XCO}_2,k}(\sigma)$ is the simulated column-averaged
+CO$_2$ at observation $k$, $y_k$ is the synthetic observation, and $\epsilon_k$
+is the observation error standard deviation.
+
+By \eqref{eq:linearity}, $\hat{x}_{\mathrm{XCO}_2,k}$ is an affine function of
+$\bm{\sigma}$:
+\begin{equation}
+  \hat{x}_{\mathrm{XCO}_2,k}(\sigma) = c_k + \mathbf{b}_k^\top\bm{\sigma},
+\end{equation}
+so $J(\sigma)$ is a sum of squares of affine functions of $\bm{\sigma}$ and is
+therefore \emph{exactly quadratic} in $\bm{\sigma}$:
+\begin{equation}
+  J(\bm{\sigma}) = \frac{1}{2}\bm{\sigma}^\top \mathbf{Q}\,\bm{\sigma}
+                   + \mathbf{p}^\top\bm{\sigma} + c_0,
+  \label{eq:J_quadratic}
+\end{equation}
+where $\mathbf{Q} = \sum_k \mathbf{b}_k\mathbf{b}_k^\top / \epsilon_k^2$
+is the Gauss-Newton Hessian.
+
+\subsection{Adjoint Gradient}
+
+The adjoint model computes the exact gradient
+\begin{equation}
+  \gadj(f,j,i) = \frac{\partial J}{\partial \sigma(f,j,i)}.
+  \label{eq:g_adj}
+\end{equation}
+In the GCHP adjoint, this is accumulated into the field
+\texttt{SurfaceFluxAdj\_CO2} written to the adjoint \texttt{OutputDir}.
+
+\subsection{Finite-Difference Gradient and Exactness}
+
+For a unit perturbation along cell $k = (f,j,i)$ define
+\begin{align}
+  \sigma^{+} &= \sigma_0 + \eps\,\ek, \\
+  \sigma^{-} &= \sigma_0 - \eps\,\ek,
+\end{align}
+where $\ek$ is the standard basis vector for cell $k$ and $\eps > 0$ is the
+perturbation amplitude.  The symmetric (centred) finite-difference estimate is
+\begin{equation}
+  \gfd_k(\eps) = \frac{J(\sigma^{+}) - J(\sigma^{-})}{2\eps}.
+  \label{eq:gFD}
+\end{equation}
+
+Because $J$ is exactly quadratic \eqref{eq:J_quadratic}, its Taylor expansion
+terminates at second order:
+\begin{align}
+  J(\sigma^{+}) &= J(\sigma_0) + \eps\,\gadj_k
+                   + \tfrac{1}{2}\eps^2\,Q_{kk}, \\
+  J(\sigma^{-}) &= J(\sigma_0) - \eps\,\gadj_k
+                   + \tfrac{1}{2}\eps^2\,Q_{kk}.
+\end{align}
+Substituting into \eqref{eq:gFD}:
+\begin{equation}
+  \boxed{\gfd_k(\eps) = \gadj_k \quad \text{exactly, for any } \eps > 0.}
+  \label{eq:exactness}
+\end{equation}
+There is \emph{no} finite-difference truncation error.  Any discrepancy between
+$\gfd_k$ and $\gadj_k$ is therefore a genuine error in the adjoint code.
+
+\subsection{Parabola Fit and the $g^{\mathrm{fit}}$ Estimator}
+
+In practice, rounding errors in floating-point arithmetic introduce small noise.
+To maximally exploit all available $J$ evaluations, a parabola
+\begin{equation}
+  J(\eps) = J_0 + \eps\,\gfit_k + \tfrac{1}{2}\eps^2\,H_{kk}
+  \label{eq:parabola}
+\end{equation}
+is fitted by least squares through the base point $(0, J_0)$ and all
+perturbed evaluations $\{(\eps_n, J(\sigma_0 + \eps_n\,\ek))\}$.  The fit
+yields $\gfit_k$ and the diagonal Hessian element $H_{kk}$; the residual of
+the fit, $\max_n|\,J_{\mathrm{obs},n} - J_{\mathrm{fit},n}|$, provides a
+diagnostic for the degree of quadraticity.
+
+The validation metric is
+\begin{equation}
+  r_k = \frac{\gadj_k}{\gfit_k}.
+\end{equation}
+For a correct adjoint, $r_k = 1$ to within floating-point precision.
+
+\subsection{Global Perturbation Test}
+
+In addition to cell-wise perturbations, a \emph{global} uniform perturbation
+$\sigma \to (1+\eps)\sigma_0$ is applied.  For this perturbation the
+expected gradient from the adjoint is
+\begin{equation}
+  g_{\mathrm{global}}^{\mathrm{adj}} =
+  \sum_{f,j,i} \sigma_0(f,j,i)\cdot\gadj(f,j,i),
+  \label{eq:g_global}
+\end{equation}
+which is compared against
+$\gfd_{\mathrm{global}} = [J((1+\eps)\sigma_0) - J((1-\eps)\sigma_0)]/(2\eps)$.
+This test is sensitive to errors that affect many cells simultaneously, such as
+a missing overall scale factor.
+
+\subsection{Quadraticity Probe}
+
+For the top-ranked cell (largest $|\gadj_k|$), an additional one-sided
+evaluation at $+2\eps$ is collected:
+\begin{equation}
+  J(\sigma_0 + 2\eps\,\ek) = J_0 + 2\eps\,\gadj_k + 2\eps^2\,H_{kk}.
+\end{equation}
+Together with $J(\sigma_0 \pm \eps\,\ek)$, this gives three points to fit the
+parabola \eqref{eq:parabola}.  If the residual of the three-point fit is small
+relative to $\max_n |J_n - J_0|$ (threshold $10^{-3}$), $J$ is confirmed to
+be quadratic; otherwise a non-linearity is flagged, which would indicate that
+the PPM limiter or chemistry is inadvertently active.
+
+% =============================================================================
+\section{Native Cubed-Sphere Validation Strategy}
+% =============================================================================
+
+\subsection{Motivation}
+
+An earlier lat-lon FD test (fd\_multicell) revealed a gradient mismatch that
+could stem from two sources:
+\begin{enumerate}[label=(\roman*)]
+  \item An error in the adjoint chain.
+  \item A mismatch between the forward emission regrid (lat-lon $\to$ CS,
+        operator $\mathbf{S}$) and the adjoint gradient regrid (CS $\to$
+        lat-lon, operator $\mathbf{R}$), i.e.\ $\mathbf{S} \neq \mathbf{R}^\top$.
+\end{enumerate}
+By placing $\sigma$ directly on the native CS grid and outputting the adjoint
+gradient on the same native CS grid (no \texttt{grid\_label} in \texttt{HISTORY.rc}),
+both regrid operators are removed from the loop.  A mismatch on the native
+grid is unambiguously a bug in the adjoint chain, not a regridding inconsistency.
+
+\subsection{CS Sigma File Format}
+
+The sigma field is written as a NetCDF4 file with dimensions
+\texttt{(time, lev=1, lat=$6N$, lon=$N$)}, where $N$ is the CS resolution
+(\texttt{IM}, default 24 for C24).  The $6N$ rows correspond to the six faces
+stacked vertically; MAPL ExtData detects the aspect ratio and reads the file
+as a cubed-sphere field with an identity regrid (no interpolation).
+
+\subsection{P0 Plumbing Gate}
+
+Before any expensive month-long run, a one-day forward pair verifies that
+ExtData delivers the CS sigma to HEMCO without regridding:
+\begin{enumerate}
+  \item \textbf{Base run}: $\sigma \equiv 1$ everywhere; record
+        \texttt{EmisCO2\_NetTerrExch} output $E^{(0)}_{f,j,i}$.
+  \item \textbf{Unique-per-cell run}: assign a unique value
+        $\sigma^{\mathrm{uniq}}_{f,j,i}$ to every cell; record
+        $E^{(1)}_{f,j,i}$.
+  \item \textbf{Check}: verify $E^{(1)}_{f,j,i} = \sigma^{\mathrm{uniq}}_{f,j,i}
+        \cdot E^{(0)}_{f,j,i}$ to machine precision at every cell.
+\end{enumerate}
+If the check fails, ExtData has regridded the CS file (breaking the
+native-grid assumption) or the face mapping is wrong; the script aborts
+immediately.
+
+% =============================================================================
+\section{Implementation}
+% =============================================================================
+
+The test is orchestrated by the PBS script
+\texttt{test\_adjoint\_vs\_forward.run} (submitted from the test directory)
+and the Python utility \texttt{cs\_fd\_tools.py}.  The run is divided into
+five phases; marker files in \texttt{results/} allow resumption
+(\texttt{RESTART=true}) if the job is interrupted.
+
+\subsection{Phase P0: CS Plumbing Gate (two 1-day forwards)}
+
+\begin{enumerate}
+  \item \textbf{Write sigma} with \texttt{--kind none} (uniform 1.0).
+  \item Run GCHP forward for one day (\texttt{T\_START} to
+        \texttt{T\_START+1d}).
+  \item \textbf{Write sigma} with \texttt{--kind unique} (unique per-cell
+        pattern of amplitude 0.5 around 1.0).
+  \item Run GCHP forward for one day.
+  \item \textbf{Check} (Python \texttt{check-p0} subcommand): assert
+        $E^{(1)} = \sigma^{\mathrm{uniq}} \cdot E^{(0)}$ at every CS cell.
+        If the check fails with \texttt{die}, the run aborts.
+\end{enumerate}
+
+\subsection{Phase P1: Base Forward Run and Adjoint Forcing}
+
+\begin{enumerate}
+  \item \textbf{Write sigma} with \texttt{--kind none} ($\sigma \equiv 1$).
+  \item Run GCHP forward over the full assimilation window
+        $[t_0, T]$, producing:
+        \begin{itemize}
+          \item Adjoint checkpoints (\texttt{gcadj\_internal\_checkpoint*},
+                \texttt{gcadj\_import\_checkpoint*}) in \texttt{forward\_run/}.
+          \item Chemistry restart
+                \texttt{Restarts/gcchem\_internal\_checkpoint*}.
+          \item Satellite-track diagnostic \texttt{GEOSChem.sat\_track.*.nc4}
+                in \texttt{forward\_run/OutputDir/}.
+        \end{itemize}
+  \item Move checkpoints and restart to \texttt{adjoint/}:
+        \begin{lstlisting}
+find forward_run/ -name 'gcadj_*checkpoint*' \
+     -exec mv -t adjoint/ {} +
+mv forward_run/Restarts/gcchem_internal_checkpoint* \
+     adjoint/gcchem_initial_restart.nc4
+        \end{lstlisting}
+  \item Compute $J_0$ and adjoint forcing from the sat-track files
+        (\texttt{co2\_adjoint\_forcing\_osse.py}); write
+        \texttt{CO2\_adjoint\_forcing\_*.nc4} to \texttt{forcing\_files\_osse/}
+        and record $J_0$ in \texttt{results/J\_base.txt}.
+\end{enumerate}
+
+\subsection{Phase P2: Adjoint Run and Cell Selection}
+
+\begin{enumerate}
+  \item Run GCHP adjoint over $[t_0, T]$, reading checkpoints from
+        \texttt{adjoint/} and forcing from \texttt{forcing\_files\_osse/}.
+        The adjoint outputs \texttt{GEOSChem.SurfaceFluxAdj\_CO2.*.nc4}
+        in \texttt{adjoint/OutputDir/} on the native C24 CS grid (no
+        \texttt{grid\_label} in \texttt{adjoint/HISTORY.rc}).
+  \item \textbf{Pick cells} (\texttt{cs\_fd\_tools.py pick-cells}):
+        \begin{itemize}
+          \item Accumulate the adjoint gradient field
+                $\gadj(f,j,i) = \partial J / \partial \sigma(f,j,i)$
+                over the window.
+          \item Select the $N$ land cells
+                (determined from a coordinate file) with the largest
+                $|\gadj(f,j,i)| > g_{\min}$, ranked in descending order.
+          \item Write \texttt{results/cells.txt}: one row per perturbation run,
+                recording \texttt{(kind, f, j, i, eps, tag)}.
+          \item For the top-ranked cell add an extra row at $+2\eps$
+                (quadraticity probe).
+          \item Add two global-perturbation rows ($\pm\eps$).
+          \item Save the full gradient array to
+                \texttt{results/cs\_state.npz}.
+        \end{itemize}
+  \item Delete adjoint checkpoints to free disk space.
+\end{enumerate}
+
+\subsection{Phase P3: Perturbed Forward Runs}
+
+For each row in \texttt{results/cells.txt} (processed sequentially):
+\begin{enumerate}
+  \item \textbf{Write sigma}: for a cell perturbation, set
+        $\sigma(f,j,i) = 1 + \eps$ at a single CS cell; for a global
+        perturbation, $\sigma \equiv 1 + \eps$ everywhere.
+  \item Run GCHP forward over $[t_0, T]$.
+  \item Compute $J(\sigma^{+})$ or $J(\sigma^{-})$ with
+        \texttt{co2\_adjoint\_forcing\_osse.py}; write
+        \texttt{results/J\_\{tag\}.txt}.
+  \item Checkpoints are dropped immediately (not needed for subsequent
+        phases).
+\end{enumerate}
+A walltime guard checks remaining PBS time before each P3 run; if budget
+is exhausted the run exits with code 5 and can be resubmitted with
+\texttt{RESTART=true}.
+
+\subsection{Phase P4: Analysis and Verdict}
+
+\texttt{cs\_fd\_tools.py analyze} performs the following:
+
+\begin{enumerate}
+  \item For each cell group $(f,j,i)$, collect all $J$ evaluations
+        $\{(\eps_n, J_n)\}$ and fit the parabola \eqref{eq:parabola} by
+        least squares to obtain $\gfit_k$ and $H_{kk}$.
+  \item Compute the ratio $r_k = \gadj_k / \gfit_k$ for each cell.
+  \item Compute the global-perturbation ratio
+        $r_{\mathrm{global}} = \gadj_{\mathrm{global}} / \gfit_{\mathrm{global}}$.
+  \item Assess quadraticity: the parabola residual must satisfy
+        $\max_n|\mathrm{resid}_n| < 10^{-3} \max_n|J_n - J_0|$.
+  \item Write \texttt{results/report.txt}, scatter plot
+        \texttt{results/fd\_scatter\_cs.png} (adjoint gradient vs.\ FD
+        gradient), and spatial map \texttt{results/g\_map\_cs.png}.
+  \item Return an exit code:
+\end{enumerate}
+
+\begin{table}[h!]
+\centering
+\caption{Exit codes and their interpretation.}
+\begin{tabular}{cll}
+\toprule
+Code & Meaning & Action \\
+\midrule
+0 & Adjoint validated: $|r_k - 1| \leq \delta_{\mathrm{tol}}$ for all cells
+  & None \\
+3 & Systematic factor: $r_k \approx \alpha \neq 1$ (constant offset)
+  & Check overall scale (unit conversion, area factor) \\
+4 & Spatially varying ratio: $r_k$ varies across cells
+  & Adjoint chain bug; inspect cell-by-cell scatter \\
+5 & Incomplete: not all P3 runs finished in walltime
+  & Resubmit with \texttt{RESTART=true} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% =============================================================================
+\section{Interpreting Results}
+% =============================================================================
+
+\subsection{Scatter Plot (\texttt{fd\_scatter\_cs.png})}
+
+Each point plots $\gadj_k$ (y-axis) against $\gfit_k$ (x-axis).  For a
+correct adjoint all points lie on the diagonal $y = x$.  A systematic offset
+(all points on a line $y = \alpha x$, $\alpha \neq 1$) indicates a global
+scale error.  Scatter around any line indicates spatially varying errors in the
+adjoint chain.
+
+\subsection{Spatial Map (\texttt{g\_map\_cs.png})}
+
+Shows the full adjoint gradient field $\gadj(f,j,i)$ on the globe, with the
+FD test cells marked and labelled with their ratio $r_k = \gadj_k/\gfit_k$.
+
+\subsection{One-Sided FD Diagnostics}
+
+The report also lists one-sided estimates
+$[J(\sigma_0 + \eps\,\ek) - J_0] / \eps$, which include the $O(\eps)$ Hessian
+contribution $\eps H_{kk}/2$.  Agreement between one-sided estimates at
+different $\eps$ and the parabola fit confirms quadraticity.
+
+% =============================================================================
+\section{Configuration}
+% =============================================================================
+
+\subsection{Required Physics Settings}
+
+The following settings in \texttt{runConfig\_forward.sh} and
+\texttt{runConfig\_adjoint.sh} are required for the quadraticity argument to
+hold:
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{ll}
+\toprule
+Setting & Required value \\
+\midrule
+\texttt{Turn\_on\_Chemistry}         & \texttt{false} \\
+\texttt{Turn\_on\_Cloud\_Conv}       & \texttt{false} \\
+\texttt{Turn\_on\_PBL\_Mixing}       & \texttt{false} \\
+\texttt{Turn\_on\_Non\_Local\_Mixing}& \texttt{false} \\
+\texttt{Turn\_on\_Dry\_Deposition}   & \texttt{false} \\
+\texttt{Turn\_on\_Wet\_Deposition}   & \texttt{false} \\
+\texttt{Turn\_on\_Transport}         & \texttt{true} \\
+\texttt{Turn\_on\_Base\_Emissions}   & \texttt{true} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Rationale.} Chemistry is a non-linear sink; convection and PBL mixing
+introduce non-linear mixing operators; dry and wet deposition introduce
+concentration-dependent sinks.  All of these break the linearity
+\eqref{eq:linearity} of $\mathcal{M}$ in $\sigma$ and hence the quadraticity
+of $J$.  With only transport and base emissions active, $\sigma$ enters $J$
+solely through the linear transport of the surface emission pulse, preserving
+exact quadraticity.
+
+\subsection{Advection Limiter}
+
+The \texttt{input.nml} must set
+
+\begin{lstlisting}
+&fv_core_nml
+hord_tr = 2 /
+\end{lstlisting}
+
+\texttt{hord\_tr=2} selects unlimited PPM advection, which is exactly linear in
+the tracer concentration.  The default \texttt{hord\_tr=12} applies a monotone
+limiter that is non-linear in the tracer, breaking quadraticity.
+
+\subsection{ExtData Offsets for the Adjoint}
+
+The GCHP adjoint runs time-reversed: at each backward step the model reads
+meteorology at time $t - \Delta t$ rather than $t$.  The MAPL ExtData refresh
+offsets in \texttt{adjoint/ExtData.rc} must therefore be shifted by one
+timestep $\Delta t$ relative to the forward values:
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{llll}
+\toprule
+Met group & Forward offset & Adjoint offset ($\Delta t = 10$\,min)
+          & Adjoint offset ($\Delta t = 30$\,min) \\
+\midrule
+A1 (1-hr averaged 2-D) & \texttt{F0;003000} & \texttt{F0;002000} & \texttt{F0;000000} \\
+A3 (3-hr averaged 3-D) & \texttt{F0;013000} & \texttt{F0;012000} & \texttt{F0;010000} \\
+I3 first slot (PS1, SPHU1, TMPU1) & \texttt{0} & \texttt{0;-001000} & \texttt{0;-003000} \\
+I3 second slot (PS2, SPHU2, TMPU2) & \texttt{0;003000} & \texttt{0} & \texttt{0} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The general rule is: adjoint offset $=$ forward offset $-\,\Delta t$.
+
+% =============================================================================
+\section{Key Files}
+% =============================================================================
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{ll}
+\toprule
+File & Purpose \\
+\midrule
+\texttt{test\_adjoint\_vs\_forward.run}
+  & PBS script orchestrating all phases \\
+\texttt{cs\_fd\_tools.py}
+  & Python: write-sigma, check-p0, pick-cells, analyze \\
+\texttt{co2\_adjoint\_forcing\_osse.py}
+  & Compute $J$ and adjoint forcing from sat-track files \\
+\texttt{forward\_run/ExtData.rc}
+  & ExtData config for forward run (forward offsets) \\
+\texttt{adjoint/ExtData.rc}
+  & ExtData config for adjoint run (shifted offsets) \\
+\texttt{adjoint/HISTORY.rc}
+  & Must omit \texttt{grid\_label} for native-CS gradient output \\
+\texttt{sigma\_monthly/\{year\}/\{mm\}.nc4}
+  & CS sigma field written by \texttt{write-sigma} before each run \\
+\texttt{results/cells.txt}
+  & FD run list: one row per perturbed forward \\
+\texttt{results/cs\_state.npz}
+  & Adjoint gradient array and cell coordinates \\
+\texttt{results/report.txt}
+  & Per-cell FD vs.\ adjoint comparison and verdict \\
+\texttt{results/fd\_scatter\_cs.png}
+  & Scatter: $\gadj$ vs.\ $\gfit$ \\
+\texttt{results/g\_map\_cs.png}
+  & Spatial map of $\gadj$ with FD cells labelled \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% =============================================================================
+\section{Relationship to the Full 4D-Var System}
+% =============================================================================
+
+This offline test validates the adjoint \emph{transport} chain in isolation.
+Once validated, the full 4D-Var system adds:
+\begin{itemize}
+  \item The background term $J_b$ (computed analytically in Python, no GCHP
+        involvement).
+  \item The lat-lon $\to$ CS emission regrid (operator $\mathbf{S}$) and the
+        CS $\to$ lat-lon gradient regrid (operator $\mathbf{R}$).
+  \item Chemistry, convection, PBL mixing, and deposition (all of which are
+        non-linear and require separate adjoint verification).
+\end{itemize}
+Passing this test with exit code 0 on the native CS grid guarantees that the
+core transport adjoint is correct.  A subsequent lat-lon FD test (with the
+same transport-only configuration but $\sigma$ on the lat-lon grid) would
+then isolate any regrid inconsistency ($\mathbf{S} \neq \mathbf{R}^\top$).
+
+\end{document}

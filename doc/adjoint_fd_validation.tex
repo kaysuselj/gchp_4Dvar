@@ -1,0 +1,349 @@
+% =============================================================================
+% Validating the GCHP CO2 adjoint gradient against finite differences
+% on the native cubed-sphere grid (test_adjoint_vs_forward)
+% =============================================================================
+\documentclass[12pt]{article}
+
+% Latin Modern ships Type 1 outlines; the plain Computer Modern path needs
+% MetaFont (mf), which is absent on this host and aborts the build.
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\newcommand{\bm}[1]{\mathbf{#1}}
+
+\geometry{margin=1in}
+
+\newcommand{\Fprior}{F^{\mathrm{p}}}
+\newcommand{\tend}{t_{\mathrm{end}}}
+\newcommand{\tstart}{t_{\mathrm{start}}}
+\newcommand{\Adj}{A}
+\newcommand{\gfit}{g_{\mathrm{fd}}}
+\newcommand{\gadj}{g_{\mathrm{adj}}}
+\newcommand{\Robs}{\bm{R}}
+\newcommand{\Sobs}{\bm{S}}
+\newcommand{\Hop}{\mathcal{H}}
+
+\title{\textbf{Validating the GCHP CO$_2$ Adjoint Gradient
+Against Finite Differences}\\
+\large A native cubed-sphere test with no regridding in the loop}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+The adjoint of the GCHP CO$_2$ model returns the gradient of the observation
+cost function $J$ with respect to the terrestrial-exchange (TER) flux scaling
+factors $\sigma$ in a single backward sweep. This note documents how that
+gradient is validated against a finite-difference (FD) estimate built purely
+from forward runs. The central fact is that CO$_2$ is a linear tracer, so $J$ is
+\emph{exactly} quadratic in $\sigma$: two symmetric forward perturbations pin the
+gradient with no truncation error, making the FD value an exact reference rather
+than an approximation. The test is run on the model's native C24 cubed-sphere
+grid so that no interpolation operator sits between the control vector, the model,
+and the reported gradient; this isolates a genuine adjoint-chain error from an
+interpolation mismatch. We give the cost function, the linearity argument, the
+exact-FD estimator, the design that removes both regrid operators, the plumbing
+gate that proves it, and the comparison metrics and verdict logic. The harness is
+\texttt{test\_adjoint\_vs\_forward/} with driver \texttt{cs\_fd\_tools.py}.
+\end{abstract}
+
+% -----------------------------------------------------------------------------
+\section{Cost function and control variable}
+% -----------------------------------------------------------------------------
+
+The assimilation window is $[\tstart,\tend]$ (default 2016-01-01 to 2016-02-01,
+one month). The control variable $\sigma$ is a multiplicative scaling of the
+prior TER flux, defined per surface grid cell (and per month in the full monthly
+system). Writing $\Fprior(x,s)$ for the prior TER flux at surface cell $x$ and
+time $s$, the flux the model actually emits is
+%
+\begin{equation}
+  F(x,s) \;=\; \sigma_{x}\,\Fprior(x,s) \;+\; F^{\mathrm{other}}(x,s),
+  \label{eq:flux}
+\end{equation}
+%
+where $F^{\mathrm{other}}$ collects every non-TER component (fossil, ocean,
+biomass burning) that $\sigma$ does \emph{not} touch. At the base state
+$\sigma \equiv 1$ the model runs on the prior fluxes.
+
+The cost function is the observation misfit. For each satellite sounding $k$ the
+model produces a column-averaged dry-air mole fraction $\hat{y}_k$, compared with
+the OSSE observation $o_k$ and its error $\varsigma_k$:
+%
+\begin{equation}
+  J(\sigma) \;=\; \tfrac{1}{2}\sum_{k}
+  \left(\frac{\hat{y}_k(\sigma) - o_k}{\varsigma_k}\right)^{2}.
+  \label{eq:J}
+\end{equation}
+%
+This is the form implemented in \texttt{co2\_adjoint\_forcing\_osse.py}
+(\texttt{J\_file += 0.5*(diff/xco2\_std)**2}); a background term
+$\tfrac12\|\sigma-\sigma_b\|_{\bm{B}^{-1}}^2$, if present, is also quadratic and
+does not change the argument below.
+
+% -----------------------------------------------------------------------------
+\section{Why $J$ is exactly quadratic in $\sigma$}
+\label{sec:quad}
+% -----------------------------------------------------------------------------
+
+The estimator relies on $J$ being a quadratic polynomial in $\sigma$ with no
+higher-order terms. This holds algebraically, because the map from $\sigma$ to
+$\hat{y}_k$ is affine. We trace the chain.
+
+\paragraph{Flux is linear in $\sigma$.} By \eqref{eq:flux}, $F(x,s)$ is a
+first-degree function of $\sigma$; the non-TER part is a $\sigma$-independent
+constant.
+
+\paragraph{Concentration is affine in $\sigma$.} CO$_2$ is a passive tracer: it
+has no chemistry and no concentration-dependent sources or sinks, and atmospheric
+transport (advection, convection, boundary-layer mixing) is a \emph{linear}
+operator on the tracer field. The response to a sum of sources is the sum of the
+responses, so
+%
+\begin{equation}
+  c(x,t;\sigma) \;=\; c_{\mathrm{bkg}}(x,t) \;+\;
+  \sum_{j} \sigma_j\, G_j(x,t),
+  \label{eq:superpose}
+\end{equation}
+%
+where the sum runs over the control-vector cells $j$, $G_j$ is the transported
+response to cell $j$'s unit prior TER flux (its Green's function), and
+$c_{\mathrm{bkg}}$ is the $\sigma$-independent background: initial condition plus
+the response to all non-TER fluxes. Crucially $\sigma$ appears only to first
+order; perturbing only part of the flux merely enlarges $c_{\mathrm{bkg}}$ and
+leaves the affine structure intact.
+
+\paragraph{The observation operator is linear.} The map $\Hop$ from the model
+field to $\hat{y}_k$ is a composition of fixed linear operations
+(\texttt{co2\_adjoint\_forcing\_osse.py}): (i) sampling the model column at the
+sounding location and overpass time; (ii) vertical interpolation to the retrieval
+pressure grid, a fixed weight matrix $\bm{W}$ with $c^{\mathrm{sat}} = \bm{W}^{\!\top}
+c^{\mathrm{model}}$; and (iii) the retrieval averaging kernel and prior,
+%
+\begin{equation}
+  \hat{y}_k \;=\; y^{\mathrm{a}}_k
+  \;+\; \bm{a}_k^{\!\top}\!\left(\bm{W}_k^{\!\top} c^{\mathrm{model}}(x_k)
+  - c^{\mathrm{a}}_k\right),
+  \label{eq:Hop}
+\end{equation}
+%
+where the prior column $y^{\mathrm{a}}_k$, prior profile $c^{\mathrm{a}}_k$ and
+averaging kernel $\bm{a}_k$ are fixed properties of the retrieval, independent of
+the model state. Every operator here is a fixed matrix or vector.
+
+\paragraph{Composition.} A fixed linear map applied to the affine field
+\eqref{eq:superpose} is affine, so
+%
+\begin{equation}
+  \hat{y}_k(\sigma) \;=\; \alpha_k + \bm{\beta}_k^{\!\top}\sigma
+  \label{eq:affine}
+\end{equation}
+%
+for a constant $\alpha_k$ and a fixed vector $\bm{\beta}_k$. Substituting the
+affine residual $r_k(\sigma) = \hat{y}_k(\sigma) - o_k$ into \eqref{eq:J} gives a
+sum of squares of affine functions of $\sigma$: a quadratic polynomial, exactly.
+
+% -----------------------------------------------------------------------------
+\section{The exact finite-difference estimator}
+\label{sec:fd}
+% -----------------------------------------------------------------------------
+
+Perturb a single cell, $\sigma = \bm{1} + \varepsilon\,\bm{e}_{\mathrm{cell}}$,
+and let $J(\varepsilon)$ be the cost of the resulting forward run. By
+Section~\ref{sec:quad}, $J$ is exactly a parabola in $\varepsilon$:
+%
+\begin{equation}
+  J(\varepsilon) \;=\; J_0 \;+\; g\,\varepsilon \;+\; \tfrac{1}{2}H\,\varepsilon^2,
+  \label{eq:parab}
+\end{equation}
+%
+with the two coefficients of interest
+%
+\begin{equation}
+  g \;=\; \frac{\partial J}{\partial \sigma_{\mathrm{cell}}}
+       \;=\; \sum_k \frac{r_k\,d_k}{\varsigma_k^{2}},
+  \qquad
+  H \;=\; \sum_k \frac{d_k^{2}}{\varsigma_k^{2}} \;\ge\; 0,
+  \qquad d_k \equiv \frac{\partial \hat{y}_k}{\partial \varepsilon}.
+  \label{eq:gH}
+\end{equation}
+%
+Here $g$ is precisely the gradient the adjoint computes, and $H$ is a pure
+Gauss--Newton curvature: it carries no model-second-derivative term \emph{because}
+the model is exactly linear ($\partial^2\hat{y}_k/\partial\varepsilon^2 = 0$),
+which is why $H\ge 0$.
+
+Equation \eqref{eq:parab} has three unknowns $(J_0,g,H)$. We measure
+$J_0=J(0)$ from the base run and sample two symmetric perturbations $J(\pm\varepsilon)$,
+which determine $g$ and $H$ in closed form:
+%
+\begin{equation}
+  \boxed{\;\gfit \;=\; \frac{J(+\varepsilon) - J(-\varepsilon)}{2\varepsilon}\;}
+  \qquad
+  H_{\mathrm{fd}} \;=\; \frac{J(+\varepsilon) + J(-\varepsilon) - 2J_0}{\varepsilon^{2}}.
+  \label{eq:central}
+\end{equation}
+%
+The symmetric central difference cancels the $\varepsilon^2$ term \emph{exactly},
+so $\gfit$ is the true gradient with \emph{no truncation error}---the payoff of
+$J$ being genuinely quadratic. This is what makes the FD value a reference rather
+than an approximation, and why two perturbed runs suffice per cell instead of an
+$\varepsilon\to 0$ limit. A one-sided difference
+$(J(\pm\varepsilon)-J_0)/\varepsilon = g \pm \tfrac{\varepsilon}{2}H$ is retained
+only as a diagnostic; it is contaminated by curvature and is not used as truth.
+
+In code, \texttt{cs\_fd\_tools.py::fit\_parabola} solves \eqref{eq:parab} by least
+squares over the sampled $\varepsilon$ values, which for the symmetric pair reduces
+to \eqref{eq:central}. A third point at $+2\varepsilon$ is run at one cell purely
+as a quadraticity check: the fit residual there must be $\approx 0$, confirming
+\eqref{eq:parab} empirically.
+
+\paragraph{Global probe.} Perturbing every cell uniformly,
+$\sigma = (1+\varepsilon)\bm{1}$, yields $\gfit = \sum_j g_j$, compared against the
+summed adjoint gradient. Uniform and block perturbations are also useful because a
+constant field regrids exactly, so they are insensitive to the interpolation issue
+discussed next.
+
+% -----------------------------------------------------------------------------
+\section{Native cubed-sphere design: removing the regrid operators}
+\label{sec:native}
+% -----------------------------------------------------------------------------
+
+In the production lat--lon setup the control vector lives on a lat--lon grid while
+the model integrates on the cubed sphere. Two interpolation operators then sit in
+the loop: the model feels $\sigma^{\mathrm{cs}} = \Robs\,\sigma^{\mathrm{ll}}$ via
+ExtData, and the reported gradient is $\Sobs\, g^{\mathrm{cs}}$ via the HISTORY
+regrid. If $\Sobs \ne \Robs^{\!\top}$ the reported gradient is biased even when
+the adjoint chain is perfect. A raw FD-vs-adjoint mismatch therefore cannot
+distinguish an interpolation artifact from a real adjoint bug.
+
+This test removes \emph{both} operators so the comparison is unambiguous:
+%
+\begin{itemize}
+  \item $\sigma$ is written \emph{directly on the model's C24 cubed-sphere grid}
+  in the GMAO stacked layout (\texttt{lat}$=6\times$\texttt{lon}$=144\times24$).
+  MAPL's grid manager detects \texttt{lat}$=6\,\cdot\,$\texttt{lon} as a
+  cubed-sphere file (\texttt{MAPL\_GridManager.F90}) and ExtData reads it with an
+  \emph{identity} regrid: the model feels exactly the $\sigma$ in the file.
+  \item the adjoint HISTORY writes \texttt{SurfaceFluxAdj\_CO2} \emph{natively}
+  (the \texttt{grid\_label} line is removed at setup), so the gradient is read
+  back cell-for-cell.
+\end{itemize}
+%
+With both operators gone, a mismatch here is a genuine adjoint-chain error; a pass
+here combined with a lat--lon FD failure pins the discrepancy on
+$\Sobs\ne\Robs^{\!\top}$, whose remedy is to move the control vector onto the CS
+grid or to smooth increments with a correlated background covariance.
+
+\paragraph{Plumbing gate (P0).} Before any gradient work, two one-day forwards
+verify the no-regrid claim empirically. A $\sigma$ field with a \emph{unique}
+value at every cell must reproduce itself in the emitted flux:
+$\texttt{EmisCO2\_NetTerrExch}^{\mathrm{pert}} = \sigma \odot
+\texttt{EmisCO2\_NetTerrExch}^{\mathrm{base}}$ elementwise. Because each cell
+carries a distinct value, this simultaneously proves that ExtData applied no
+regrid and that the face/row mapping of the stacked layout is correct
+(\texttt{cs\_fd\_tools.py::check-p0}, tolerance $3\times10^{-5}$). The check has
+been observed to hold to $1.1\times10^{-7}$ at all 3456 cells.
+
+% -----------------------------------------------------------------------------
+\section{The adjoint gradient and the comparison}
+% -----------------------------------------------------------------------------
+
+The adjoint diagnostic \texttt{SurfaceFluxAdj\_CO2} is a backward accumulator in
+emission time, weighted by the \emph{prior} TER flux. The gradient for a window
+is the difference of the accumulator between its bounding times,
+%
+\begin{equation}
+  \gadj \;=\; \Adj(\tstart) - \Adj(\tend),
+  \label{eq:gadj}
+\end{equation}
+%
+read exactly at the boundary timestamps on the native grid
+(\texttt{cs\_fd\_tools.py::read\_boundary\_accumulators\_cs}). Because backward
+HISTORY never writes the final record, $\Adj(\tend)=0$ by construction and is
+zero-filled. For a single cell $(f,j,i)$ the expected value is $\gadj[f,j,i]$; for
+the global probe it is $\sum \gadj$.
+
+For each probed cell we form
+%
+\begin{equation}
+  \mathrm{ratio} = \frac{\gadj}{\gfit}, \qquad
+  \mathrm{rel\ err} = \frac{|\gadj - \gfit|}{|\gfit|},
+\end{equation}
+%
+and \texttt{cs\_fd\_tools.py::analyze} classifies the ensemble:
+%
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+condition & interpretation & exit \\
+\midrule
+$\mathrm{rel\ err} < \tau$ at all cells & adjoint validated (native grid) & 0 \\
+ratio $\approx$ const $\ne 1$ & real systematic factor (units / $\Delta t$ / convention) & 3 \\
+ratio scattered & spatially varying: approx.\ physics adjoint or noise & 4 \\
+$<2$ eps values present & incomplete; resubmit & 5 \\
+\bottomrule
+\end{tabular}
+\end{center}
+%
+with default tolerance $\tau = 5\%$.
+
+% -----------------------------------------------------------------------------
+\section{Perturbing only the TER flux}
+% -----------------------------------------------------------------------------
+
+The control scales the TER flux alone \eqref{eq:flux}, not the total flux. This is
+both correct and consequential. It is correct because the non-TER components are
+held fixed and enter only the constant background $c_{\mathrm{bkg}}$; $J$ remains
+exactly quadratic (Section~\ref{sec:quad}). The only requirement is that the
+adjoint differentiate with respect to the \emph{same} control, which it does: its
+surface-flux accumulator is TER-only
+(\texttt{ADJ\_HEMCO\_SFLUX\_SELECTOR: DIAGN / EmisCO2\_NetTerrExch}). Both $\gfit$
+and $\gadj$ are therefore $\partial J/\partial(\text{TER scaling})$, and the
+comparison is like-for-like.
+
+The consequence is that
+$\partial J/\partial\sigma_j = (\partial J/\partial F_j)\,\Fprior_j$ is
+proportional to the base TER flux at cell $j$. Over ocean, and anywhere the prior
+TER flux vanishes, the gradient is \emph{exactly zero}: scaling a zero flux does
+nothing regardless of how sensitive $J$ is to CO$_2$ there. The test therefore
+selects probe cells on land only, thresholding on $|\Adj(\tstart)| >$
+\texttt{LAND\_THR}, and the adjoint accumulator (also prior-flux-weighted) is zero
+over ocean consistently.
+
+% -----------------------------------------------------------------------------
+\section{Protocol}
+% -----------------------------------------------------------------------------
+
+The harness \texttt{test\_adjoint\_vs\_forward.run} clones a self-contained run
+tree at job start (never touching the production monthly tree) and executes phases
+whose completion markers make it restart-safe:
+%
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+phase & action & cost \\
+\midrule
+SETUP & clone + overlay + native-CS edits (idempotent) & seconds \\
+P0 & two 1-day forwards; unique-$\sigma$ plumbing gate & $\sim$10 min \\
+P1 & base 1-month forward $\to$ checkpoints $\to$ forcing $\to J_0$ & $\sim$25 min \\
+P2 & adjoint $\to$ pick $N$ land cells spread over $|\gadj|$ & $\sim$15 min \\
+P3 & 2 forwards per cell ($\pm\varepsilon$) $+$ 2 global $+$ 1 quadraticity & $\sim$5 h \\
+P4 & analyze $\to$ report, \texttt{fd\_scatter\_cs.png}, \texttt{g\_map\_cs.png} & seconds \\
+\bottomrule
+\end{tabular}
+\end{center}
+%
+Each perturbed forward re-runs the full window with $\sigma$ rewritten for that
+cell, recomputes $J$ through the same forcing code as the base, and stores the
+scalar. \texttt{analyze} then applies \eqref{eq:central} and \eqref{eq:gadj} per
+cell and emits the verdict. A pass certifies the adjoint gradient on the native
+grid to within $\tau$; any residual lat--lon discrepancy is then attributable to
+interpolation ($\Sobs\ne\Robs^{\!\top}$) rather than the adjoint chain.
+
+\end{document}

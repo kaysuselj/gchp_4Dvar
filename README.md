@@ -164,6 +164,31 @@ Per-iteration snapshots are saved to `4dvar_output/4dvar_state_iter_NNN.npz`.
 | `4dvar_design/forward_run/gchp.log` | Forward GCHP log (last iteration) |
 | `4dvar_design/adjoint/gchp.log` | Adjoint GCHP log (last iteration) |
 
+## Adjoint validation
+
+The L-BFGS-B step size is only as trustworthy as the adjoint gradient. Before
+running a production optimization, the adjoint gradient (`SurfaceFluxAdj_CO2`)
+should be verified against finite differences of the forward model.
+
+The [`adjoint_validation/`](adjoint_validation/README.md) subdirectory holds
+that harness — a native cubed-sphere FD-vs-adjoint test. It is driven by three
+one-month experiments that isolate, in turn:
+
+1. the ideal linear baseline (both PPM limiters off — adjoint should be exact),
+2. the PPM advection-limiter adjoint error (production `hord_tr=12`/`kord_tr=8`),
+3. the additional convection/PBL-mixing adjoint error.
+
+See [`adjoint_validation/README.md`](adjoint_validation/README.md) for the FD
+method, the P0–P4 pipeline, the 13 validation cells, and the full worked
+three-experiment example.
+
+## OSSE optimizers
+
+`4dvar_optimizer.osse.run` (one-month window, single σ field) and
+`4dvar_optimizer.osse.monthly.run` (full-year window, 12 monthly σ fields with
+phase checkpointing and job chaining) are the OSSE variants of this optimizer.
+They are documented in [`README_4dvar_osse.md`](README_4dvar_osse.md).
+
 ## Other files in this repository
 
 | File | Description |

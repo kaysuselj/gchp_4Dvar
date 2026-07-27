@@ -1,0 +1,392 @@
+% =============================================================================
+% Monthly 4D-Var estimation of terrestrial CO2 fluxes in GCHP: science report
+% Base draft for a paper / science report.  Companion documents:
+%   monthly_sigma_gradient.tex  - derivation of the monthly adjoint gradient
+%   monthly_4dvar_software.tex   - software architecture and workflow
+% =============================================================================
+\documentclass[12pt]{article}
+
+% Latin Modern ships Type 1 outlines; plain Computer Modern needs MetaFont (mf),
+% which is absent on the NAS hosts and aborts the build.  Do not add T1 fontenc
+% or the bm package for the same reason.
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\newcommand{\bm}[1]{\mathbf{#1}}
+
+\geometry{margin=1in}
+
+\newcommand{\xco}{X\mathrm{CO}_2}
+\newcommand{\co}{\mathrm{CO}_2}
+\newcommand{\Fprior}{F^{\mathrm{p}}}
+\newcommand{\tstart}{t_{\mathrm{start}}}
+\newcommand{\tend}{t_{\mathrm{end}}}
+
+\title{\textbf{Monthly 4D-Var Estimation of Terrestrial CO$_2$ Fluxes
+with GEOS-Chem High Performance}\\
+\large An observing-system simulation experiment}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We describe a four-dimensional variational (4D-Var) system for estimating
+surface CO$_2$ fluxes from column-averaged dry-air mole fraction ($\xco$)
+observations, built on the adjoint of GEOS-Chem High Performance (GCHP). The
+control vector is a set of monthly multiplicative scaling fields applied to the
+prior terrestrial ecosystem respiration (TER) flux, so the analysis resolves the
+seasonal evolution of the biospheric flux adjustment rather than a single
+annual correction. The system is exercised in an observing-system simulation
+experiment (OSSE): synthetic $\xco$ retrievals are sampled from a known ``true''
+flux field along satellite ground tracks, and the assimilation attempts to
+recover the truth from a biased prior. This report sets out the scientific
+formulation---cost function, control variables, observation operator, and prior
+error model---and the adjoint-based gradient that makes the monthly extension
+tractable. We summarise diagnostics from a single-month proof-of-concept
+assimilation, identify the two principal obstacles that the diagnostics expose
+(a noise-dominated adjoint gradient and an under-weighted background term), and
+lay out the monthly, full-year experiment and the analysis plan. The companion
+note \texttt{monthly\_sigma\_gradient.tex} derives the monthly gradient; the
+companion note \texttt{monthly\_4dvar\_software.tex} documents the
+implementation.
+\end{abstract}
+
+\tableofcontents
+
+% =============================================================================
+\section{Introduction and motivation}
+% =============================================================================
+
+Atmospheric measurements of $\co$ constrain surface fluxes through inverse
+(``top-down'') estimation: given a chemical transport model, a prior flux
+estimate, and observations of atmospheric $\co$, one seeks the flux field most
+consistent with both the prior and the observations. The terrestrial biosphere
+is the dominant source of interannual and seasonal variability in the
+atmospheric $\co$ growth rate, and its net exchange---the small residual of two
+large opposing fluxes, photosynthetic uptake and respiration---is the least
+well-constrained term in the global carbon budget. Space-borne $\xco$
+retrievals (e.g.\ OCO-2) sample this signal densely enough to constrain fluxes
+at sub-continental scales, but only if the inversion resolves the flux in time:
+a single annual scaling cannot represent the phase and amplitude of the
+biospheric seasonal cycle, which is precisely the quantity of scientific
+interest.
+
+This motivates a control vector with monthly temporal resolution. We estimate,
+for each calendar month $m$ and each surface grid cell $x$, a multiplicative
+scaling factor $\sigma_m(x)$ on the prior TER flux. Twelve monthly fields over a
+one-year window let the analysis move the phase and amplitude of the terrestrial
+flux independently in each month while keeping the control vector small enough
+for a gradient-based optimiser. The remaining flux components---fossil-fuel
+combustion, air--sea exchange, and the gross photosynthetic and net biosphere
+terms---are held at their prior values, so the experiment isolates the
+respiration adjustment that the observations can support.
+
+We evaluate the system in an OSSE rather than with real retrievals. In an OSSE
+the ``true'' fluxes are known by construction, so the analysis error---the
+difference between the recovered and true fluxes---is available exactly, which
+is impossible with real data. This makes the OSSE the natural setting in which
+to validate the assimilation machinery, quantify the information content of the
+observing system, and expose pathologies of the optimiser and the error model
+before committing to a real-data campaign.
+
+% =============================================================================
+\section{The forward model}
+% =============================================================================
+
+The forward model is a GCHP simulation of atmospheric $\co$ as a single passive
+tracer transported by assimilated meteorology. Surface fluxes enter through the
+Harmonized Emissions Component (HEMCO), which assembles the net flux from
+independently specified components:
+%
+\begin{equation}
+  F_{\mathrm{total}}(x,s) = F_{\mathrm{ff}} + F_{\mathrm{ocean}}
+     + F_{\mathrm{GPP}} + F_{\mathrm{NBE}}
+     + \sigma_{m(s)}(x)\,\Fprior_{\mathrm{TER}}(x,s),
+  \label{eq:fluxsum}
+\end{equation}
+%
+where $m(s)$ is the calendar month containing time $s$. The five terms are
+fossil fuel ($F_{\mathrm{ff}}$), air--sea exchange from an ocean biogeochemistry
+product ($F_{\mathrm{ocean}}$), gross primary production ($F_{\mathrm{GPP}}$),
+net biosphere exchange from a data-assimilation product ($F_{\mathrm{NBE}}$),
+and terrestrial ecosystem respiration ($\Fprior_{\mathrm{TER}}$). Only the last
+carries the control variable $\sigma$; the seasonal and spatial structure of the
+prior TER flux is retained, and $\sigma$ rescales it.
+
+The simulation is run at C24 cubed-sphere horizontal resolution with a
+$30$-minute physics timestep. The control fields $\sigma_m$ are defined on a
+$72\times46$ regular latitude--longitude grid and mapped to the cubed sphere by
+HEMCO. A single forward integration over the assimilation window produces
+simulated $\xco$ along the satellite ground tracks, which is the model
+counterpart of the observations.
+
+% =============================================================================
+\section{Observations and the OSSE design}
+% =============================================================================
+
+\subsection{Observation operator}
+
+The observations are $\xco$ soundings located along satellite ground tracks. The
+observation operator $H$ maps the three-dimensional model $\co$ field to a
+column-averaged dry-air mole fraction at each sounding location and time by a
+pressure-weighted vertical integral. In the forward run, the model is sampled at
+the sounding space--time coordinates through a satellite-track diagnostic, so
+$H(\bm{x})$ is available for every observation without a separate interpolation
+step.
+
+\subsection{Synthetic truth and observations}
+
+The OSSE ``truth'' is a forward simulation driven by a set of terrestrial fluxes
+distinct from the prior, so that the true monthly scaling differs from unity in a
+known way. Synthetic $\xco$ observations are generated by sampling the truth run
+along the real satellite tracks and adding representative retrieval noise. The
+assimilation is then initialised from the prior ($\sigma_m \equiv 1$) and asked
+to recover the truth. Because the truth is known, the monthly analysis increment
+$\sigma_m - 1$ can be compared directly against the true scaling, month by month,
+which is the central evaluation of the experiment.
+
+% =============================================================================
+\section{Variational formulation}
+% =============================================================================
+
+\subsection{Cost function}
+
+Let $\bm{\sigma}$ denote the stacked control vector of all monthly fields,
+$\bm{\sigma} = (\sigma_1,\dots,\sigma_{12})$, each $\sigma_m$ a field on the
+control grid. The analysis minimises
+%
+\begin{equation}
+  J(\bm{\sigma}) \;=\; J_{\mathrm{obs}}(\bm{\sigma}) + J_{\mathrm{b}}(\bm{\sigma}),
+  \label{eq:cost}
+\end{equation}
+%
+with an observation term and a background (prior) term. The observation term is
+the $\xco$ misfit summed over all soundings $i$ in the window,
+%
+\begin{equation}
+  J_{\mathrm{obs}}(\bm{\sigma}) \;=\; \tfrac{1}{2}
+    \sum_i \frac{\big(H_i(\bm{\sigma}) - y_i\big)^2}{\varepsilon_i^2},
+  \label{eq:jobs}
+\end{equation}
+%
+where $y_i$ is the observed $\xco$, $H_i(\bm{\sigma})$ the simulated $\xco$ at
+that sounding, and $\varepsilon_i$ the observation-error standard deviation
+(measurement plus representation error). The background term penalises departures
+of each monthly field from the prior,
+%
+\begin{equation}
+  J_{\mathrm{b}}(\bm{\sigma}) \;=\; \frac{1}{2\sigma_b^2}
+    \sum_{m=1}^{12} \lVert \sigma_m - 1 \rVert^2,
+  \label{eq:jb}
+\end{equation}
+%
+a diagonal background-error model with a single scalar standard deviation
+$\sigma_b$ common to all months and cells. Section~\ref{sec:challenges}
+discusses the limitations of this diagonal choice and the planned replacement by
+a spatially correlated background.
+
+\subsection{Control variable and its gradient}
+
+The minimisation is performed with a limited-memory quasi-Newton method
+(L-BFGS-B), which requires the gradient $\nabla_{\bm{\sigma}} J$. The background
+gradient is immediate from \eqref{eq:jb},
+%
+\begin{equation}
+  \nabla_{\sigma_m} J_{\mathrm{b}} = (\sigma_m - 1)/\sigma_b^2 .
+\end{equation}
+%
+The observation gradient is supplied by the GCHP adjoint. The key result, derived
+in the companion note \texttt{monthly\_sigma\_gradient.tex} and summarised here,
+is that the archived adjoint surface diagnostic $A(x,t) \equiv
+\texttt{SurfaceFluxAdj\_CO2}$ is a \emph{backward accumulator in emission time},
+%
+\begin{equation}
+  A(x,t) = \sum_{s\,\ge\,t} \lambda(x,s)\,\Fprior_{\mathrm{TER}}(x,s)\,\Delta t,
+  \qquad A(x,\tend)=0,
+  \label{eq:accum}
+\end{equation}
+%
+where $\lambda(x,s) = \partial J_{\mathrm{obs}}/\partial F(x,s)$ is the
+sensitivity to an instantaneous flux input. Because $\sigma_m$ multiplies the
+prior flux only within month $m=[t_m,t_{m+1})$, the monthly observation gradient
+is the \emph{difference} of the accumulator across consecutive month boundaries,
+%
+\begin{equation}
+  \boxed{\;g_m(x) \;\equiv\; \frac{\partial J_{\mathrm{obs}}}{\partial \sigma_m(x)}
+    \;=\; A(x,t_m) - A(x,t_{m+1}). \;}
+  \label{eq:gm}
+\end{equation}
+%
+Two properties of \eqref{eq:gm} are used as runtime consistency checks: the
+terminal condition $A(x,\tend)=0$, and the telescoping identity $\sum_m g_m =
+A(x,\tstart)$, i.e.\ the twelve monthly gradients must sum to the single
+whole-window gradient. Critically, the adjoint accumulator is weighted by the
+\emph{prior} TER flux (this is verified in the adjoint source and configuration),
+so no $1/\sigma_m$ renormalisation of \eqref{eq:gm} is required, and the adjoint
+run never needs the monthly scaling. A corollary is that only the forward model
+carries the monthly plumbing.
+
+\subsection{A note on temporal information flow}
+
+It is worth stating explicitly, because it is a common source of confusion, that
+the monthly differencing \eqref{eq:gm} does \emph{not} discard the ability of a
+late-window observation to constrain an early-window flux. A December $\xco$
+observation informs January fluxes through the adjoint transport, which is
+encoded inside $\lambda(x,s)$ (a sum over all observations at times $\ge s$).
+Differencing restricts only the \emph{emission-time} range to month $m$, because
+$\sigma_m$ multiplies no flux outside its own month. The two sums are indexed by
+different variables and are not in tension; see the companion note.
+
+% =============================================================================
+\section{Experimental configuration}
+% =============================================================================
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Setting & Value \\
+\midrule
+Transport model & GEOS-Chem High Performance (GCHP), $\co$ tracer \\
+Horizontal resolution & C24 cubed sphere \\
+Physics timestep & $1800$ s (chemistry and dynamics) \\
+Assimilation window & 2016-01-01 to 2017-01-01 (12 months) \\
+Control vector & $\sigma_m(x)$, $m=1,\dots,12$, on a $72\times46$ lat--lon grid \\
+Scaled flux component & terrestrial ecosystem respiration (TER) only \\
+Prior / first guess & $\sigma_m \equiv 1$ (unperturbed prior TER) \\
+Background error $\sigma_b$ & $0.2$ (uncorrelated, single scalar) \\
+Observations & synthetic $\xco$ along satellite ground tracks (OSSE) \\
+Optimiser & L-BFGS-B, limited memory, unit step \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Each outer iteration comprises a forward integration over the window, evaluation
+of $J_{\mathrm{obs}}$ and the observation forcing, a backward adjoint integration
+that produces $A(x,t)$, and one L-BFGS-B update. The monthly gradient
+\eqref{eq:gm} is formed by reading $A$ at the thirteen month boundaries.
+
+% =============================================================================
+\section{Proof-of-concept diagnostics}
+% =============================================================================
+
+Before the full monthly, full-year experiment, the machinery was exercised in a
+reduced configuration with a single scaling field over a one-month window, which
+shares every software component with the monthly system except the temporal
+differencing. Over thirteen outer iterations the observation cost decreased
+monotonically (after a first-step overshoot discussed below), and the recovered
+scaling field remained physically plausible, staying within roughly
+$[0.5,1.6]$. These runs establish that the forward/adjoint/optimiser loop is
+functional and that the gradient drives $J$ downward. They also expose two
+problems that must be addressed for a credible monthly analysis.
+
+% =============================================================================
+\section{Principal challenges exposed by the diagnostics}
+\label{sec:challenges}
+% =============================================================================
+
+\subsection{A noise-dominated adjoint gradient}
+
+The most consequential finding is that the adjoint gradient field is dominated by
+small-scale noise. Between consecutive outer iterations, over which the control
+field moves only slightly and $J_{\mathrm{obs}}$ changes by a fraction of a
+percent, the gradient field decorrelates almost completely, its root-mean-square
+magnitude varies by more than an order of magnitude, and isolated cells
+occasionally spike to many times the typical value. The persistent hotspots
+coincide with regions of deep tropical convection.
+
+A dedicated determinism test rules out a code defect as the cause: rerunning the
+same adjoint integration twice from byte-identical inputs produced
+bitwise-identical output. The gradient noise is therefore a genuine feature of
+the adjoint solution---chaotic amplification of tiny differences by the adjoint
+of moist convective transport---rather than a nondeterministic bug. This is a
+known difficulty for adjoints of atmospheric transport with active convective
+parameterisations. Its practical effect is that the optimisation has behaved
+more like noisy gradient descent stabilised by the background term than like a
+clean quasi-Newton minimisation, and it implies that the monthly differencing
+\eqref{eq:gm}, being a difference of two noisy fields, will have a poorer
+signal-to-noise ratio still. Mitigation is discussed in
+Section~\ref{sec:outlook}.
+
+\subsection{An under-weighted background term}
+
+In the proof-of-concept runs the background term contributed a negligible
+fraction of the total cost, and its gradient was one to two orders of magnitude
+weaker than the observation gradient at the most active cells. The prior
+therefore constrained the solution only weakly where the noisy observation
+gradient was largest, allowing the analysis to chase noise in those cells. The
+root cause is the diagonal, uncorrelated specification of both the
+observation-error covariance (which overcounts information from spatially
+correlated retrieval errors) and the background-error covariance. As an interim
+measure the background standard deviation was tightened; the durable fix is a
+spatially correlated background, described next.
+
+\subsection{Finite-window edge effects}
+
+Fluxes emitted late in the window have little time to influence any observation
+before the window closes, so their gradients are intrinsically small and the
+corresponding months remain close to the prior. This is a property of any
+finite-window inversion under a correct gradient, not an artefact of the monthly
+formulation; if the late months are of scientific interest, the window can be
+extended past the last month to be optimised.
+
+% =============================================================================
+\section{The monthly, full-year experiment}
+% =============================================================================
+
+The monthly system extends the proof of concept in three ways: the control
+vector carries twelve monthly fields instead of one; the forward model reads a
+distinct scaling field per month through a time-varying input; and the gradient
+is formed by the boundary differencing \eqref{eq:gm}. The monthly plumbing has
+been implemented and unit-tested, and its correctness at the level of flux
+application (the right monthly field is applied to TER in the right month, and no
+other flux component is affected) has been verified from a dedicated forward
+test run. A finite-difference test of the gradient convention---confirming that
+the difference \eqref{eq:gm}, and not the raw accumulator value, matches a
+brute-force perturbation of the cost function---is the gating check before the
+full multi-month optimisation, and is run over a short window at reduced cost. A
+reduced, three-month end-to-end run serves as an integration test of the complete
+iteration (forward, forcing, adjoint, monthly update) before the year-long run.
+
+% =============================================================================
+\section{Outlook: a correlated background and gradient regularisation}
+\label{sec:outlook}
+% =============================================================================
+
+The two principal challenges---gradient noise and an ineffective background---have
+a common remedy. Replacing the diagonal background-error covariance $\bm{B}$ with
+a spatially correlated one, and reparameterising the control vector through the
+transform $\sigma_m = 1 + \bm{B}^{1/2}\bm{w}_m$ (a control-variable transform with
+a Gaussian smoother as $\bm{B}^{1/2}$), accomplishes two things at once. It gives
+the prior a meaningful spatial correlation length, so that information from
+observations is spread physically rather than deposited in isolated cells; and,
+because the gradient in the transformed variable is $\bm{B}^{1/2}$ applied to the
+physical gradient, it low-pass filters the noisy adjoint gradient as an intrinsic
+part of the preconditioning. A correlated observation-error model, or an
+observation-error inflation to account for correlated retrieval errors, is a
+complementary step. Calibrating the background correlation length and amplitude
+against the known OSSE truth is itself a deliverable of the experiment.
+
+% =============================================================================
+\section{Summary}
+% =============================================================================
+
+We have set out a monthly 4D-Var system for terrestrial CO$_2$ flux estimation
+built on the GCHP adjoint, evaluated in an OSSE. The scientific novelty is the
+monthly-resolved control vector, which requires the adjoint gradient to be formed
+as a difference of the backward accumulator across month boundaries; this is
+derived and verified in the companion note. A single-month proof of concept
+confirms that the assimilation loop functions and reduces the cost, and it
+exposes two obstacles---a chaotic, noise-dominated adjoint gradient (shown to be
+a genuine property of the convective adjoint, not a bug) and an under-weighted
+background---whose common remedy is a spatially correlated background implemented
+through a control-variable transform. The monthly, full-year experiment, together
+with the OSSE evaluation of month-by-month analysis error, is the next step.
+
+\end{document}

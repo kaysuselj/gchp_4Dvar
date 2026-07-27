@@ -1,0 +1,375 @@
+% =============================================================================
+% Monthly control variables in the GCHP CO2 4D-Var system:
+% what the adjoint accumulator means and how to extract dJ/dsigma_m
+% =============================================================================
+\documentclass[12pt]{article}
+
+% Latin Modern ships Type 1 outlines; the plain Computer Modern path needs
+% MetaFont (mf), which is absent on this host and aborts the build.
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\newcommand{\bm}[1]{\mathbf{#1}}
+
+\geometry{margin=1in}
+
+\newcommand{\Fprior}{F^{\mathrm{p}}}
+\newcommand{\tend}{t_{\mathrm{end}}}
+\newcommand{\tstart}{t_{\mathrm{start}}}
+\newcommand{\Adj}{A}
+
+\title{\textbf{Monthly Control Variables in the GCHP CO$_2$ 4D-Var System}\\
+\large Why the monthly gradient is a difference of the adjoint accumulator}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Extending the control vector from a single annual scaling field $\sigma$ to twelve
+monthly fields $\sigma_1,\dots,\sigma_{12}$ requires knowing what the adjoint
+diagnostic \texttt{SurfaceFluxAdj\_CO2} actually contains. This note shows that the
+diagnostic is a \emph{backward accumulator in emission time}, that the monthly
+gradient is therefore the difference of the accumulator between consecutive month
+boundaries, and that using the raw accumulator value at each month boundary
+multiplies the true gradient by a lower-triangular matrix of ones. It also
+separates two ideas that are easy to conflate: influence in \emph{observation
+time} (a December observation does inform January fluxes, and this is retained)
+versus contribution in \emph{emission time} (which is what the differencing
+partitions). A source-code audit confirms that the accumulator is weighted by the
+\emph{prior} TER flux, so the differenced gradient needs no $1/\sigma_m$
+renormalisation. A finite-difference verification protocol is given.
+\end{abstract}
+
+% -----------------------------------------------------------------------------
+\section{Setup and notation}
+% -----------------------------------------------------------------------------
+
+The assimilation window is $[\tstart,\tend]$, here 2016-01-01 to 2017-01-01.
+Let $t_1 < t_2 < \dots < t_{12}$ be the month start times, $t_1 = \tstart$, and
+define the closing boundary $t_{13} = \tend$. Month $m$ is the interval
+$[t_m, t_{m+1})$, and $m(s)$ denotes the month containing time $s$.
+
+The control variable multiplies the terrestrial ecosystem respiration (TER) prior
+flux. Writing $\Fprior(x,s)$ for the prior TER flux at surface location $x$ and
+time $s$, the flux actually seen by the model is
+%
+\begin{equation}
+  F_\sigma(x,s) \;=\; \sigma_{m(s)}(x)\,\Fprior(x,s).
+  \label{eq:flux}
+\end{equation}
+%
+This is implemented as HEMCO scale factor \texttt{750} (\texttt{Sigma\_CO2}) on the
+\texttt{TER\_CLASS\_CTEM} base entry. Note that $\sigma$ scales TER \emph{only}:
+fossil fuel, ocean, CARDAMOM NBE and GPP are not scaled by it.
+
+The cost function is $J = J_{\mathrm{obs}} + J_{\mathrm{b}}$, where $J_{\mathrm{obs}}$
+sums observation-space misfits over all observation times $t' \in [\tstart,\tend]$
+and $J_{\mathrm{b}}$ is the background term.
+
+Let $\lambda(x,s)$ denote the sensitivity of $J_{\mathrm{obs}}$ to an
+\emph{instantaneous} surface flux input at $(x,s)$,
+%
+\begin{equation}
+  \lambda(x,s) \;\equiv\; \frac{\partial J_{\mathrm{obs}}}{\partial F(x,s)} .
+  \label{eq:lambda}
+\end{equation}
+%
+This is the quantity the adjoint transport carries; it is the surface trace of the
+adjoint tracer field \texttt{SpeciesAdj\_CO2}.
+
+% -----------------------------------------------------------------------------
+\section{What the adjoint carries backward}
+% -----------------------------------------------------------------------------
+
+The adjoint model is integrated backward from $\tend$ with $\lambda \equiv 0$ as its
+terminal condition, and observation forcing is injected as the integration passes
+each observation time. Consequently, at any time $s$,
+%
+\begin{equation}
+  \lambda(x,s) \;=\; \sum_{\substack{\text{observations at } t' \\ t' \,\ge\, s}}
+    \Big( \text{adjoint transport of that observation's forcing from } t' \text{ back to } s \Big).
+  \label{eq:lambda_sum}
+\end{equation}
+%
+\textbf{This is the key structural fact.} For $s$ in January, $\lambda(x,s)$ already
+contains the forcing of \emph{every} observation from January through December. A
+January flux perturbation needs months to reach the mid-troposphere where XCO$_2$
+is sensitive; the adjoint propagates that December information backward in time
+and deposits it into $\lambda(x,s)$ for $s$ in January. Nothing in what follows
+discards it.
+
+% -----------------------------------------------------------------------------
+\section{The diagnostic is an accumulator in emission time}
+% -----------------------------------------------------------------------------
+
+The GCHP adjoint does not archive $\lambda$ at the surface directly. It archives a
+running sum, taken over the backward sweep, of $\lambda$ weighted by the prior flux.
+Writing $\Adj(x,t)$ for \texttt{SurfaceFluxAdj\_CO2},
+%
+\begin{equation}
+  \boxed{\;\Adj(x,t) \;=\; \sum_{s \,\ge\, t} \lambda(x,s)\,\Fprior(x,s)\,\Delta t \;}
+  \label{eq:accumulator}
+\end{equation}
+%
+with the sum running over model timesteps $s$ from $t$ up to $\tend$.
+
+Two immediate consequences, both of which are observed in the archived output of the
+existing one-month OSSE run:
+%
+\begin{enumerate}
+  \item $\Adj(x,\tend) = 0$ identically (empty sum). Verified: the final record of
+        \texttt{GEOSChem.Adjoint.20160201.nc4} is exactly zero.
+  \item $\Adj(x,\tstart)$ is the complete window-integrated sensitivity. This is the
+        value that \texttt{lbfgsb\_step.py} currently reads, and it is the correct
+        gradient \emph{for a single scaling field applied over the whole window}.
+\end{enumerate}
+
+Indeed, if $\sigma$ is one field applied to all of $[\tstart,\tend]$, then by
+\eqref{eq:flux} and the chain rule
+%
+\begin{equation}
+  \frac{\partial J_{\mathrm{obs}}}{\partial \sigma(x)}
+  \;=\; \sum_{s \in [\tstart,\tend]} \lambda(x,s)\,\Fprior(x,s)\,\Delta t
+  \;=\; \Adj(x,\tstart),
+\end{equation}
+%
+which is exactly what the current one-month script does.
+
+% -----------------------------------------------------------------------------
+\section{The monthly gradient}
+% -----------------------------------------------------------------------------
+
+Now let $\sigma_m$ act on month $m$ alone. Since $\sigma_m$ multiplies $\Fprior(x,s)$
+if and only if $s \in [t_m, t_{m+1})$, the chain rule gives
+%
+\begin{equation}
+  g_m(x) \;\equiv\; \frac{\partial J_{\mathrm{obs}}}{\partial \sigma_m(x)}
+  \;=\; \sum_{s \in [t_m,\,t_{m+1})} \lambda(x,s)\,\Fprior(x,s)\,\Delta t .
+  \label{eq:gm}
+\end{equation}
+%
+Comparing \eqref{eq:gm} with the accumulator \eqref{eq:accumulator}, the sum over
+month $m$ is the difference of two partial sums:
+%
+\begin{equation}
+  \boxed{\;g_m(x) \;=\; \Adj(x,t_m) \;-\; \Adj(x,t_{m+1}),
+  \qquad \Adj(x,t_{13}) = \Adj(x,\tend) = 0. \;}
+  \label{eq:diff}
+\end{equation}
+
+\paragraph{Telescoping check.} Summing \eqref{eq:diff} over $m=1,\dots,12$ telescopes:
+$\sum_m g_m = \Adj(\tstart) - \Adj(\tend) = \Adj(\tstart)$. The twelve monthly
+gradients must add up to the single annual gradient. This is a cheap and strong
+runtime assertion. On the existing one-month output, splitting the month into four
+sub-windows and summing the four differences reproduces $\Adj(\tstart)$ to
+$3.8 \times 10^{-6}$, i.e.\ to \texttt{float32} roundoff on a field of magnitude
+$\sim\!2.9\times10^{3}$.
+
+% -----------------------------------------------------------------------------
+\section{Why the raw accumulator value is not the monthly gradient}
+% -----------------------------------------------------------------------------
+
+The tempting alternative is to read $\Adj(x,t_m)$ directly and call it $g_m$. From
+\eqref{eq:accumulator} and \eqref{eq:gm},
+%
+\begin{equation}
+  \Adj(x,t_m) \;=\; \sum_{k=m}^{12} g_k(x),
+  \label{eq:nested}
+\end{equation}
+%
+so the raw values are \emph{nested partial sums} of the true gradients. In matrix
+form, with $\bm{g} = (g_1,\dots,g_{12})^{\!\top}$ and
+$\bm{g}^{\mathrm{raw}} = (\Adj(t_1),\dots,\Adj(t_{12}))^{\!\top}$,
+%
+\begin{equation}
+  \bm{g}^{\mathrm{raw}} \;=\; \bm{U}\,\bm{g},
+  \qquad
+  U_{mk} = \begin{cases} 1 & k \ge m \\ 0 & k < m \end{cases}
+\end{equation}
+%
+an upper-triangular matrix of ones. In particular $\Adj(t_1) = \sum_k g_k$: the raw
+January value is the \emph{whole year's} gradient, and $\Adj(t_{12}) = g_{12}$ is the
+only raw value that happens to be correct.
+
+The error is not subtle. It says that scaling January's TER changes $J$ by an amount
+that includes the effect of scaling February's, March's, \dots, December's TER --- even
+though $\sigma_1$ has no influence whatsoever on an emission that occurs in December.
+
+\paragraph{Directional-derivative test.} For a perturbation
+$\bm{\delta} = (\delta_1,\dots,\delta_{12})$ the true first-order change is
+$\delta J = \sum_k g_k \delta_k$. Using the raw values instead gives
+%
+\begin{equation}
+  \sum_m \Adj(t_m)\,\delta_m
+  \;=\; \sum_m \delta_m \sum_{k \ge m} g_k
+  \;=\; \sum_k g_k \Big( \sum_{m \le k} \delta_m \Big),
+\end{equation}
+%
+which equals $\delta J$ only when $\delta_m = 0$ for all $m > 1$. For a uniform
+perturbation $\delta_m = \delta$ it returns $\delta \sum_k k\, g_k$: month $k$ is
+weighted by $k$, so December is counted twelve times and January once. L-BFGS-B fed
+this quantity would systematically overstate the early months.
+
+% -----------------------------------------------------------------------------
+\section{Observation time versus emission time}
+% -----------------------------------------------------------------------------
+
+It is worth stating plainly what the differencing does and does not remove, because
+the two sums in play are indexed by different variables.
+
+\begin{itemize}
+  \item \textbf{Observation time $t'$.} This is summed inside $\lambda$, equation
+        \eqref{eq:lambda_sum}. For $s$ in January the sum runs over all $t' \ge s$,
+        i.e.\ over January through December observations. \emph{Differencing never
+        touches this sum.} The physical statement ``a December XCO$_2$ observation
+        informs January surface fluxes'' is encoded here, and it survives intact.
+
+  \item \textbf{Emission time $s$.} This is summed in the accumulator, equation
+        \eqref{eq:accumulator}. Differencing restricts this sum to
+        $s \in [t_m, t_{m+1})$, because $\sigma_m$ multiplies nothing outside its own
+        month.
+\end{itemize}
+
+So $g_{\mathrm{Jan}} = \Adj(t_{\mathrm{Jan}}) - \Adj(t_{\mathrm{Feb}})$ retains the
+influence of December \emph{observations} while excluding the contribution of
+February--December \emph{emissions}. Both are required, and they are not in tension.
+
+\paragraph{A real, separate limitation.} There \emph{is} a genuine finite-window
+problem nearby, and it should not be confused with the above. Fluxes emitted in
+November and December have little time to influence any observation before the
+window closes at $\tend$, so by \eqref{eq:gm} their gradients $g_{11}, g_{12}$ are
+small; the background term dominates and those months remain close to their prior.
+This is a property of a one-year window and appears under \emph{any} correct
+gradient convention. Differencing does not cause it --- it merely makes it legible.
+Mitigations, if the late months matter scientifically, are to extend $\tend$ a few
+months past the last month being optimised, or to accept that the last two monthly
+increments are prior-dominated.
+
+% -----------------------------------------------------------------------------
+\section{Normalisation: the accumulator uses the prior flux}
+% -----------------------------------------------------------------------------
+
+Equation \eqref{eq:accumulator} asserts that the accumulator weights $\lambda$ by the
+\emph{prior} flux $\Fprior$, not by the current flux $F_\sigma = \sigma\,\Fprior$. Had
+the code weighted by $F_\sigma$, we would instead have
+%
+\begin{equation}
+  \tilde{\Adj}(t_m) - \tilde{\Adj}(t_{m+1}) \;=\; \sigma_m(x)\, g_m(x),
+  \label{eq:norm}
+\end{equation}
+%
+requiring an explicit division by $\sigma_m$. The two coincide at $\sigma \equiv 1$, so
+the distinction is invisible at iteration~1 and would corrupt every later iteration.
+
+\paragraph{This is settled by the source code, and the prior flux is used.} The
+accumulation is performed in \texttt{Adjoint\_Utils\_Mod.F90}:
+%
+\begin{verbatim}
+State_Chm%SurfaceFluxAdj(:,:,NFD) = State_Chm%SurfaceFluxAdj(:,:,NFD) +
+      State_Chm%SpeciesAdj(:,:,1,NFD) *
+      ( SurfaceFluxForward * dt / ( rho_dry * dz ) )
+\end{verbatim}
+%
+where \texttt{SurfaceFluxForward} is \texttt{State\_Chm\%SurfaceFlux}, populated in the
+adjoint run by \texttt{Compute\_Sflx\_For\_Adjoint} (\texttt{hco\_interface\_gc\_mod.F90})
+according to the selector in the adjoint \texttt{GCHP.rc}:
+%
+\begin{verbatim}
+ADJ_HEMCO_SFLUX_SELECTOR: DIAGN
+ADJ_HEMCO_SFLUX_DIAGN:    EmisCO2_NetTerrExch
+\end{verbatim}
+%
+Crucially, in the \emph{adjoint} \texttt{HEMCO\_Config.rc} the \texttt{TER\_CLASS\_CTEM}
+base entry carries scale factor \texttt{751} (the unit conversion) \emph{only}, whereas
+the \emph{forward} \texttt{HEMCO\_Config.rc} carries \texttt{750/751}, where \texttt{750}
+is \texttt{Sigma\_CO2}. The adjoint therefore evaluates \texttt{EmisCO2\_NetTerrExch}
+as the \emph{unscaled prior} TER flux at every timestep, for every iteration. This is
+the asymmetry that makes \eqref{eq:accumulator} --- and hence \eqref{eq:diff} --- correct
+as written, with no $1/\sigma_m$ factor.
+
+\paragraph{Corollary.} The adjoint never reads \texttt{Sigma\_CO2} in any way that
+affects its output. Consequently \textbf{only the forward control files require the
+monthly sigma plumbing}; the adjoint \texttt{ExtData.rc} / \texttt{HEMCO\_Config.rc}
+need no change for the monthly extension.
+
+\paragraph{What this does \emph{not} explain.} The unphysical growth of $\sigma$
+(max $\approx 6.2$) observed in the one-month OSSE at iterations $\ge 2$ is therefore
+\emph{not} attributable to a $\sigma$-weighted accumulator. It remains open, and the
+finite-difference protocol of Section~\ref{sec:verify} is still worth running, both to
+confirm the differencing convention and to bound the gradient error independently of
+this argument.
+
+% -----------------------------------------------------------------------------
+\section{Verification protocol}
+\label{sec:verify}
+% -----------------------------------------------------------------------------
+
+The following finite-difference test discriminates the two remaining candidate
+conventions (differencing vs.\ raw) at the cost of a few short forward runs, and
+independently re-checks the $\Fprior$ normalisation established in Section~6. Use a
+two-month window, $\tstart = $ 2016-01-01, $\tend = $ 2016-03-01, so that
+$m \in \{1,2\}$.
+
+\begin{enumerate}
+  \item Run forward + adjoint once with $\sigma_1 = \sigma_2 = 1$. Record $J^{(0)}$ and
+        the accumulator at $t_1, t_2, t_3$. Form
+        $g_2^{\mathrm{diff}} = \Adj(t_2) - \Adj(t_3) = \Adj(t_2)$ and
+        $g_2^{\mathrm{raw}} = \Adj(t_2)$. (These coincide for the \emph{last} month ---
+        see \eqref{eq:nested} --- so month~2 tests only the normalisation.)
+  \item Form $g_1^{\mathrm{diff}} = \Adj(t_1) - \Adj(t_2)$ and
+        $g_1^{\mathrm{raw}} = \Adj(t_1)$. These differ, so month~1 discriminates the
+        conventions.
+  \item Choose a single grid cell $x_\star$ with a large $|g_1|$. Rerun the
+        \emph{forward model only} with $\sigma_1(x_\star) = 1 + \varepsilon$,
+        $\varepsilon = 10^{-2}$, all else unity. Record $J^{(1)}$.
+  \item Compare
+        $\displaystyle \frac{J^{(1)} - J^{(0)}}{\varepsilon}$
+        against $g_1^{\mathrm{diff}}(x_\star)$ and $g_1^{\mathrm{raw}}(x_\star)$.
+        The differencing convention should match to $O(\varepsilon)$; the raw value
+        should not.
+  \item \textbf{Normalisation re-check.} Repeat step~3 about a non-unit base point: set
+        $\sigma_1(x_\star) = 2$ for the reference run and $\sigma_1(x_\star) = 2+\varepsilon$
+        for the perturbed run, rerunning the adjoint at the base point. Per Section~6 the
+        recovered finite difference should equal the $\Adj$-difference \emph{directly}
+        (prior-flux weighting). If it instead equals the $\Adj$-difference divided by $2$,
+        the code is accumulating $F_\sigma$ (equation \eqref{eq:norm}), the source audit
+        is wrong somewhere, and \texttt{lbfgsb\_step\_monthly.py} must divide by $\sigma_m$.
+\end{enumerate}
+
+A cheaper partial check, requiring no extra runs, is the telescoping assertion
+$\sum_{m} \big[\Adj(t_m) - \Adj(t_{m+1})\big] = \Adj(\tstart)$, which should be added
+to \texttt{lbfgsb\_step\_monthly.py} as a runtime guard.
+
+% -----------------------------------------------------------------------------
+\section{Summary}
+% -----------------------------------------------------------------------------
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Quantity & Expression \\
+\midrule
+Archived diagnostic & $\Adj(x,t) = \sum_{s \ge t} \lambda(x,s)\Fprior(x,s)\Delta t$ \\
+Weight (from source) & prior TER flux, \texttt{EmisCO2\_NetTerrExch}, no \texttt{750} \\
+Terminal condition & $\Adj(x,\tend) = 0$ \\
+Annual gradient (current code) & $\partial J_{\mathrm{obs}}/\partial\sigma = \Adj(x,\tstart)$ \\
+Monthly gradient (new code) & $g_m(x) = \Adj(x,t_m) - \Adj(x,t_{m+1})$ \\
+Runtime guard & $\sum_{m=1}^{12} g_m = \Adj(x,\tstart)$ \\
+Full gradient & $\nabla_{\sigma_m} J = g_m + (\sigma_m - 1)/\sigma_b^2$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+The December-observation argument is correct physics and is fully retained by
+\eqref{eq:diff}; it constrains $\lambda$, not the range of the emission-time sum.
+The accumulated weight is the prior flux $\Fprior$, established by source-code audit in
+Section~6, so \eqref{eq:diff} is used as written and no $\sigma_m$ renormalisation is
+needed. What remains is to confirm the convention numerically via Section~\ref{sec:verify}.
+
+\end{document}
