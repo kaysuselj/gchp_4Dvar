@@ -1,11 +1,49 @@
 # GCHP 4D-Var CO2 flux optimization — OSSE runners
 
-This document covers the two OSSE (Observing System Simulation Experiment)
-drivers of the GCHP 4D-Var CO2 surface-flux optimizer:
+This document covers the OSSE (Observing System Simulation Experiment) driver of
+the GCHP 4D-Var CO2 surface-flux optimizer.
 
-- **`4dvar_optimizer.osse.run`** — one-month window, a single annual σ field.
-- **`4dvar_optimizer.osse.monthly.run`** — full-year window, **12 monthly σ
-  fields**, with phase checkpointing and job chaining.
+## Unified runner (`4dvar_optimizer.osse.unified.run`)
+
+**`4dvar_optimizer.osse.unified.run`** is a single driver that covers both
+control-variable layouts via a `MODE` switch:
+
+| `MODE` | Control variable | σ writer / L-BFGS step | Control files | Work tree |
+|--------|------------------|------------------------|---------------|-----------|
+| `annual` (default) | one σ field over the window | `write_sigma.py` / `lbfgsb_step.py` | `control_files/{forward,adjoint}_osse` | `../4dvar_design_osse` |
+| `monthly` | one σ field **per month** | `write_sigma_monthly.py` / `lbfgsb_step_monthly.py` | `control_files/{forward,adjoint}_osse_monthly` | `../4dvar_design_osse_monthly` |
+
+```bash
+cd gchp_4Dvar
+qsub 4dvar_optimizer.osse.unified.run                      # annual (one-month), fresh
+qsub -v MODE=monthly 4dvar_optimizer.osse.unified.run      # monthly (full-year), fresh
+qsub -v RESTART=true[,MODE=monthly] 4dvar_optimizer.osse.unified.run   # resume
+qsub -v MODE=annual,MAX_ITER=10,SIGMA_B=0.3 4dvar_optimizer.osse.unified.run
+# short annual run wants less walltime (pass the matching WALLTIME_S):
+qsub -l walltime=8:00:00 -v WALLTIME_S=28800 4dvar_optimizer.osse.unified.run
+```
+
+Key points of the unified driver:
+
+- **`NMON`** (number of monthly fields, and the per-phase walltime estimate) is
+  **derived from the window** `T_START..T_END`. An annual one-month run is
+  `NMON=1`; the full-year monthly run is `NMON=12`.
+- **Phase checkpointing + job chaining is always active** but is a no-op for
+  short windows: each iteration runs as phases (`start → forward_done →
+  forcing_done → adjoint_done`); before each GCHP phase the remaining walltime
+  budget is checked, and a phase that will not fit triggers a self-resubmit with
+  `RESTART=true`. A ~3 h annual iteration never resubmits; a ~36 h monthly
+  iteration chains ~2 jobs. Disable with `CHAIN=false`.
+- **Logs** are written under `<work tree>/logs/` (e.g.
+  `4dvar_design_osse/logs/4dvar_optimizer_osse.log`).
+- The observation window's `--t-end` is passed as `T00:00:00` in **both** modes
+  (month-boundary-exclusive; the window's final month boundary is not double
+  counted).
+
+The two original drivers `4dvar_optimizer.osse.run` (one-month, single σ) and
+`4dvar_optimizer.osse.monthly.run` (full-year, 12 monthly σ) have been **removed**
+— the unified runner reproduces both. They remain available in the git history if
+ever needed. The two sections below describe the behavior of each `MODE`.
 
 For the base (non-OSSE) system see `README.md`; for verifying the adjoint
 gradient that drives these optimizers see `adjoint_validation/README.md`.
@@ -36,11 +74,11 @@ ocean.
 
 ---
 
-## `4dvar_optimizer.osse.run` — one-month, single σ
+## `annual` mode — one-month, single σ
 
-A single PBS allocation runs the whole outer loop. Each iteration reuses the
-24-core allocation via `mpiexec` — **no child `qsub` calls, no queue waits**
-between iterations.
+`MODE=annual` (the default) optimizes a single σ field. Each iteration reuses the
+24-core allocation via `mpiexec`; for a one-month window the whole run fits in one
+job (the phase/chaining machinery stays dormant).
 
 **Iteration (repeated up to `MAX_ITER`):**
 
@@ -56,7 +94,7 @@ between iterations.
 
 ```
 gchp_4Dvar/                         ← submit qsub from here
-├── 4dvar_optimizer.osse.run
+├── 4dvar_optimizer.osse.unified.run
 ├── write_sigma.py
 ├── co2_adjoint_forcing_osse.py
 ├── lbfgsb_step.py
@@ -92,16 +130,16 @@ adjoint); 20 iterations ≈ 60 h — set the `#PBS -l walltime` accordingly.
 
 ```bash
 cd gchp_4Dvar
-qsub 4dvar_optimizer.osse.run                       # fresh start
-qsub -v RESTART=true 4dvar_optimizer.osse.run       # resume
-qsub -v MAX_ITER=10,SIGMA_B=0.3 4dvar_optimizer.osse.run
+qsub 4dvar_optimizer.osse.unified.run                       # annual (default), fresh
+qsub -v RESTART=true 4dvar_optimizer.osse.unified.run       # resume
+qsub -v MAX_ITER=10,SIGMA_B=0.3 4dvar_optimizer.osse.unified.run
 ```
 
 ---
 
-## `4dvar_optimizer.osse.monthly.run` — full-year, 12 monthly σ
+## `monthly` mode — full-year, 12 monthly σ
 
-Same loop, but the control variable is **12 monthly σ fields** over a full-year
+`MODE=monthly`: the control variable is **12 monthly σ fields** over a full-year
 window (`2016-01-01 → 2017-01-01`). Each monthly field scales that month's TER
 flux; the monthly gradient `g_m` is obtained by **differencing** the backward
 `SurfaceFluxAdj_CO2` accumulator at the month boundaries
@@ -138,20 +176,20 @@ sigma dir, forcing dir, state file, progress file, log and output dirs.
 | `CHAIN` | true | Resubmit self when walltime is spent (`CHAIN=false` to disable) |
 | `MAX_CHAIN` | 60 | Safety cap on chained resubmissions |
 | `WALLTIME_S` | 86400 | Must match the `#PBS -l walltime` |
-| `SIGMA_B`, `GTOL`, `FTOL`, `RESTART` | as above | Same meaning as the one-month runner |
+| `SIGMA_B`, `GTOL`, `FTOL`, `RESTART` | as above | Same meaning as in `annual` mode |
 
-Supporting scripts specific to the monthly runner: `write_sigma_monthly.py`,
+Supporting scripts used in `monthly` mode: `write_sigma_monthly.py`,
 `lbfgsb_step_monthly.py`, `check_monthly_sigma.py` (plumbing check that ExtData
 applies the right monthly σ), and the OSSE-window `co2_adjoint_forcing_osse.py`
 (joins all 12 monthly `sat_track` files).
 
 ```bash
 cd gchp_4Dvar
-qsub 4dvar_optimizer.osse.monthly.run                          # fresh start
-qsub -v RESTART=true 4dvar_optimizer.osse.monthly.run          # resume
-qsub -v CHAIN=false 4dvar_optimizer.osse.monthly.run           # single job, no self-chaining
+qsub -v MODE=monthly 4dvar_optimizer.osse.unified.run                     # fresh start
+qsub -v RESTART=true,MODE=monthly 4dvar_optimizer.osse.unified.run        # resume
+qsub -v MODE=monthly,CHAIN=false 4dvar_optimizer.osse.unified.run         # single job, no self-chaining
 # short shakedown (3-month window, one iteration, no chaining):
-qsub -v T_END=2016-04-01,MAX_ITER=1,CHAIN=false 4dvar_optimizer.osse.monthly.run
+qsub -v MODE=monthly,T_END=2016-04-01,MAX_ITER=1,CHAIN=false 4dvar_optimizer.osse.unified.run
 ```
 
 ---

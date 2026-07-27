@@ -31,7 +31,8 @@
 # clears FD_DIR first.
 #
 # Uses the monthly work tree (4dvar_design_osse_monthly) — do NOT run
-# concurrently with test_monthly_sigma.run or 4dvar_optimizer.osse.monthly.run.
+# concurrently with test_monthly_sigma.run or
+# 4dvar_optimizer.osse.unified.run (MODE=monthly).
 #
 #   qsub fd_validate_gradient.run                       # fresh, base sigma=1
 #   qsub -v RESTART=true fd_validate_gradient.run       # resume after a kill

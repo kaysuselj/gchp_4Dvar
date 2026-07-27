@@ -3,6 +3,12 @@
 ## Overview
 Created OSSE (Observing System Simulation Experiment) versions of the 4D-Var optimization system using synthetic OCO-2 observations from ORCHIDEE-ECCO2.
 
+> **Note:** the standalone `4dvar_optimizer.osse.run` and
+> `4dvar_optimizer.osse.monthly.run` described below have been merged into a
+> single driver, **`4dvar_optimizer.osse.unified.run`** (`MODE=annual|monthly`).
+> See [`../README_4dvar_osse.md`](../README_4dvar_osse.md). This summary is kept
+> as a historical record of how the OSSE setup was first built.
+
 ## Files Created
 
 ### 1. `4dvar_optimizer.osse.run`
@@ -65,17 +71,17 @@ All OSSE files use distinct names/paths to prevent conflicts:
 ### Submit OSSE 4D-Var Job
 ```bash
 cd gchp_4Dvar
-qsub 4dvar_optimizer.osse.run
+qsub 4dvar_optimizer.osse.unified.run
 ```
 
 ### Submit with custom parameters
 ```bash
-qsub -v MAX_ITER=10,SIGMA_B=0.3 4dvar_optimizer.osse.run
+qsub -v MAX_ITER=10,SIGMA_B=0.3 4dvar_optimizer.osse.unified.run
 ```
 
 ### Resume from previous run
 ```bash
-qsub -v RESTART=true 4dvar_optimizer.osse.run
+qsub -v RESTART=true 4dvar_optimizer.osse.unified.run
 ```
 
 ## Prerequisites

@@ -1,6 +1,6 @@
 #!/bin/bash
 #PBS -S /bin/bash
-#PBS -N gchp_4dvar_osse_mon
+#PBS -N gchp_4dvar_osse
 #PBS -l select=1:ncpus=24:mpiprocs=24:model=bro_ele
 #PBS -l walltime=24:00:00
 #PBS -q long
@@ -9,37 +9,42 @@
 #PBS -m bea
 #PBS -M kay.suselj@jpl.nasa.gov
 
-# 4D-Var outer loop, MONTHLY-SIGMA OSSE VERSION (12 monthly TER scaling
-# fields, full-year window 2016-01-01 -> 2017-01-01).
+# ============================================================================
+# 4D-Var outer loop for GCHP CO2 surface flux optimization — OSSE, UNIFIED.
 #
-# One iteration is ~36 h (12-month forward + 12-month adjoint at ~1.5 h per
-# simulated month each) and does NOT fit in a single 24 h job.  This script
-# therefore CHECKPOINTS PHASES and CHAINS JOBS:
+# Single driver for BOTH control-variable layouts (selected with MODE):
 #
-#   phase sequence per iteration:
-#       start          -> write sigma, run forward GCHP, move checkpoints
-#       forward_done   -> compute J_obs + adjoint forcing (all 12 sat_track
-#                         files joined by co2_adjoint_forcing_osse.py)
-#       forcing_done   -> run adjoint GCHP, then free the ~840 GB of
-#                         gcadj checkpoints
-#       adjoint_done   -> L-BFGS-B step (lbfgsb_step_monthly.py), snapshot,
-#                         plots, advance to next iteration
+#   MODE=annual  (default) — ONE sigma field over the window
+#                            (write_sigma.py + lbfgsb_step.py,
+#                             control_files/{forward,adjoint}_osse,
+#                             work tree ../4dvar_design_osse)
+#   MODE=monthly           — ONE sigma field PER MONTH of the window
+#                            (write_sigma_monthly.py + lbfgsb_step_monthly.py,
+#                             control_files/{forward,adjoint}_osse_monthly,
+#                             work tree ../4dvar_design_osse_monthly)
 #
-# The last COMPLETED phase is recorded in PROGRESS_FILE.  Before each GCHP
-# phase the script checks the remaining walltime budget; if it does not fit,
-# the job resubmits itself with RESTART=true and exits, and the next job
-# resumes at the recorded phase.  A job killed mid-phase redoes only that
-# phase.  Expect roughly two chained jobs per iteration at 24 h walltime.
+# Everything else (env, control sync, runConfig timing, forward GCHP, J/forcing,
+# checkpoint move, adjoint GCHP, plots, restart) is shared.
 #
-# Fully isolated from the one-month optimizer (4dvar_optimizer.osse.run):
-# separate work tree (4dvar_design_osse_monthly), control files
-# (*_osse_monthly), sigma dir, forcing dir, state file, log and output dirs.
+# EXECUTION MODEL — phase checkpointing + job chaining (from the monthly runner)
+# is ALWAYS active but is a no-op for short windows: each iteration is split into
+# phases (start / forward_done / forcing_done / adjoint_done); the last completed
+# phase is written to PROGRESS_FILE; before each GCHP phase the remaining walltime
+# budget is checked and, if a phase will not fit, the job resubmits itself with
+# RESTART=true and resumes at that phase.  A 1-month annual iteration (~3 h) simply
+# never triggers a resubmit; a 12-month monthly iteration (~36 h) chains ~2 jobs.
 #
-# Submit from gchp_4Dvar/:  cd gchp_4Dvar && qsub 4dvar_optimizer.osse.monthly.run
-#   fresh start:            qsub 4dvar_optimizer.osse.monthly.run
-#   resume:                 qsub -v RESTART=true 4dvar_optimizer.osse.monthly.run
-#   no self-chaining:       qsub -v CHAIN=false 4dvar_optimizer.osse.monthly.run
+# Submit from gchp_4Dvar/:
+#   qsub 4dvar_optimizer.osse.unified.run                       # annual, fresh
+#   qsub -v MODE=monthly 4dvar_optimizer.osse.unified.run       # monthly, fresh
+#   qsub -v RESTART=true[,MODE=monthly] 4dvar_optimizer.osse.unified.run   # resume
+#   qsub -v MODE=annual,MAX_ITER=10,SIGMA_B=0.3 4dvar_optimizer.osse.unified.run
+#   # short annual run needs less walltime:
+#   qsub -l walltime=8:00:00 -v WALLTIME_S=28800 4dvar_optimizer.osse.unified.run
 # If you change the #PBS walltime, pass the matching WALLTIME_S (seconds).
+#
+# Logs: the optimizer log is written under  <work tree>/logs/ .
+# ============================================================================
 
 set -euo pipefail
 cd "$PBS_O_WORKDIR"
@@ -51,78 +56,108 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
 # ============================================================
+#  Mode
+# ============================================================
+MODE=${MODE:-annual}
+case "${MODE}" in
+    annual|monthly) ;;
+    *) die "MODE must be 'annual' or 'monthly' (got '${MODE}')" ;;
+esac
+
+# ============================================================
 #  Configuration
 # ============================================================
 BASE_DIR="$(pwd)"                        # gchp_4Dvar/
-WORK_DIR="$(cd "${BASE_DIR}/../4dvar_design_osse_monthly" && pwd)"
+SCRIPT_DIR="${BASE_DIR}"                 # Python scripts live here
+SELF="${BASE_DIR}/4dvar_optimizer.osse.unified.run"
+
+if [ "${MODE}" = "monthly" ]; then
+    WORK_DIR="$(cd "${BASE_DIR}/../4dvar_design_osse_monthly" && pwd)"
+    CTRL_FWD_DIR="${BASE_DIR}/control_files/forward_osse_monthly"
+    CTRL_ADJ_DIR="${BASE_DIR}/control_files/adjoint_osse_monthly"
+    STATE_FILE="${WORK_DIR}/4dvar_state_osse_monthly.npz"
+    LOG_NAME="4dvar_optimizer_osse_monthly"
+    SIGMA_DIR="${WORK_DIR}/sigma_monthly"     # one file per month
+    SIGMA_FILE=""
+    T_END_DEFAULT="2017-01-01"
+else
+    WORK_DIR="$(cd "${BASE_DIR}/../4dvar_design_osse" && pwd)"
+    CTRL_FWD_DIR="${BASE_DIR}/control_files/forward_osse"
+    CTRL_ADJ_DIR="${BASE_DIR}/control_files/adjoint_osse"
+    STATE_FILE="${WORK_DIR}/4dvar_state_osse.npz"
+    LOG_NAME="4dvar_optimizer_osse"
+    SIGMA_FILE="${WORK_DIR}/sigma_co2_osse.nc4"   # single sigma field
+    SIGMA_DIR=""
+    T_END_DEFAULT="2016-02-01"
+fi
+
 FWD_DIR="${WORK_DIR}/forward_run"
 ADJ_DIR="${WORK_DIR}/adjoint"
-CTRL_FWD_DIR="${BASE_DIR}/control_files/forward_osse_monthly"
-CTRL_ADJ_DIR="${BASE_DIR}/control_files/adjoint_osse_monthly"
-SCRIPT_DIR="${BASE_DIR}"
-
-SIGMA_DIR="${WORK_DIR}/sigma_monthly"
 FORCING_DIR="${WORK_DIR}/forcing_files_osse"   # must match OCO2_FORCING_DIR in adjoint GCHP.rc
-STATE_FILE="${WORK_DIR}/4dvar_state_osse_monthly.npz"
 OUTPUT_DIR="${WORK_DIR}/4dvar_output_osse"
-LOG_FILE="${WORK_DIR}/4dvar_optimizer_osse_monthly.log"
-PROGRESS_FILE="${WORK_DIR}/4dvar_progress_osse_monthly.txt"
-CONVERGED_FILE="${WORK_DIR}/CONVERGED_osse_monthly"
+LOG_DIR="${WORK_DIR}/logs"                     # all optimizer logs go here
+LOG_FILE="${LOG_DIR}/${LOG_NAME}.log"
+PROGRESS_FILE="${WORK_DIR}/4dvar_progress_${MODE}.txt"
+CONVERGED_FILE="${WORK_DIR}/CONVERGED_${MODE}"
 
 RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
 PLOT_DIR="${WORK_DIR}/plots_osse/${RUN_STAMP}"
-mkdir -p "${PLOT_DIR}"
+mkdir -p "${LOG_DIR}" "${PLOT_DIR}"
 
+# Tee all stdout+stderr to LOG_FILE (append so chained/restarted jobs keep history)
 exec > >(tee -a "${LOG_FILE}") 2>&1
 
-# Simulation window: both ends must be month boundaries (day 1, 00:00).
-# Defaults are the full-year (12-month) production run; override for a shorter
-# shakedown, e.g.  qsub -v T_END=2016-04-01,MAX_ITER=1,CHAIN=false ...
+# ============================================================
+#  Simulation window  (both ends must be month boundaries: day 1, 00:00)
+# ============================================================
 T_START=${T_START:-2016-01-01}
-T_END=${T_END:-2017-01-01}
+T_END=${T_END:-${T_END_DEFAULT}}
 TS_CHEM=1800
 TS_DYN=1800
 
-# Number of monthly control-vector fields = months spanned by the window.
-# (start_year*12+start_month) .. (end_year*12+end_month); 10# forces base-10
-# so leading-zero months are not read as octal.
+# Months spanned by the window; drives the monthly control vector and the
+# walltime-budget estimates. 10# forces base-10 (leading-zero months not octal).
 _SY=$(date -d "${T_START}" +%Y); _SM=$(date -d "${T_START}" +%m)
 _EY=$(date -d "${T_END}"   +%Y); _EM=$(date -d "${T_END}"   +%m)
 NMON=$(( (10#${_EY} * 12 + 10#${_EM}) - (10#${_SY} * 12 + 10#${_SM}) ))
 START_MONTH=$(( 10#${_SM} ))
 [ "${NMON}" -ge 1 ] || die "T_START..T_END spans ${NMON} months (need >= 1)"
 
-# Optimization
+# ============================================================
+#  Optimization
+# ============================================================
 NLAT=${NLAT:-46}
 NLON=${NLON:-72}
-# Default lowered 0.5 -> 0.2 on 2026-07-13: with 0.5 the background term was
-# ~0.5% of J and its gradient 30-200x weaker than g_obs at the hotspots
-# (background effectively inactive). 1/sigma_b^2 scaling -> 0.2 boosts the
-# background gradient 6.25x. Calibrate against OSSE truth before trusting.
+# Default lowered 0.5 -> 0.2 on 2026-07-13 (background term was ~0.5% of J, its
+# gradient 30-200x weaker than g_obs at hotspots; 1/sigma_b^2 -> 6.25x stronger).
 # Do not change across a RESTART (J would jump discontinuously mid-optimization).
 SIGMA_B=${SIGMA_B:-0.2}
 MAX_ITER=${MAX_ITER:-20}                 # GLOBAL iteration cap across all chained jobs
 GTOL=${GTOL:-1e-5}
 FTOL=${FTOL:-1e-8}
 SAVE_DIAG=${SAVE_DIAG:-true}
-
 RESTART=${RESTART:-false}
 
-# Job chaining / walltime budget
+# ============================================================
+#  Job chaining / walltime budget
+# ============================================================
 CHAIN=${CHAIN:-true}                     # resubmit self when walltime is spent
 CHAIN_N=${CHAIN_N:-0}                    # chained-job counter (safety)
 MAX_CHAIN=${MAX_CHAIN:-60}
 WALLTIME_S=${WALLTIME_S:-86400}          # must match the #PBS walltime
 WALLTIME_MARGIN_S=${WALLTIME_MARGIN_S:-1800}
-EST_FORWARD_S=${EST_FORWARD_S:-72000}    # ~20 h: 12-month forward + checkpoint move
-EST_ADJOINT_S=${EST_ADJOINT_S:-72000}    # ~20 h: 12-month adjoint
+# Per-simulated-month cost estimates; the whole forward/adjoint estimate scales
+# with the window so both annual (1 month) and monthly (12 months) are correct.
+EST_MONTH_FWD_S=${EST_MONTH_FWD_S:-6000} # ~1.7 h forward per simulated month
+EST_MONTH_ADJ_S=${EST_MONTH_ADJ_S:-6000} # ~1.7 h adjoint per simulated month
+EST_FORWARD_S=${EST_FORWARD_S:-$(( NMON * EST_MONTH_FWD_S ))}
+EST_ADJOINT_S=${EST_ADJOINT_S:-$(( NMON * EST_MONTH_ADJ_S ))}
 
-VPASS="MAX_ITER=${MAX_ITER},SIGMA_B=${SIGMA_B},GTOL=${GTOL},FTOL=${FTOL}"
+VPASS="MODE=${MODE},MAX_ITER=${MAX_ITER},SIGMA_B=${SIGMA_B},GTOL=${GTOL},FTOL=${FTOL}"
 VPASS="${VPASS},T_START=${T_START},T_END=${T_END}"
 VPASS="${VPASS},SAVE_DIAG=${SAVE_DIAG},NLAT=${NLAT},NLON=${NLON},CHAIN=${CHAIN}"
-VPASS="${VPASS},MAX_CHAIN=${MAX_CHAIN},WALLTIME_S=${WALLTIME_S}"
-VPASS="${VPASS},WALLTIME_MARGIN_S=${WALLTIME_MARGIN_S}"
-VPASS="${VPASS},EST_FORWARD_S=${EST_FORWARD_S},EST_ADJOINT_S=${EST_ADJOINT_S}"
+VPASS="${VPASS},MAX_CHAIN=${MAX_CHAIN},WALLTIME_S=${WALLTIME_S},WALLTIME_MARGIN_S=${WALLTIME_MARGIN_S}"
+VPASS="${VPASS},EST_MONTH_FWD_S=${EST_MONTH_FWD_S},EST_MONTH_ADJ_S=${EST_MONTH_ADJ_S}"
 
 save_progress() {
     echo "iter=${CUR_ITER} phase=${CUR_PHASE}" > "${PROGRESS_FILE}"
@@ -131,15 +166,14 @@ save_progress() {
 resubmit() {
     log "Walltime budget spent (elapsed ${SECONDS}s of ${WALLTIME_S}s) at iter ${CUR_ITER} phase ${CUR_PHASE}"
     if [ "${CHAIN}" != "true" ]; then
-        log "CHAIN=false — not resubmitting. Resume manually with: qsub -v RESTART=true,${VPASS} 4dvar_optimizer.osse.monthly.run"
+        log "CHAIN=false — not resubmitting. Resume: qsub -v RESTART=true,${VPASS} ${SELF}"
         exit 0
     fi
     if [ "${CHAIN_N}" -ge "${MAX_CHAIN}" ]; then
         die "MAX_CHAIN=${MAX_CHAIN} chained jobs reached — refusing to resubmit (raise MAX_CHAIN if intended)"
     fi
     log "Resubmitting self (chain job $((CHAIN_N + 1)))"
-    qsub -v "RESTART=true,CHAIN_N=$((CHAIN_N + 1)),${VPASS}" \
-        "${BASE_DIR}/4dvar_optimizer.osse.monthly.run" \
+    qsub -v "RESTART=true,CHAIN_N=$((CHAIN_N + 1)),${VPASS}" "${SELF}" \
         || die "qsub resubmission failed — resume manually with RESTART=true"
     exit 0
 }
@@ -166,10 +200,11 @@ PYTHON_ENV="${PYTHON_ENV:-/nobackup/ksuselj1/envs/gchp_4dvar}"
 source "${PYTHON_ENV}/bin/activate"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
 python3 -c "import numpy, pandas, xarray, netCDF4" 2>/dev/null \
-    || die "Python env is missing required packages"
+    || die "Python env is missing required packages (numpy pandas xarray netCDF4)"
 echo "Python env: $(python3 --version)  from ${PYTHON_ENV}"
 
 mkdir -p "${FORCING_DIR}" "${OUTPUT_DIR}" "${ADJ_DIR}/Restarts" "${FWD_DIR}/Restarts"
+[ "${MODE}" = "monthly" ] && mkdir -p "${SIGMA_DIR}"
 
 # ============================================================
 #  Copy control files to run directories
@@ -221,7 +256,7 @@ if [ "${RESTART}" = "true" ]; then
     elif [ -f "${STATE_FILE}" ]; then
         CUR_ITER=$(python3 -c \
             "import numpy as np; s=np.load('${STATE_FILE}'); print(int(s['iteration']))")
-        log "RESTART=true, no progress file; state file says iteration ${CUR_ITER} — starting it from phase 'start'"
+        log "RESTART=true, no progress file; state says iteration ${CUR_ITER} — starting it from phase 'start'"
     else
         log "WARNING: RESTART=true but no progress or state file — starting fresh"
     fi
@@ -238,14 +273,14 @@ else
         \( -name 'CO2_adjoint_forcing_*.nc4' -o -name 'forcing_all_obs.nc4' \
            -o -name 'daily_forcing_stats.nc4' -o -name 'J_value.txt' \) \
         -delete 2>/dev/null || true
-    # Test-mode sigma files (e.g. Jan=1/Feb=0/rest=9 from test_monthly_sigma)
-    # may sit in SIGMA_DIR; iteration 1 rewrites all 12 before the forward run.
+    # Annual: drop the single sigma file so iteration 1 regenerates sigma=1.
+    # Monthly: write_sigma_monthly rewrites all NMON fields before the forward.
+    [ "${MODE}" = "annual" ] && rm -f "${SIGMA_FILE}"
 fi
 save_progress
 
 # ============================================================
-#  Plot helper (plot_4dvar.py may not yet handle 3-D sigma;
-#  a plot failure must never abort the optimization)
+#  Plot helper (a plot failure must never abort the optimization)
 # ============================================================
 make_plots() {
     log "Generating plots → ${PLOT_DIR}"
@@ -263,9 +298,10 @@ make_plots() {
 #  Outer loop  (phase machine; each phase marks itself done)
 # ============================================================
 log "========================================================"
-log " 4D-Var MONTHLY OSSE — chain job ${CHAIN_N}"
+log " 4D-Var OSSE (MODE=${MODE}) — chain job ${CHAIN_N}"
 log " window ${T_START} -> ${T_END}  (${NMON} months)  nlat=${NLAT} nlon=${NLON} sigma_b=${SIGMA_B}"
 log " starting at iteration ${CUR_ITER}, after phase '${CUR_PHASE}'  (max_iter=${MAX_ITER})"
+log " log → ${LOG_FILE}"
 log "========================================================"
 
 while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
@@ -276,14 +312,24 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
     if [ "${CUR_PHASE}" = "start" ]; then
         budget_ok "${EST_FORWARD_S}" || resubmit
 
-        log "[iter ${CUR_ITER}] Writing ${NMON} monthly sigma files"
-        python3 "${SCRIPT_DIR}/write_sigma_monthly.py" \
-            --sigma-dir  "${SIGMA_DIR}" \
-            --state-file "${STATE_FILE}" \
-            --nlat "${NLAT}" --nlon "${NLON}" \
-            --year "${T_START:0:4}" \
-            --n-months "${NMON}" --start-month "${START_MONTH}" \
-            || die "write_sigma_monthly.py failed"
+        if [ "${MODE}" = "monthly" ]; then
+            log "[iter ${CUR_ITER}] Writing ${NMON} monthly sigma files"
+            python3 "${SCRIPT_DIR}/write_sigma_monthly.py" \
+                --sigma-dir  "${SIGMA_DIR}" \
+                --state-file "${STATE_FILE}" \
+                --nlat "${NLAT}" --nlon "${NLON}" \
+                --year "${T_START:0:4}" \
+                --n-months "${NMON}" --start-month "${START_MONTH}" \
+                || die "write_sigma_monthly.py failed"
+        else
+            log "[iter ${CUR_ITER}] Writing sigma_co2_osse.nc4"
+            python3 "${SCRIPT_DIR}/write_sigma.py" \
+                --sigma-file "${SIGMA_FILE}" \
+                --state-file "${STATE_FILE}" \
+                --nlat "${NLAT}" --nlon "${NLON}" \
+                --t-start "${T_START}" \
+                || die "write_sigma.py failed"
+        fi
 
         log "[iter ${CUR_ITER}] Forward GCHP — started (${DURATION_DAYS} days)"
         cd "${FWD_DIR}"
@@ -297,14 +343,13 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
             || die "Forward GCHP failed (iter ${CUR_ITER}). See ${FWD_DIR}/gchp.log"
         log "[iter ${CUR_ITER}] Forward GCHP — done"
 
-        # Move checkpoints forward -> adjoint (~840 GB; mv = rename, no copy).
-        # find -exec avoids ARG_MAX on ~35k checkpoint files.
+        # Move gcadj checkpoints forward -> adjoint (mv = rename, no copy).
+        # find -exec avoids ARG_MAX on tens of thousands of checkpoint files.
         log "[iter ${CUR_ITER}] Moving checkpoints forward → adjoint"
         _nckpt=$(find . -maxdepth 1 \( -name 'gcadj_internal_checkpoint*' \
                  -o -name 'gcadj_import_checkpoint*' \) | wc -l)
         find . -maxdepth 1 \( -name 'gcadj_internal_checkpoint*' \
-             -o -name 'gcadj_import_checkpoint*' \) \
-             -exec mv -t "${ADJ_DIR}/" {} +
+             -o -name 'gcadj_import_checkpoint*' \) -exec mv -t "${ADJ_DIR}/" {} +
         log "  Moved ${_nckpt} adjoint checkpoint file(s) → ${ADJ_DIR}/"
 
         _ckpt=$(ls Restarts/gcchem_internal_checkpoint* 2>/dev/null | head -1)
@@ -318,10 +363,10 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
     fi
 
     # ----------------------------------------------------------
-    # Phase 2: J_obs + adjoint forcing from ALL monthly sat_track files
+    # Phase 2: J_obs + adjoint forcing (all sat_track files in the window)
     # ----------------------------------------------------------
     if [ "${CUR_PHASE}" = "forward_done" ]; then
-        log "[iter ${CUR_ITER}] Computing J_obs and adjoint forcing (${NMON} monthly sat_track files)"
+        log "[iter ${CUR_ITER}] Computing J_obs and adjoint forcing"
 
         find "${FORCING_DIR}" -maxdepth 1 -type f \
             \( -name 'CO2_adjoint_forcing_*.nc4' -o -name 'forcing_all_obs.nc4' \
@@ -329,9 +374,9 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
             -delete 2>/dev/null || true
 
         # OutputDir was wiped before the forward run, so every sat_track file
-        # there belongs to THIS iteration.  Pass them all;
-        # co2_adjoint_forcing_osse.py verifies exactly one file per month of
-        # the window and dies loudly on stale/missing/duplicate months.
+        # there belongs to THIS iteration. Pass them all; co2_adjoint_forcing_osse.py
+        # verifies exactly one file per month of the window and dies loudly on
+        # stale/missing/duplicate months (one file for a 1-month annual window).
         mapfile -t SAT_FILES < \
             <(ls "${FWD_DIR}/OutputDir"/GEOSChem.sat_track.*.nc4 2>/dev/null || true)
         [ "${#SAT_FILES[@]}" -eq 0 ] && \
@@ -377,9 +422,8 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
             || die "Adjoint GCHP failed (iter ${CUR_ITER}). See ${ADJ_DIR}/gchp.log"
         log "[iter ${CUR_ITER}] Adjoint GCHP — done"
 
-        # Free the ~840 GB of consumed checkpoints before the next forward run
-        # (the L-BFGS step below does not need them; a redo of THIS phase does,
-        # which is why deletion happens only after adjoint success).
+        # Free the consumed gcadj checkpoints (only after adjoint success, since a
+        # redo of THIS phase needs them). find -delete avoids the ARG_MAX limit.
         _nrm=$(find . -maxdepth 1 \( -name 'gcadj_internal_checkpoint*' \
                -o -name 'gcadj_import_checkpoint*' \) | wc -l)
         find . -maxdepth 1 \( -name 'gcadj_internal_checkpoint*' \
@@ -392,47 +436,62 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
     fi
 
     # ----------------------------------------------------------
-    # Phase 4: L-BFGS-B step (monthly gradient differencing)
+    # Phase 4: L-BFGS-B step
     # ----------------------------------------------------------
     if [ "${CUR_PHASE}" = "adjoint_done" ]; then
-        log "[iter ${CUR_ITER}] L-BFGS-B monthly optimizer step"
+        log "[iter ${CUR_ITER}] L-BFGS-B optimizer step (MODE=${MODE})"
         cd "${BASE_DIR}"
 
         rc=0
-        python3 "${SCRIPT_DIR}/lbfgsb_step_monthly.py" \
-            --state-file  "${STATE_FILE}" \
-            --forcing-dir "${FORCING_DIR}" \
-            --adj-output  "${ADJ_DIR}/OutputDir" \
-            --nlat "${NLAT}" --nlon "${NLON}" \
-            --n-months "${NMON}" \
-            --sigma-b "${SIGMA_B}" \
-            --t-start "${T_START}" --t-end "${T_END}" \
-            --gtol "${GTOL}" --ftol "${FTOL}" \
-            || rc=$?
+        if [ "${MODE}" = "monthly" ]; then
+            python3 "${SCRIPT_DIR}/lbfgsb_step_monthly.py" \
+                --state-file  "${STATE_FILE}" \
+                --forcing-dir "${FORCING_DIR}" \
+                --adj-output  "${ADJ_DIR}/OutputDir" \
+                --nlat "${NLAT}" --nlon "${NLON}" \
+                --n-months "${NMON}" \
+                --sigma-b "${SIGMA_B}" \
+                --t-start "${T_START}" --t-end "${T_END}" \
+                --gtol "${GTOL}" --ftol "${FTOL}" \
+                || rc=$?
+        else
+            python3 "${SCRIPT_DIR}/lbfgsb_step.py" \
+                --state-file  "${STATE_FILE}" \
+                --forcing-dir "${FORCING_DIR}" \
+                --adj-output  "${ADJ_DIR}/OutputDir" \
+                --nlat "${NLAT}" --nlon "${NLON}" \
+                --sigma-b "${SIGMA_B}" \
+                --t-start "${T_START}" \
+                --gtol "${GTOL}" --ftol "${FTOL}" \
+                || rc=$?
+        fi
 
         [ -f "${STATE_FILE}" ] && cp "${STATE_FILE}" \
             "${OUTPUT_DIR}/4dvar_state_iter$(printf '%03d' "${CUR_ITER}").npz"
 
-        # Archive adjoint gradient output for this iteration
-        _adj_iter_dir="${OUTPUT_DIR}/adjoint_iter$(printf '%03d' "${CUR_ITER}")"
-        mkdir -p "${_adj_iter_dir}"
-        _nadj=$(find "${ADJ_DIR}/OutputDir" -maxdepth 1 \
-                     -name 'GEOSChem.Adjoint.*.nc4' | wc -l)
-        if [ "${_nadj}" -gt 0 ]; then
-            cp "${ADJ_DIR}/OutputDir"/GEOSChem.Adjoint.*.nc4 "${_adj_iter_dir}/"
-            log "  Adjoint output archived (${_nadj} files) → ${_adj_iter_dir}/"
-        else
-            log "  WARNING: no GEOSChem.Adjoint.*.nc4 in ${ADJ_DIR}/OutputDir"
+        # Archive the per-iteration adjoint gradient output (monthly only — the
+        # monthly gradient is reconstructed by differencing these files).
+        if [ "${MODE}" = "monthly" ]; then
+            _adj_iter_dir="${OUTPUT_DIR}/adjoint_iter$(printf '%03d' "${CUR_ITER}")"
+            mkdir -p "${_adj_iter_dir}"
+            _nadj=$(find "${ADJ_DIR}/OutputDir" -maxdepth 1 \
+                         -name 'GEOSChem.Adjoint.*.nc4' | wc -l)
+            if [ "${_nadj}" -gt 0 ]; then
+                cp "${ADJ_DIR}/OutputDir"/GEOSChem.Adjoint.*.nc4 "${_adj_iter_dir}/"
+                log "  Adjoint output archived (${_nadj} files) → ${_adj_iter_dir}/"
+            else
+                log "  WARNING: no GEOSChem.Adjoint.*.nc4 in ${ADJ_DIR}/OutputDir"
+            fi
         fi
 
-        # Save restart command (resumes from iteration CUR_ITER+1 with same options)
+        # Save a ready-to-run restart command (resume from iteration CUR_ITER+1).
         _restart_cmd="${OUTPUT_DIR}/restart_after_iter$(printf '%03d' "${CUR_ITER}").sh"
         {
             echo "#!/bin/bash"
-            echo "# Resume 4D-Var MONTHLY OSSE from iteration $((CUR_ITER + 1)) (iter ${CUR_ITER} completed)"
+            echo "# Resume 4D-Var OSSE (MODE=${MODE}) from iteration $((CUR_ITER + 1)) (iter ${CUR_ITER} done)"
             echo "# Generated: $(date '+%Y-%m-%d %H:%M:%S')"
             echo "cd \"${BASE_DIR}\""
-            echo "qsub -v \"RESTART=true,${VPASS}\" 4dvar_optimizer.osse.monthly.run"
+            echo "qsub -v \"RESTART=true,${VPASS}\" ${SELF}"
         } > "${_restart_cmd}"
         chmod +x "${_restart_cmd}"
         cp "${_restart_cmd}" "${OUTPUT_DIR}/restart_latest.sh"
@@ -447,7 +506,7 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
             touch "${CONVERGED_FILE}"
             exit 0
         elif [ "${rc}" -ne 0 ]; then
-            die "lbfgsb_step_monthly.py returned error code ${rc}"
+            die "L-BFGS-B step returned error code ${rc}"
         fi
         log "[iter ${CUR_ITER}] Iteration complete — state saved"
 
@@ -459,7 +518,7 @@ done
 
 log ""
 log "========================================================"
-log " 4D-Var MONTHLY OSSE finished (MAX_ITER=${MAX_ITER} reached)"
+log " 4D-Var OSSE (MODE=${MODE}) finished (MAX_ITER=${MAX_ITER} reached)"
 log " Final state:             ${STATE_FILE}"
 log " Per-iteration snapshots: ${OUTPUT_DIR}/"
 log " Log:                     ${LOG_FILE}"

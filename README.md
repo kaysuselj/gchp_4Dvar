@@ -184,10 +184,11 @@ three-experiment example.
 
 ## OSSE optimizers
 
-`4dvar_optimizer.osse.run` (one-month window, single σ field) and
-`4dvar_optimizer.osse.monthly.run` (full-year window, 12 monthly σ fields with
-phase checkpointing and job chaining) are the OSSE variants of this optimizer.
-They are documented in [`README_4dvar_osse.md`](README_4dvar_osse.md).
+`4dvar_optimizer.osse.unified.run` is the OSSE variant of this optimizer. A
+single `MODE` switch selects either a one-month, single-σ run (`MODE=annual`,
+the default) or a full-year, 12-monthly-σ run with phase checkpointing and job
+chaining (`MODE=monthly`). It is documented in
+[`README_4dvar_osse.md`](README_4dvar_osse.md).
 
 ## Other files in this repository
 
