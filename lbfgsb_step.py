@@ -96,6 +96,57 @@ def read_obs_gradient(adj_output_dir, t_start, nlat, nlon):
     return grad.ravel()
 
 
+NF = 6   # cubed-sphere faces
+
+
+def to_faces(arr, im):
+    """Normalize a CS record to (6, im, im) from either stacked or face layout."""
+    a = np.asarray(arr)
+    if a.shape == (NF, im, im):
+        return a
+    if a.shape == (NF * im, im):
+        return a.reshape(NF, im, im)
+    raise ValueError(f'cannot interpret shape {a.shape} as C{im} cubed sphere')
+
+
+def read_obs_gradient_cs(adj_output_dir, t_start, im):
+    """
+    Read SurfaceFluxAdj_CO2 at the adjoint final time (= forward t_start) on the
+    native cubed sphere (adjoint HISTORY has NO grid_label).  Returns the
+    flattened (6, im, im) gradient in C-order, matching write_sigma.py --grid cs
+    so the control vector and the gradient share one cell ordering.
+    """
+    pattern = os.path.join(adj_output_dir, 'GEOSChem.Adjoint.*.nc4')
+    files   = sorted(glob.glob(pattern))
+    if not files:
+        raise RuntimeError(f'No adjoint output files matching {pattern}')
+
+    ds = (xr.open_dataset(files[0]) if len(files) == 1
+          else xr.concat([xr.open_dataset(f) for f in files], dim='time'))
+    ds = ds.sortby('time')
+
+    all_times  = ds.time.values.astype('datetime64[ns]')
+    t_expected = np.datetime64(pd.Timestamp(t_start))
+    dt_all     = np.abs((all_times - t_expected) / np.timedelta64(1, 's'))
+    i_sel      = int(dt_all.argmin())
+    t_selected = all_times[i_sel]
+    print(f'  Adjoint output files : {[os.path.basename(f) for f in files]}')
+    print(f'  Available time range : {all_times[0]} .. {all_times[-1]}  (n={len(all_times)})')
+    print(f'  Requested t_start    : {t_expected}')
+    print(f'  Selected time        : {t_selected}  (index {i_sel}, {dt_all[i_sel]:.0f} s from t_start)')
+
+    if dt_all[i_sel] > 3600.0:
+        raise RuntimeError(
+            f'No adjoint record near t_start {t_expected}: nearest is {t_selected} '
+            f'({dt_all[i_sel]:.0f} s away). Stale or missing adjoint output in '
+            f'{adj_output_dir}?')
+
+    da   = ds['SurfaceFluxAdj_CO2'].isel(time=i_sel)
+    grad = to_faces(np.squeeze(da.values), im).astype(np.float64)
+    print(f'  SurfaceFluxAdj_CO2 dims   : {dict(da.sizes)}  -> faces {grad.shape}')
+    return grad.ravel()
+
+
 def read_J_obs(forcing_dir):
     j_path = os.path.join(forcing_dir, 'J_value.txt')
     return float(open(j_path).read().strip())
@@ -181,8 +232,12 @@ def main():
     parser.add_argument('--forcing-dir', required=True)
     parser.add_argument('--adj-output',  required=True,
                         help='Adjoint OutputDir containing GEOSChem.Adjoint.*.nc4')
+    parser.add_argument('--grid', choices=['latlon', 'cs'], default='latlon',
+                        help='Control-variable grid (default latlon)')
     parser.add_argument('--nlat',    type=int,   default=46)
     parser.add_argument('--nlon',    type=int,   default=72)
+    parser.add_argument('--cs-res',  type=int,   default=24,
+                        help='Cubed-sphere face size im (C{im}) for --grid cs')
     parser.add_argument('--sigma-b', type=float, default=0.2)
     parser.add_argument('--m',       type=int,   default=10,
                         help='L-BFGS-B memory (number of vector pairs)')
@@ -193,7 +248,10 @@ def main():
                         help='Convergence: relative |dJ/J| threshold')
     args = parser.parse_args()
 
-    n = args.nlat * args.nlon
+    if args.grid == 'cs':
+        n = NF * args.cs_res * args.cs_res
+    else:
+        n = args.nlat * args.nlon
     m = args.m
 
     # ------------------------------------------------------------------
@@ -224,8 +282,12 @@ def main():
     # ------------------------------------------------------------------
     try:
         J_obs = read_J_obs(args.forcing_dir)
-        g_obs = read_obs_gradient(args.adj_output, args.t_start,
-                                  args.nlat, args.nlon)
+        if args.grid == 'cs':
+            g_obs = read_obs_gradient_cs(args.adj_output, args.t_start,
+                                         args.cs_res)
+        else:
+            g_obs = read_obs_gradient(args.adj_output, args.t_start,
+                                      args.nlat, args.nlon)
     except Exception as exc:
         print(f'ERROR reading J / gradient: {exc}', file=sys.stderr)
         sys.exit(2)
@@ -306,8 +368,10 @@ def main():
         y_hist    = y_hist,
         m_used    = np.int64(m_used),
         iteration = np.int64(it + 1),
+        grid      = np.str_(args.grid),
         nlat      = np.int64(args.nlat),
         nlon      = np.int64(args.nlon),
+        cs_res    = np.int64(args.cs_res),
     )
     print(f'  State saved → {args.state_file}')
 

@@ -34,14 +34,28 @@
 # RESTART=true and resumes at that phase.  A 1-month annual iteration (~3 h) simply
 # never triggers a resubmit; a 12-month monthly iteration (~36 h) chains ~2 jobs.
 #
+# GRID — control-variable grid (annual mode):
+#   GRID=cs      (default) sigma on the native model cubed sphere (C{IM_WORLD},
+#                C24 now), read with no regrid; adjoint gradient on the same grid.
+#   GRID=latlon  sigma on a 72x46 lat-lon grid, regridded to CS by MAPL (legacy).
+#   (Monthly mode is lat-lon only for now; GRID=cs,MODE=monthly is rejected.)
+#
+# EXP_NAME — run isolation for PARALLEL runs. When set, the whole work tree is a
+#   private clone at ../<base>_<EXP_NAME>/ (run dirs cloned from the canonical
+#   ../<base>/, and OCO2_FORCING_DIR + sigma/forcing/state/logs all private), so
+#   several 4D-Vars can run at once without interfering. Empty = in-place (legacy).
+#
 # Submit from gchp_4Dvar/:
-#   qsub 4dvar_optimizer.osse.unified.run                       # annual, fresh
+#   qsub 4dvar_optimizer.osse.unified.run                       # annual (GRID=cs), fresh
+#   qsub -v GRID=latlon 4dvar_optimizer.osse.unified.run        # annual on lat-lon
 #   qsub -v MODE=monthly 4dvar_optimizer.osse.unified.run       # monthly, fresh
-#   qsub -v RESTART=true[,MODE=monthly] 4dvar_optimizer.osse.unified.run   # resume
+#   qsub -v EXP_NAME=expA 4dvar_optimizer.osse.unified.run      # isolated parallel run
+#   qsub -v RESTART=true[,MODE=monthly][,EXP_NAME=expA] 4dvar_optimizer.osse.unified.run
 #   qsub -v MODE=annual,MAX_ITER=10,SIGMA_B=0.3 4dvar_optimizer.osse.unified.run
 #   # short annual run needs less walltime:
 #   qsub -l walltime=8:00:00 -v WALLTIME_S=28800 4dvar_optimizer.osse.unified.run
 # If you change the #PBS walltime, pass the matching WALLTIME_S (seconds).
+# RESTART=true resumes an EXP_NAME run from its private work tree.
 #
 # Logs: the optimizer log is written under  <work tree>/logs/ .
 # ============================================================================
@@ -70,33 +84,55 @@ esac
 BASE_DIR="$(pwd)"                        # gchp_4Dvar/
 SCRIPT_DIR="${BASE_DIR}"                 # Python scripts live here
 SELF="${BASE_DIR}/4dvar_optimizer.osse.unified.run"
+PARENT_DIR="$(cd "${BASE_DIR}/.." && pwd)"
 
+# EXP_NAME isolates a run: with a name set, the whole work tree is a private
+# clone (../<base>_<EXP_NAME>) so multiple 4D-Vars can run in parallel without
+# clobbering each other's run dirs, sigma, forcing, state or logs. Empty (default)
+# runs in-place in the canonical work tree, exactly as before.
+EXP_NAME=${EXP_NAME:-}
+
+# Control-variable grid. Default: native cubed sphere for annual (removes the
+# lat-lon<->CS regrid mismatch in the gradient), lat-lon for monthly (CS not yet
+# wired for the monthly control vector).
 if [ "${MODE}" = "monthly" ]; then
-    WORK_DIR="$(cd "${BASE_DIR}/../4dvar_design_osse_monthly" && pwd)"
+    GRID=${GRID:-latlon}
+    BASE_WORK_NAME="4dvar_design_osse_monthly"
     CTRL_FWD_DIR="${BASE_DIR}/control_files/forward_osse_monthly"
     CTRL_ADJ_DIR="${BASE_DIR}/control_files/adjoint_osse_monthly"
-    STATE_FILE="${WORK_DIR}/4dvar_state_osse_monthly.npz"
+    STATE_BASENAME="4dvar_state_osse_monthly.npz"
     LOG_NAME="4dvar_optimizer_osse_monthly"
-    SIGMA_DIR="${WORK_DIR}/sigma_monthly"     # one file per month
-    SIGMA_FILE=""
     T_END_DEFAULT="2017-01-01"
 else
-    WORK_DIR="$(cd "${BASE_DIR}/../4dvar_design_osse" && pwd)"
+    GRID=${GRID:-cs}
+    BASE_WORK_NAME="4dvar_design_osse"
     CTRL_FWD_DIR="${BASE_DIR}/control_files/forward_osse"
     CTRL_ADJ_DIR="${BASE_DIR}/control_files/adjoint_osse"
-    STATE_FILE="${WORK_DIR}/4dvar_state_osse.npz"
+    STATE_BASENAME="4dvar_state_osse.npz"
     LOG_NAME="4dvar_optimizer_osse"
-    SIGMA_FILE="${WORK_DIR}/sigma_co2_osse.nc4"   # single sigma field
-    SIGMA_DIR=""
     T_END_DEFAULT="2016-02-01"
+fi
+case "${GRID}" in latlon|cs) ;; *) die "GRID must be 'latlon' or 'cs' (got '${GRID}')" ;; esac
+[ "${MODE}" = "monthly" ] && [ "${GRID}" = "cs" ] && \
+    die "GRID=cs is not yet implemented for MODE=monthly (annual only)"
+
+# Canonical work tree = clone source; per-EXP work tree = private copy.
+SRC_WORK="${PARENT_DIR}/${BASE_WORK_NAME}"
+if [ -n "${EXP_NAME}" ]; then
+    WORK_DIR="${PARENT_DIR}/${BASE_WORK_NAME}_${EXP_NAME}"
+else
+    WORK_DIR="${SRC_WORK}"
 fi
 
 FWD_DIR="${WORK_DIR}/forward_run"
 ADJ_DIR="${WORK_DIR}/adjoint"
-FORCING_DIR="${WORK_DIR}/forcing_files_osse"   # must match OCO2_FORCING_DIR in adjoint GCHP.rc
+FORCING_DIR="${WORK_DIR}/forcing_files_osse"   # patched into GCHP.rc (OCO2_FORCING_DIR)
 OUTPUT_DIR="${WORK_DIR}/4dvar_output_osse"
 LOG_DIR="${WORK_DIR}/logs"                     # all optimizer logs go here
 LOG_FILE="${LOG_DIR}/${LOG_NAME}.log"
+STATE_FILE="${WORK_DIR}/${STATE_BASENAME}"
+SIGMA_FILE="${WORK_DIR}/sigma_co2_osse.nc4"    # annual: single sigma field
+SIGMA_DIR="${WORK_DIR}/sigma_monthly"          # monthly: one file per month
 PROGRESS_FILE="${WORK_DIR}/4dvar_progress_${MODE}.txt"
 CONVERGED_FILE="${WORK_DIR}/CONVERGED_${MODE}"
 
@@ -158,6 +194,7 @@ VPASS="${VPASS},T_START=${T_START},T_END=${T_END}"
 VPASS="${VPASS},SAVE_DIAG=${SAVE_DIAG},NLAT=${NLAT},NLON=${NLON},CHAIN=${CHAIN}"
 VPASS="${VPASS},MAX_CHAIN=${MAX_CHAIN},WALLTIME_S=${WALLTIME_S},WALLTIME_MARGIN_S=${WALLTIME_MARGIN_S}"
 VPASS="${VPASS},EST_MONTH_FWD_S=${EST_MONTH_FWD_S},EST_MONTH_ADJ_S=${EST_MONTH_ADJ_S}"
+VPASS="${VPASS},GRID=${GRID},EXP_NAME=${EXP_NAME}"
 
 save_progress() {
     echo "iter=${CUR_ITER} phase=${CUR_PHASE}" > "${PROGRESS_FILE}"
@@ -184,6 +221,30 @@ budget_ok() {
     local remain=$(( WALLTIME_S - SECONDS - WALLTIME_MARGIN_S ))
     [ "${remain}" -ge "${need}" ]
 }
+
+# ============================================================
+#  Per-experiment work tree (EXP_NAME): clone the run dirs so parallel runs
+#  never share forward_run/adjoint. Cloned on a fresh start (or when the cloned
+#  run dirs are missing on a restart). Bulky run output is excluded.
+# ============================================================
+if [ -n "${EXP_NAME}" ]; then
+    [ "${SRC_WORK}" != "${WORK_DIR}" ] || die "EXP_NAME work tree == clone source; refusing"
+    [ -d "${SRC_WORK}/forward_run" ] || die "clone source missing: ${SRC_WORK}/forward_run"
+    [ -d "${SRC_WORK}/adjoint" ]     || die "clone source missing: ${SRC_WORK}/adjoint"
+    if [ "${RESTART}" != "true" ] || [ ! -f "${FWD_DIR}/gchp" ] || [ ! -f "${ADJ_DIR}/gchp" ]; then
+        log "EXP_NAME=${EXP_NAME}: cloning run dirs from ${SRC_WORK} → ${WORK_DIR}"
+        mkdir -p "${FWD_DIR}" "${ADJ_DIR}"
+        RSYNC_EXCL=(--exclude 'OutputDir/*' --exclude 'gcadj_*checkpoint*'
+                    --exclude 'Restarts/gcchem_internal_checkpoint*'
+                    --exclude cap_restart --exclude '*.o[0-9]*' --exclude '*.log'
+                    --exclude allPEs.log --exclude 'logfile.*' --exclude EGRESS)
+        rsync -a "${RSYNC_EXCL[@]}" "${SRC_WORK}/forward_run/" "${FWD_DIR}/"
+        rsync -a "${RSYNC_EXCL[@]}" "${SRC_WORK}/adjoint/"     "${ADJ_DIR}/"
+        log "EXP_NAME=${EXP_NAME}: run dirs cloned"
+    else
+        log "EXP_NAME=${EXP_NAME}: run dirs present, skipping clone (restart)"
+    fi
+fi
 
 # ============================================================
 #  Environment
@@ -223,6 +284,31 @@ log "Core count from GCHP.rc: ${NCORES}"
 
 [ -f "${FWD_DIR}/gchp" ] || die "Forward GCHP executable not found: ${FWD_DIR}/gchp"
 [ -f "${ADJ_DIR}/gchp" ] || die "Adjoint GCHP executable not found: ${ADJ_DIR}/gchp"
+
+# ============================================================
+#  Grid + parallel-isolation patches to the run-dir control files
+# ============================================================
+# Cubed-sphere face size from the model grid (C{CS_RES}); used for --grid cs.
+CS_RES=$(awk -F'[[:space:]:]+' '/^GCHP.IM_WORLD/{print $2}' "${FWD_DIR}/GCHP.rc")
+[ -n "${CS_RES}" ] || CS_RES=24
+
+# Isolate the adjoint forcing dir for THIS run. OCO2_FORCING_DIR is an absolute
+# path in GCHP.rc; unpatched, two parallel runs would read the same forcing.
+for _g in "${ADJ_DIR}/GCHP.rc" "${FWD_DIR}/GCHP.rc"; do
+    [ -f "${_g}" ] && sed -i "s|^OCO2_FORCING_DIR:.*|OCO2_FORCING_DIR: ${FORCING_DIR}/|" "${_g}"
+done
+log "OCO2_FORCING_DIR set to ${FORCING_DIR}/"
+
+if [ "${GRID}" = "cs" ]; then
+    # Native cubed-sphere adjoint output: disable the lat-lon grid_label so
+    # SurfaceFluxAdj_CO2 is written on the model C-grid and read back cell-for-cell
+    # (removes the lat-lon<->CS interpolation mismatch in the gradient).
+    sed -i 's/^\([[:space:]]*\)Adjoint.grid_label:/\1#Adjoint.grid_label:/'   "${ADJ_DIR}/HISTORY.rc"
+    sed -i 's/^\([[:space:]]*\)Adjoint.conservative:/\1#Adjoint.conservative:/' "${ADJ_DIR}/HISTORY.rc"
+    log "GRID=cs: native C${CS_RES}; adjoint grid_label disabled (native-CS gradient)"
+else
+    log "GRID=latlon: sigma ${NLAT}x${NLON}; adjoint output on lat-lon grid"
+fi
 
 # ============================================================
 #  Patch runConfig timing from T_START / T_END
@@ -322,11 +408,12 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
                 --n-months "${NMON}" --start-month "${START_MONTH}" \
                 || die "write_sigma_monthly.py failed"
         else
-            log "[iter ${CUR_ITER}] Writing sigma_co2_osse.nc4"
+            log "[iter ${CUR_ITER}] Writing sigma_co2_osse.nc4 (grid=${GRID})"
             python3 "${SCRIPT_DIR}/write_sigma.py" \
                 --sigma-file "${SIGMA_FILE}" \
                 --state-file "${STATE_FILE}" \
-                --nlat "${NLAT}" --nlon "${NLON}" \
+                --grid "${GRID}" \
+                --nlat "${NLAT}" --nlon "${NLON}" --cs-res "${CS_RES}" \
                 --t-start "${T_START}" \
                 || die "write_sigma.py failed"
         fi
@@ -459,7 +546,8 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
                 --state-file  "${STATE_FILE}" \
                 --forcing-dir "${FORCING_DIR}" \
                 --adj-output  "${ADJ_DIR}/OutputDir" \
-                --nlat "${NLAT}" --nlon "${NLON}" \
+                --grid "${GRID}" \
+                --nlat "${NLAT}" --nlon "${NLON}" --cs-res "${CS_RES}" \
                 --sigma-b "${SIGMA_B}" \
                 --t-start "${T_START}" \
                 --gtol "${GTOL}" --ftol "${FTOL}" \

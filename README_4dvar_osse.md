@@ -40,6 +40,37 @@ Key points of the unified driver:
   (month-boundary-exclusive; the window's final month boundary is not double
   counted).
 
+### Sigma grid (`GRID`)
+
+The control-variable grid is selected with `GRID`:
+
+| `GRID` | σ grid | Adjoint output | Notes |
+|--------|--------|----------------|-------|
+| `cs` (annual default) | native model cubed sphere `C{IM_WORLD}` (C24 now), stacked `lat=6·im, lon=im`; read with **no regrid** | native CS (`HISTORY.rc` `Adjoint.grid_label` disabled at runtime) | removes the lat-lon↔CS interpolation mismatch in the gradient; control vector `n = 6·im²` |
+| `latlon` | 72×46 lat-lon, regridded to CS by MAPL | lat-lon `PC72x46-DC` | legacy path; control vector `n = nlat·nlon` |
+
+The cubed-sphere size is auto-detected from `GCHP.rc` `GCHP.IM_WORLD`. `write_sigma.py`
+and `lbfgsb_step.py` take `--grid`/`--cs-res`; the CS sigma layout matches
+`adjoint_validation/cs_fd_tools.py` so sigma-out and gradient-in share one cell
+ordering. **Monthly mode is lat-lon only for now** (`GRID=cs,MODE=monthly` is rejected).
+
+### Parallel runs (`EXP_NAME`)
+
+Set `EXP_NAME` to run several 4D-Vars **at the same time** without interference.
+With `EXP_NAME=foo` the whole work tree becomes a private clone
+`../4dvar_design_osse_foo/`: `forward_run/` and `adjoint/` are cloned from the
+canonical `../4dvar_design_osse/` (bulky run output excluded), and sigma, forcing,
+state, progress, logs and plots are all private. The one absolute cross-run path,
+`OCO2_FORCING_DIR` in `GCHP.rc`, is sed-patched to the run's own forcing dir; the
+sigma path is relative and isolates automatically. Empty `EXP_NAME` (default) runs
+in place in the canonical tree, exactly as before. `RESTART=true` resumes an
+`EXP_NAME` run from its private tree (and skips the re-clone).
+
+```bash
+qsub -v EXP_NAME=expA 4dvar_optimizer.osse.unified.run                 # C24 native-CS, isolated
+qsub -v EXP_NAME=expB,GRID=latlon 4dvar_optimizer.osse.unified.run     # lat-lon, isolated, in parallel
+```
+
 The two original drivers `4dvar_optimizer.osse.run` (one-month, single σ) and
 `4dvar_optimizer.osse.monthly.run` (full-year, 12 monthly σ) have been **removed**
 — the unified runner reproduces both. They remain available in the git history if
