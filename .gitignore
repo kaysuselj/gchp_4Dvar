@@ -1,0 +1,38 @@
+# PBS job output/log files
+*.o[0-9]*
+*.e[0-9]*
+run.txt
+
+# LaTeX build artifacts (keep the .tex sources)
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+missfont.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS / editor cruft
+.DS_Store
+*~
+
+# Large data / run outputs (not source)
+*.nc
+*.nc4
+*.npz
+*.npy
+*_backup
+*.rc_backup
+output_dir/
+output_dir_cs/
+plots/
+plots_osse/
+adj_determinism_out/
+monthly_sigma_test_verdict_*.txt
+
+# Status scratch files
+MONTHLY_SIGMA_STATUS.md

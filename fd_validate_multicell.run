@@ -1,0 +1,220 @@
+#!/bin/bash
+#PBS -S /bin/bash
+#PBS -N fd_multicell
+#PBS -l select=1:ncpus=24:mpiprocs=24:model=bro_ele
+#PBS -l walltime=16:00:00
+#PBS -q long
+#PBS -j oe
+#PBS -W group_list=s1055
+#PBS -m bea
+#PBS -M kay.suselj@jpl.nasa.gov
+
+# Multi-cell FD validation of the monthly adjoint gradient — follow-up to the
+# 2026-07-14 one-sided FD FAIL (job 24849168, g_adj/FD = 2.91 at one cell).
+#
+# REUSES the base results of fd_validate_gradient.run job 24849168 (J_base.txt
+# and fd_state.npz in fd_validation/) — NO base forward and NO adjoint run.
+# Each entry in cells.txt costs ONE perturbed 2-month forward (~45 min).
+# TWO BATCHES: every perturbation pattern runs at EPS (+1%) and EPS2 (-5%);
+# J is exactly quadratic in sigma (linear tracer), so the two batches pin the
+# parabola and give the EXACT gradient + curvature H per pattern.  Patterns:
+#   cell     5 single lat-lon cells (regrid-sensitive; original cell also
+#            gets +2*EPS for an overdetermined quadraticity check; its +EPS
+#            J is seeded from fd_validation/J_pert.txt)
+#   block3   3x3 block around the original cell   (mostly regrid-immune)
+#   global   uniform +eps over all cells          (fully regrid-immune)
+# block/global vs single-cell separates an ExtData/HISTORY regrid mismatch
+# (S != R^T) from a true chain bug.  ~14 forwards ~ 11 h.  Verdict
+# (a) curvature-biased one-sided FD / (b) constant systematic factor /
+# (c) spatially varying / (d) interpolation artifact -> report + overlay
+# scatter + sensitivity map in fd_multicell/.
+#
+# Completed runs leave marker files and are skipped on rerun:
+#   qsub fd_validate_multicell.run                    # fresh
+#   qsub -v RESTART=true fd_validate_multicell.run    # resume after a kill
+#
+# Uses the monthly work tree — do NOT run concurrently with
+# fd_validate_gradient.run, test_monthly_sigma.run or the monthly optimizer.
+
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+
+# ============================================================
+#  Configuration
+# ============================================================
+BASE_DIR="$(pwd)"                        # gchp_4Dvar/
+WORK_DIR="$(cd "${BASE_DIR}/../4dvar_design_osse_monthly" && pwd)"
+FWD_DIR="${WORK_DIR}/forward_run"
+CTRL_FWD_DIR="${BASE_DIR}/control_files/forward_osse_monthly"
+SCRIPT_DIR="${BASE_DIR}"
+
+SIGMA_DIR="${WORK_DIR}/sigma_monthly"
+FORCING_DIR="${WORK_DIR}/forcing_files_osse"
+FD_DIR="${WORK_DIR}/fd_validation"       # inputs from job 24849168
+MC_DIR="${WORK_DIR}/fd_multicell"        # this job's outputs
+LOG_FILE="${MC_DIR}/fd_multicell.log"
+
+T_START="2016-01-01"
+T_END="2016-03-01"
+TS_DYN=1800
+NLAT=${NLAT:-46}
+NLON=${NLON:-72}
+BASE_SIGMA=${BASE_SIGMA:-1.0}
+EPS=${EPS:-0.01}
+EPS2=${EPS2:--0.05}
+N_CELLS=${N_CELLS:-4}
+FD_TOL=${FD_TOL:-0.05}
+RESTART=${RESTART:-false}
+
+# stop launching new forwards when less than RESERVE_S of walltime remains
+WALL_S=57600
+RESERVE_S=4200
+
+# base results from job 24849168 are mandatory
+[ -f "${FD_DIR}/fd_state.npz" ] || die "missing ${FD_DIR}/fd_state.npz — run fd_validate_gradient.run first"
+[ -f "${FD_DIR}/J_base.txt"   ] || die "missing ${FD_DIR}/J_base.txt — run fd_validate_gradient.run first"
+
+if [ "${RESTART}" != "true" ] && [ -d "${MC_DIR}" ]; then
+    rm -rf "${MC_DIR}"
+fi
+mkdir -p "${MC_DIR}"
+exec > >(tee -a "${LOG_FILE}") 2>&1
+
+# ============================================================
+#  Environment
+# ============================================================
+GCHP_ENV="${FWD_DIR}/gchp.env"
+[ -f "${GCHP_ENV}" ] || die "${GCHP_ENV} not found"
+set +e; source "${GCHP_ENV}"; set -e
+command -v mpiexec &>/dev/null || die "mpiexec not found after sourcing ${GCHP_ENV}"
+
+PYTHON_ENV="${PYTHON_ENV:-/nobackup/ksuselj1/envs/gchp_4dvar}"
+[ -f "${PYTHON_ENV}/bin/activate" ] || die "Python env not found: ${PYTHON_ENV}"
+source "${PYTHON_ENV}/bin/activate"
+export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
+
+mkdir -p "${FORCING_DIR}" "${FWD_DIR}/Restarts"
+
+# ============================================================
+#  Control files + runConfig timing (2-month window, forward only)
+# ============================================================
+rsync -a "${CTRL_FWD_DIR}/" "${FWD_DIR}/"
+
+NCORES=$(awk -F'[[:space:]:]+' '/^NX[[:space:]:]/ {nx=$2} /^NY[[:space:]:]/ {ny=$2} \
+         END {print nx*ny}' "${FWD_DIR}/GCHP.rc")
+{ [ -z "${NCORES}" ] || [ "${NCORES}" -le 0 ]; } && die "Could not parse NX/NY from GCHP.rc"
+
+START_FMT="$(echo "${T_START}" | tr -d '-') 000000"
+END_FMT="$(echo "${T_END}"   | tr -d '-') 000000"
+DURATION_DAYS=$(( ($(date -d "${T_END}" +%s) - $(date -d "${T_START}" +%s)) / 86400 ))
+DURATION_FMT="$(printf '%08d' "${DURATION_DAYS}") 000000"
+sed -i "s/^Start_Time=.*/Start_Time=\"${START_FMT}\"/" "${FWD_DIR}/runConfig_forward.sh"
+sed -i "s/^End_Time=.*/End_Time=\"${END_FMT}\"/"       "${FWD_DIR}/runConfig_forward.sh"
+sed -i "s/^Duration=.*/Duration=\"${DURATION_FMT}\"/"  "${FWD_DIR}/runConfig_forward.sh"
+log "Window ${T_START} -> ${T_END} (${DURATION_DAYS} days), ${NCORES} cores, base sigma ${BASE_SIGMA}, eps ${EPS}"
+
+run_forward() {
+    cd "${FWD_DIR}"
+    rm -f gcadj_internal_checkpoint* gcadj_import_checkpoint*
+    [ -d OutputDir ] && find OutputDir -maxdepth 1 -type f -delete
+    rm -f Restarts/gcchem_internal_checkpoint* cap_restart
+    ./runConfig_forward.sh > gchp.log 2>&1 || die "runConfig_forward.sh failed"
+    mpiexec -n "${NCORES}" ./gchp >> gchp.log 2>&1 \
+        || die "Forward GCHP failed. See ${FWD_DIR}/gchp.log"
+    # checkpoints are never consumed here — delete immediately
+    rm -f gcadj_internal_checkpoint* gcadj_import_checkpoint* \
+          Restarts/gcchem_internal_checkpoint*
+    cd "${BASE_DIR}"
+}
+
+run_forcing() {   # $1 = destination J file
+    find "${FORCING_DIR}" -maxdepth 1 -type f \
+        \( -name 'CO2_adjoint_forcing_*.nc4' -o -name 'forcing_all_obs.nc4' \
+           -o -name 'daily_forcing_stats.nc4' -o -name 'J_value.txt' \) \
+        -delete 2>/dev/null || true
+    mapfile -t SAT_FILES < \
+        <(ls "${FWD_DIR}/OutputDir"/GEOSChem.sat_track.*.nc4 2>/dev/null || true)
+    [ "${#SAT_FILES[@]}" -eq 0 ] && die "No sat_track files in ${FWD_DIR}/OutputDir"
+    python3 "${SCRIPT_DIR}/co2_adjoint_forcing_osse.py" \
+        "${SAT_FILES[@]}" "${FORCING_DIR}" \
+        --ts-chem "${TS_DYN}" \
+        --t-start "${T_START}T00:00:00" --t-end "${T_END}T00:00:00" \
+        --no-save-diagnostics \
+        || die "co2_adjoint_forcing_osse.py failed"
+    cp "${FORCING_DIR}/J_value.txt" "$1"
+}
+
+# ============================================================
+#  P0 — pick cells + seed the already-computed (+eps) J
+# ============================================================
+CELLS="${MC_DIR}/cells.txt"
+if [ ! -f "${CELLS}" ]; then
+    log "P0: selecting test cells from ${FD_DIR}/fd_state.npz"
+    python3 "${SCRIPT_DIR}/fd_multicell_tools.py" pick-cells \
+        --state "${FD_DIR}/fd_state.npz" \
+        --n "${N_CELLS}" --eps "${EPS}" --eps2 "${EPS2}" \
+        --out "${CELLS}" \
+        || die "pick-cells failed"
+fi
+
+SEED_TAG=$(sed -n 's/^# seed_tag=\([^ ]*\).*/\1/p' "${CELLS}")
+if [ -n "${SEED_TAG}" ] && [ ! -f "${MC_DIR}/done.run_${SEED_TAG}" ]; then
+    [ -f "${FD_DIR}/J_pert.txt" ] || die "cannot seed ${SEED_TAG}: ${FD_DIR}/J_pert.txt missing"
+    cp "${FD_DIR}/J_pert.txt" "${MC_DIR}/J_${SEED_TAG}.txt"
+    touch "${MC_DIR}/done.run_${SEED_TAG}"
+    log "P0: seeded J_${SEED_TAG}.txt from the 24849168 perturbed run"
+fi
+
+# ============================================================
+#  P1 — one perturbed forward per remaining entry
+# ============================================================
+ALL_DONE=true
+while read -r KIND J I EPS_E TAG; do
+    [ -f "${MC_DIR}/done.run_${TAG}" ] && { log "P1: ${TAG} already done, skipping"; continue; }
+    if (( SECONDS > WALL_S - RESERVE_S )); then
+        log "P1: walltime budget exhausted before ${TAG} — resubmit with RESTART=true"
+        ALL_DONE=false
+        break
+    fi
+    log "P1: ${TAG} — writing sigma and running perturbed forward"
+    python3 "${SCRIPT_DIR}/fd_multicell_tools.py" write-sigma-cell \
+        --sigma-dir "${SIGMA_DIR}" --base "${BASE_SIGMA}" \
+        --year "${T_START:0:4}" --nlat "${NLAT}" --nlon "${NLON}" \
+        --cell "${J},${I}" --eps "${EPS_E}" --kind "${KIND}" \
+        || die "write-sigma-cell failed for ${TAG}"
+    run_forward
+    run_forcing "${MC_DIR}/J_${TAG}.txt"
+    log "P1: ${TAG} J = $(cat "${MC_DIR}/J_${TAG}.txt")"
+    touch "${MC_DIR}/done.run_${TAG}"
+done < <(grep -v '^#' "${CELLS}")
+
+# Leave the sigma dir in a clean base state (no lingering perturbation)
+python3 "${SCRIPT_DIR}/fd_gradient_tools.py" write-sigma \
+    --sigma-dir "${SIGMA_DIR}" --base "${BASE_SIGMA}" \
+    --year "${T_START:0:4}" --nlat "${NLAT}" --nlon "${NLON}" || true
+
+# ============================================================
+#  P2 — analysis (always runs on whatever is available)
+# ============================================================
+log "P2: analyzing"
+rc=0
+python3 "${SCRIPT_DIR}/fd_multicell_tools.py" analyze \
+    --state  "${FD_DIR}/fd_state.npz" \
+    --cells  "${CELLS}" \
+    --j-base "${FD_DIR}/J_base.txt" \
+    --jdir   "${MC_DIR}" \
+    --base "${BASE_SIGMA}" --eps "${EPS}" --eps2 "${EPS2}" --tol "${FD_TOL}" \
+    --report   "${MC_DIR}/fd_multicell_report.txt" \
+    --plot-dir "${MC_DIR}" \
+    || rc=$?
+
+if [ "${ALL_DONE}" != "true" ]; then
+    log "NOTE: not all runs completed — resubmit with RESTART=true to finish"
+    rc=5
+fi
+log "Multi-cell FD finished with code ${rc} (0=adjoint validated, 3=systematic factor, 4=varying/noise, 5=incomplete, 6=interpolation artifact)"
+log "Report: ${MC_DIR}/fd_multicell_report.txt"
+exit "${rc}"

@@ -1,0 +1,398 @@
+#!/bin/bash
+#PBS -S /bin/bash
+#PBS -N adj_fwd_1mon_exp3
+#PBS -l select=1:ncpus=24:mpiprocs=24:model=bro_ele
+#PBS -l walltime=24:00:00
+#PBS -q long
+#PBS -j oe
+#PBS -W group_list=s1055
+#PBS -m bea
+#PBS -M kay.suselj@jpl.nasa.gov
+
+# 1-month adjoint vs FD validation — Exp 3: PRODUCTION LIMITERS + CONV/PBL
+# hord_tr=12 (monotone PPM, horizontal — production default)
+# kord_tr=8  (monotone vertical remap — production default)
+# Physics: Cloud_Conv=on, PBL_Mixing=on (production config), Dry/Wet Dep=off
+# Window: Jan 2016 (2016-01-01 -> 2016-02-01), C24, 24 cores
+# Cells: 13 fixed cells from cells_fixed.txt (same across all 3 experiments)
+#
+# Comparison with Exp 2 (same limiters, transport only) isolates the
+# adjoint error contribution from cloud convection and PBL mixing.
+# Non-local mixing and dry/wet deposition remain off in all experiments.
+#
+# Phases (marker files in results/ skip finished work on resume):
+#   SETUP  clone run dirs + monthly control templates + native-CS edits
+#   P0     TWO 1-day forwards (base / unique-per-cell sigma): plumbing gate
+#   P1     base 1-month forward -> checkpoints -> forcing -> J_base
+#   P2     1-month adjoint -> fixed cells (cells_fixed.txt) -> cells.txt
+#   P3     one perturbed forward per cells.txt entry (+-eps per cell,
+#          global +-eps, +2eps quadraticity probe at first cell)
+#   P4     analyze -> results/report.txt + fd_scatter_cs.png + g_map_cs.png
+#
+#   qsub test_adjoint_vs_forward.run                    # fresh start
+#   qsub -v RESTART=true test_adjoint_vs_forward.run    # resume
+#
+# Exit: 0 = adjoint validated   3 = constant factor   4 = spatially varying
+#       5 = incomplete (resubmit with RESTART=true)
+
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+
+# ============================================================
+#  Configuration
+# ============================================================
+# Hardened absolute paths: independent of submission cwd ($PBS_O_WORKDIR).
+# Do NOT derive TEST_DIR from pwd — qsub keys PBS_O_WORKDIR off the directory
+# qsub was invoked from, not the script's location. See job 24887284 failure.
+ROOT_DIR="/nobackupp27/ksuselj1/gchp_14.5.3_adjoint_surfaceF"
+TEST_DIR="${ROOT_DIR}/tests_full_J/test_adjoint_vs_forward_1month_exp3"
+cd "$TEST_DIR"
+SRC_FWD="${ROOT_DIR}/4dvar_design_osse/forward_run"
+SRC_ADJ="${ROOT_DIR}/4dvar_design_osse/adjoint"
+CTRL_FWD_DIR="${ROOT_DIR}/gchp_4Dvar/control_files/forward_osse_monthly"
+CTRL_ADJ_DIR="${ROOT_DIR}/gchp_4Dvar/control_files/adjoint_osse_monthly"
+CONST_SIGMA_SRC="${ROOT_DIR}/4dvar_design_osse_monthly/sigma_co2_const.nc4"
+
+FWD_DIR="${TEST_DIR}/forward_run"
+ADJ_DIR="${TEST_DIR}/adjoint"
+SIGMA_DIR="${TEST_DIR}/sigma_monthly"
+FORCING_DIR="${TEST_DIR}/forcing_files_osse"
+RES_DIR="${TEST_DIR}/results"
+LOG_FILE="${RES_DIR}/test_adjoint_vs_forward.log"
+
+T_START="${T_START:-2016-01-01}"
+T_END="${T_END:-2016-02-01}"
+TS_DYN=1800
+IM=${IM:-24}
+BASE_SIGMA=${BASE_SIGMA:-1.0}
+EPS=${EPS:-0.05}
+N_CELLS=${N_CELLS:-13}
+GMIN=${GMIN:-30.0}
+FD_TOL=${FD_TOL:-0.05}
+RESTART=${RESTART:-false}
+FIXED_CELLS="${TEST_DIR}/cells_fixed.txt"
+
+WALL_S=86400    # 24 h in seconds — matches PBS walltime
+RESERVE_S=1800  # 30 min buffer before declaring incomplete
+
+NMON=$(( (10#$(date -d "${T_END}" +%Y) - 10#$(date -d "${T_START}" +%Y)) * 12 \
+       + (10#$(date -d "${T_END}" +%m) - 10#$(date -d "${T_START}" +%m)) ))
+START_MONTH=$(( 10#$(date -d "${T_START}" +%m) ))
+YEAR="${T_START:0:4}"
+NMON_SIGMA=$(( NMON > 0 ? NMON : 1 ))
+
+if [ "${RESTART}" != "true" ] && [ -d "${RES_DIR}" ]; then
+    rm -rf "${RES_DIR}"
+fi
+mkdir -p "${RES_DIR}"
+exec > >(tee -a "${LOG_FILE}") 2>&1
+
+mark()   { touch "${RES_DIR}/done.$1"; log "phase $1 done"; }
+done_p() { [ -f "${RES_DIR}/done.$1" ]; }
+
+# ============================================================
+#  SETUP — clone + overlay + native-CS edits (idempotent)
+# ============================================================
+log "SETUP: cloning run dirs from ${SRC_FWD} and ${SRC_ADJ}"
+RSYNC_EXCL=(--exclude 'OutputDir/*' --exclude 'gcadj_*checkpoint*'
+            --exclude 'Restarts/gcchem_internal_checkpoint*'
+            --exclude cap_restart --exclude '*.o2*' --exclude '*.log'
+            --exclude allPEs.log --exclude 'logfile.*' --exclude EGRESS)
+rsync -a "${RSYNC_EXCL[@]}" "${SRC_FWD}/" "${FWD_DIR}/"
+rsync -a "${RSYNC_EXCL[@]}" "${SRC_ADJ}/" "${ADJ_DIR}/"
+rsync -a "${CTRL_FWD_DIR}/" "${FWD_DIR}/"
+rsync -a "${CTRL_ADJ_DIR}/" "${ADJ_DIR}/"
+
+# Exp 3: Cloud_Conv and PBL_Mixing ON (production); Non_Local, Dry/Wet Dep OFF
+for RC in "${FWD_DIR}/runConfig_forward.sh" "${ADJ_DIR}/runConfig_adjoint.sh"; do
+    sed -i "s/^Turn_on_Non_Local_Mixing=.*/Turn_on_Non_Local_Mixing=false/" "$RC"
+    sed -i "s/^Turn_on_Dry_Deposition=.*/Turn_on_Dry_Deposition=false/"   "$RC"
+    sed -i "s/^Turn_on_Wet_Deposition=.*/Turn_on_Wet_Deposition=false/"   "$RC"
+done
+
+# Exp 3: hord_tr=12 (monotone PPM), kord_tr=8 (monotone vertical) — production defaults
+for NML in "${FWD_DIR}/input.nml" "${ADJ_DIR}/input.nml"; do
+    cat > "$NML" << 'ENDNML'
+&fms_nml
+print_memory_usage = .false.,
+domains_stack_size = 20000000/
+
+&fv_core_nml
+hord_tr = 12,
+kord_tr = 8 /
+
+#&fv#_core_nml
+#do_schmidt = .true.,
+#stretch_fac = 2.0,
+#target_lat = 37.0,
+#target_lon = 242.0/
+ENDNML
+done
+
+mkdir -p "${FWD_DIR}/OutputDir" "${FWD_DIR}/Restarts" \
+         "${ADJ_DIR}/OutputDir" "${ADJ_DIR}/Restarts" \
+         "${SIGMA_DIR}" "${FORCING_DIR}"
+
+sed -i "s|#'Emissions',|'Emissions',|" "${FWD_DIR}/HISTORY.rc"
+grep -q "^\s*'Emissions'," "${FWD_DIR}/HISTORY.rc" \
+    || die "could not enable the Emissions collection in ${FWD_DIR}/HISTORY.rc"
+
+sed -i "/Adjoint\.grid_label/d; /Adjoint\.conservative/d" "${ADJ_DIR}/HISTORY.rc"
+
+sed -i "s|^OCO2_FORCING_DIR:.*|OCO2_FORCING_DIR: ${FORCING_DIR}/|" \
+    "${ADJ_DIR}/GCHP.rc"
+[ -f "${TEST_DIR}/sigma_co2_const.nc4" ] \
+    || cp "${CONST_SIGMA_SRC}" "${TEST_DIR}/sigma_co2_const.nc4"
+
+sed -i 's/^INITIAL_RESTART=.*/INITIAL_RESTART=gcchem_initial_restart.nc4/' \
+    "${ADJ_DIR}/runConfig_adjoint.sh"
+
+NCORES=$(awk -F'[[:space:]:]+' '/^NX[[:space:]:]/ {nx=$2} /^NY[[:space:]:]/ {ny=$2} \
+         END {print nx*ny}' "${FWD_DIR}/GCHP.rc")
+{ [ -z "${NCORES}" ] || [ "${NCORES}" -le 0 ]; } && die "Could not parse NX/NY from GCHP.rc"
+
+# ============================================================
+#  Environment
+# ============================================================
+GCHP_ENV="${FWD_DIR}/gchp.env"
+[ -f "${GCHP_ENV}" ] || die "${GCHP_ENV} not found"
+set +e; source "${GCHP_ENV}"; set -e
+command -v mpiexec &>/dev/null || die "mpiexec not found after sourcing ${GCHP_ENV}"
+
+PYTHON_ENV="${PYTHON_ENV:-/nobackup/ksuselj1/envs/gchp_4dvar}"
+[ -f "${PYTHON_ENV}/bin/activate" ] || die "Python env not found: ${PYTHON_ENV}"
+source "${PYTHON_ENV}/bin/activate"
+export PYTHONPATH="${TEST_DIR}:${PYTHONPATH:-}"
+
+log "Window ${T_START} -> ${T_END} (NMON=${NMON}), C${IM}, ${NCORES} cores, base sigma ${BASE_SIGMA}, eps ${EPS}"
+log "Exp 3: hord_tr=12 kord_tr=8 (production limiters), Cloud_Conv=on, PBL_Mixing=on"
+log "Fixed cells: ${FIXED_CELLS}"
+
+# ============================================================
+#  Helpers
+# ============================================================
+set_window() {
+    local start_fmt="$(echo "$2" | tr -d '-') 000000"
+    local end_fmt="$(echo "$3" | tr -d '-') 000000"
+    local days=$(( ($(date -d "$3" +%s) - $(date -d "$2" +%s)) / 86400 ))
+    local dur_fmt="$(printf '%08d' "${days}") 000000"
+    sed -i "s/^Start_Time=.*/Start_Time=\"${start_fmt}\"/" "$1"
+    sed -i "s/^End_Time=.*/End_Time=\"${end_fmt}\"/"       "$1"
+    sed -i "s/^Duration=.*/Duration=\"${dur_fmt}\"/"       "$1"
+}
+
+run_forward() {
+    cd "${FWD_DIR}"
+    rm -f gcadj_internal_checkpoint* gcadj_import_checkpoint*
+    [ -d OutputDir ] && find OutputDir -maxdepth 1 -type f -delete
+    rm -f Restarts/gcchem_internal_checkpoint* cap_restart
+    ./runConfig_forward.sh > gchp.log 2>&1 || die "runConfig_forward.sh failed"
+    sed -i '0,/#&fv#_core_nml/{s/#&fv#_core_nml/\&fv_core_nml/}' input.nml
+    mpiexec -n "${NCORES}" ./gchp >> gchp.log 2>&1 < /dev/null \
+        || die "Forward GCHP failed. See ${FWD_DIR}/gchp.log"
+    cd "${TEST_DIR}"
+}
+
+run_forward_co2() {
+    sed -i "s|#'SpeciesConc',|'SpeciesConc',|" "${FWD_DIR}/HISTORY.rc"
+    cd "${FWD_DIR}"
+    rm -f gcadj_internal_checkpoint* gcadj_import_checkpoint*
+    [ -d OutputDir ] && find OutputDir -maxdepth 1 -type f -delete
+    rm -f Restarts/gcchem_internal_checkpoint* cap_restart
+    ./runConfig_forward.sh > gchp.log 2>&1 || die "runConfig_forward.sh failed"
+    sed -i '0,/#&fv#_core_nml/{s/#&fv#_core_nml/\&fv_core_nml/}' input.nml
+    sed -i "s|^\([\t ]*SpeciesConc\.frequency[\t ]*:[\t ]*\).*|\1240000|" HISTORY.rc
+    sed -i "s|^\([\t ]*SpeciesConc\.duration[\t ]*:[\t ]*\).*|\1240000|"  HISTORY.rc
+    mpiexec -n "${NCORES}" ./gchp >> gchp.log 2>&1 < /dev/null \
+        || die "Forward GCHP failed. See ${FWD_DIR}/gchp.log"
+    cd "${TEST_DIR}"
+    mkdir -p "${RES_DIR}/co2_base"
+    find "${FWD_DIR}/OutputDir" -maxdepth 1 -name 'GEOSChem.SpeciesConc.*.nc4' \
+        -exec cp -t "${RES_DIR}/co2_base/" {} +
+    log "P1: CO2 saved to ${RES_DIR}/co2_base/ ($(ls "${RES_DIR}/co2_base/" | wc -l) daily files)"
+}
+
+drop_fwd_checkpoints() {
+    find "${FWD_DIR}" -maxdepth 1 \( -name 'gcadj_internal_checkpoint*' \
+         -o -name 'gcadj_import_checkpoint*' \) -delete
+    rm -f "${FWD_DIR}"/Restarts/gcchem_internal_checkpoint*
+}
+
+write_sigma() {
+    python3 "${TEST_DIR}/cs_fd_tools.py" write-sigma \
+        --sigma-dir "${SIGMA_DIR}" --base "${BASE_SIGMA}" \
+        --year "${YEAR}" --start-month "${START_MONTH}" \
+        --n-months "${NMON_SIGMA}" --im "${IM}" "$@" \
+        || die "write-sigma $* failed"
+}
+
+run_forcing() {
+    find "${FORCING_DIR}" -maxdepth 1 -type f \
+        \( -name 'CO2_adjoint_forcing_*.nc4' -o -name 'forcing_all_obs.nc4' \
+           -o -name 'daily_forcing_stats.nc4' -o -name 'J_value.txt' \) \
+        -delete 2>/dev/null || true
+    mapfile -t SAT_FILES < \
+        <(ls "${FWD_DIR}/OutputDir"/GEOSChem.sat_track.*.nc4 2>/dev/null || true)
+    [ "${#SAT_FILES[@]}" -eq 0 ] && die "No sat_track files in ${FWD_DIR}/OutputDir"
+    python3 "${TEST_DIR}/co2_adjoint_forcing_osse.py" \
+        "${SAT_FILES[@]}" "${FORCING_DIR}" \
+        --ts-chem "${TS_DYN}" \
+        --t-start "${T_START}T00:00:00" --t-end "${T_END}T00:00:00" \
+        --no-save-diagnostics \
+        || die "co2_adjoint_forcing_osse.py failed"
+    cp "${FORCING_DIR}/J_value.txt" "$1"
+}
+
+# ============================================================
+#  P0 — CS-sigma plumbing gate (two 1-day forwards)
+# ============================================================
+P0_END="$(date -d "${T_START} + 1 day" +%Y-%m-%d)"
+
+if ! done_p p0_base; then
+    log "P0: base sigma, 1-day forward ${T_START} -> ${P0_END}"
+    write_sigma --kind none
+    set_window "${FWD_DIR}/runConfig_forward.sh" "${T_START}" "${P0_END}"
+    run_forward
+    drop_fwd_checkpoints
+    rm -rf "${RES_DIR}/p0_base"; mkdir -p "${RES_DIR}/p0_base"
+    cp "${FWD_DIR}/OutputDir"/GEOSChem.Emissions.*.nc4 "${RES_DIR}/p0_base/" \
+        || die "P0 base run produced no Emissions output"
+    mark p0_base
+fi
+
+if ! done_p p0_pert; then
+    log "P0: unique-per-cell sigma, 1-day forward"
+    write_sigma --kind unique
+    cp "${SIGMA_DIR}/${YEAR}/$(printf '%02d' "${START_MONTH}").nc4" \
+       "${RES_DIR}/p0_sigma_unique.nc4"
+    set_window "${FWD_DIR}/runConfig_forward.sh" "${T_START}" "${P0_END}"
+    run_forward
+    drop_fwd_checkpoints
+    rm -rf "${RES_DIR}/p0_pert"; mkdir -p "${RES_DIR}/p0_pert"
+    cp "${FWD_DIR}/OutputDir"/GEOSChem.Emissions.*.nc4 "${RES_DIR}/p0_pert/" \
+        || die "P0 perturbed run produced no Emissions output"
+    mark p0_pert
+fi
+
+if ! done_p p0_check; then
+    log "P0: checking pert == sigma * base exactly (no-regrid + face mapping)"
+    python3 "${TEST_DIR}/cs_fd_tools.py" check-p0 \
+        --base-dir "${RES_DIR}/p0_base" --pert-dir "${RES_DIR}/p0_pert" \
+        --sigma-file "${RES_DIR}/p0_sigma_unique.nc4" --im "${IM}" \
+        || die "P0 FAILED — ExtData did not deliver the CS sigma unregridded"
+    mark p0_check
+fi
+
+# ============================================================
+#  P1 — base forward (full window) + J_base
+# ============================================================
+if ! done_p p1_forward; then
+    log "P1: base sigma, full forward ${T_START} -> ${T_END}"
+    write_sigma --kind none
+    set_window "${FWD_DIR}/runConfig_forward.sh" "${T_START}" "${T_END}"
+    run_forward_co2
+    log "P1: forward done, moving checkpoints to adjoint dir"
+    cd "${FWD_DIR}"
+    find . -maxdepth 1 \( -name 'gcadj_internal_checkpoint*' \
+         -o -name 'gcadj_import_checkpoint*' \) -exec mv -t "${ADJ_DIR}/" {} +
+    _ckpt=$(ls Restarts/gcchem_internal_checkpoint* 2>/dev/null | head -1)
+    [ -z "${_ckpt}" ] && die "No gcchem_internal_checkpoint in ${FWD_DIR}/Restarts"
+    mv "${_ckpt}" "${ADJ_DIR}/gcchem_initial_restart.nc4"
+    cd "${TEST_DIR}"
+    mark p1_forward
+fi
+
+if ! done_p p1_forcing; then
+    log "P1: computing base J_obs and adjoint forcing"
+    run_forcing "${RES_DIR}/J_base.txt"
+    log "P1: J_base = $(cat "${RES_DIR}/J_base.txt")"
+    mark p1_forcing
+fi
+
+# ============================================================
+#  P2 — adjoint (native-CS gradient) + use fixed cells
+# ============================================================
+if ! done_p p2_adjoint; then
+    log "P2: adjoint GCHP started"
+    set_window "${ADJ_DIR}/runConfig_adjoint.sh" "${T_START}" "${T_END}"
+    cd "${ADJ_DIR}"
+    [ -d OutputDir ] && rm -f OutputDir/GEOSChem*
+    rm -f Restarts/gcchem_internal_checkpoint* cap_restart
+    ./runConfig_adjoint.sh > gchp.log 2>&1 || die "runConfig_adjoint.sh failed"
+    sed -i '0,/#&fv#_core_nml/{s/#&fv#_core_nml/\&fv_core_nml/}' input.nml
+    mpiexec -n "${NCORES}" ./gchp >> gchp.log 2>&1 < /dev/null \
+        || die "Adjoint GCHP failed. See ${ADJ_DIR}/gchp.log"
+    cd "${TEST_DIR}"
+    log "P2: adjoint done"
+    mark p2_adjoint
+fi
+
+if ! done_p p2_pick; then
+    log "P2: reading native-CS gradient; using fixed cells from ${FIXED_CELLS}"
+    _coord=$(ls "${RES_DIR}/p0_base"/GEOSChem.Emissions.*.nc4 2>/dev/null | head -1)
+    python3 "${TEST_DIR}/cs_fd_tools.py" pick-cells \
+        --adj-output "${ADJ_DIR}/OutputDir" \
+        --t-start "${T_START}" --t-end "${T_END}" \
+        --im "${IM}" --n "${N_CELLS}" --gmin "${GMIN}" --eps "${EPS}" \
+        --fixed-cells "${FIXED_CELLS}" \
+        ${_coord:+--coord-file "${_coord}"} \
+        --out "${RES_DIR}/cells.txt" --state-out "${RES_DIR}/cs_state.npz" \
+        || die "pick-cells failed"
+    find "${ADJ_DIR}" -maxdepth 1 \( -name 'gcadj_internal_checkpoint*' \
+         -o -name 'gcadj_import_checkpoint*' \) -delete
+    mark p2_pick
+fi
+
+# ============================================================
+#  P3 — one perturbed forward per cells.txt entry
+# ============================================================
+ALL_DONE=true
+while read -r KIND F J I EPS_E TAG <&3; do
+    [ -f "${RES_DIR}/done.run_${TAG}" ] && { log "P3: ${TAG} already done, skipping"; continue; }
+    if (( SECONDS > WALL_S - RESERVE_S )); then
+        log "P3: walltime budget exhausted before ${TAG} — resubmit with RESTART=true"
+        ALL_DONE=false
+        break
+    fi
+    log "P3: ${TAG} — writing CS sigma and running perturbed forward"
+    if [ "${KIND}" = "global" ]; then
+        write_sigma --kind global --eps "${EPS_E}"
+    else
+        write_sigma --kind cell --cell "${F},${J},${I}" --eps "${EPS_E}"
+    fi
+    set_window "${FWD_DIR}/runConfig_forward.sh" "${T_START}" "${T_END}"
+    run_forward
+    drop_fwd_checkpoints
+    run_forcing "${RES_DIR}/J_${TAG}.txt"
+    log "P3: ${TAG} J = $(cat "${RES_DIR}/J_${TAG}.txt")"
+    touch "${RES_DIR}/done.run_${TAG}"
+done 3< <(grep -v '^#' "${RES_DIR}/cells.txt")
+
+write_sigma --kind none || true
+
+# ============================================================
+#  P4 — verdict
+# ============================================================
+log "P4: analyzing"
+rc=0
+python3 "${TEST_DIR}/cs_fd_tools.py" analyze \
+    --state  "${RES_DIR}/cs_state.npz" \
+    --cells  "${RES_DIR}/cells.txt" \
+    --j-base "${RES_DIR}/J_base.txt" \
+    --jdir   "${RES_DIR}" \
+    --base "${BASE_SIGMA}" --tol "${FD_TOL}" \
+    --report   "${RES_DIR}/report.txt" \
+    --plot-dir "${RES_DIR}" \
+    || rc=$?
+
+if [ "${ALL_DONE}" != "true" ]; then
+    log "NOTE: not all runs completed — resubmit with RESTART=true to finish"
+    rc=5
+fi
+log "Exp 3 (hord_tr=12 kord_tr=8, production limiters + conv/PBL) finished with code ${rc}"
+log "  0=adjoint validated  3=systematic factor  4=spatially varying  5=incomplete"
+log "Report: ${RES_DIR}/report.txt"
+exit "${rc}"

@@ -161,7 +161,7 @@ COLLECTIONS:# 'Emissions',
    Adjoint.template:       '%y4%m2%d2.nc4',
    Adjoint.format:         'CFIO',
    Adjoint.timestampStart: .true.
-   Adjoint.frequency:      001000
+   Adjoint.frequency:      003000
    Adjoint.duration:       240000
    Adjoint.mode:           'instantaneous'
    Adjoint.backwards:      1

@@ -195,9 +195,9 @@ if [[ ${STRETCH_GRID} == 'ON' ]]; then
     CS_RES_EFFECTIVE=$( echo $CS_RES $STRETCH_FACTOR | awk '{printf "%.0f",$1*$2}' )
 fi
 if [[ $CS_RES_EFFECTIVE -le 180 ]]; then
-    ChemEmiss_Timestep_sec=1200
-    TransConv_Timestep_sec=600
-    TransConv_Timestep_HHMMSS=001000
+    ChemEmiss_Timestep_sec=1800
+    TransConv_Timestep_sec=1800
+    TransConv_Timestep_HHMMSS=003000
 else
     ChemEmiss_Timestep_sec=600
     TransConv_Timestep_sec=300

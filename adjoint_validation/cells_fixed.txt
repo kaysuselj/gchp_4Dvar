@@ -1,0 +1,17 @@
+# Fixed validation cells for 1-month adjoint FD experiments (Jan 2016, C24)
+# 13 cells: 3 NA, 2 SA, 2 AF, 2 EU, 3 AS, 1 AU
+# AS3 (f=1 j=23 i=20) is intentionally on the face-1 top-edge seam to test Fix B
+# kind f j i eps tag
+cell 2 21 14 0.05 NA1
+cell 4 16  2 0.05 NA2
+cell 4  7  2 0.05 NA3
+cell 4 21 12 0.05 SA1
+cell 5 18  1 0.05 SA2
+cell 0 14 14 0.05 AF1
+cell 0  5 21 0.05 AF2
+cell 2  8  5 0.05 EU1
+cell 0 22 13 0.05 EU2
+cell 2  4  9 0.05 AS1
+cell 1 17 11 0.05 AS2
+cell 1 23 20 0.05 AS3
+cell 3  2 18 0.05 AU1

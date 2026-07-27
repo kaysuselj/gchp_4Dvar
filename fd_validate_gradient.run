@@ -1,0 +1,270 @@
+#!/bin/bash
+#PBS -S /bin/bash
+#PBS -N fd_validate_grad
+#PBS -l select=1:ncpus=24:mpiprocs=24:model=bro_ele
+#PBS -l walltime=16:00:00
+#PBS -q long
+#PBS -j oe
+#PBS -W group_list=s1055
+#PBS -m bea
+#PBS -M kay.suselj@jpl.nasa.gov
+
+# Finite-difference validation of the monthly gradient convention
+# (MONTHLY_SIGMA_STATUS.md outstanding item (a)).
+#
+# Two-month window 2016-01-01 -> 2016-03-01, sequence:
+#   P0  preserve the plumbing-test verdict if its output is still in
+#       OutputDir (this job wipes it), and DIE if that verdict is FAIL
+#   P1  base sigma (constant BASE_SIGMA) -> forward GCHP -> move checkpoints
+#       -> forcing -> J_base
+#   P2  adjoint GCHP -> pick test cell, save g_diff/g_raw (fd_state.npz),
+#       free checkpoints
+#   P3  perturbed sigma (BASE_SIGMA + EPS at the one test cell in January)
+#       -> forward GCHP -> forcing -> J_pert
+#   P4  analyze: (J_pert - J_base)/EPS vs g_diff vs g_raw -> fd_report.txt
+#
+# Expected: FD matches g_diff = A(t_1)-A(t_2) within FD_TOL and clearly
+# rejects g_raw = A(t_1).  Runtime ~11 h (3.5 h/forward x2 + 3 h adjoint).
+#
+# Completed phases leave marker files in FD_DIR and are skipped on rerun, so
+# a killed job can simply be resubmitted with RESTART=true.  Default (fresh)
+# clears FD_DIR first.
+#
+# Uses the monthly work tree (4dvar_design_osse_monthly) — do NOT run
+# concurrently with test_monthly_sigma.run or 4dvar_optimizer.osse.monthly.run.
+#
+#   qsub fd_validate_gradient.run                       # fresh, base sigma=1
+#   qsub -v RESTART=true fd_validate_gradient.run       # resume after a kill
+#   qsub -v BASE_SIGMA=2.0 fd_validate_gradient.run     # sigma=2 variant
+#                       (re-checks the prior-flux accumulator, see .tex Sec 7)
+
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+
+# ============================================================
+#  Configuration
+# ============================================================
+BASE_DIR="$(pwd)"                        # gchp_4Dvar/
+WORK_DIR="$(cd "${BASE_DIR}/../4dvar_design_osse_monthly" && pwd)"
+FWD_DIR="${WORK_DIR}/forward_run"
+ADJ_DIR="${WORK_DIR}/adjoint"
+CTRL_FWD_DIR="${BASE_DIR}/control_files/forward_osse_monthly"
+CTRL_ADJ_DIR="${BASE_DIR}/control_files/adjoint_osse_monthly"
+SCRIPT_DIR="${BASE_DIR}"
+
+SIGMA_DIR="${WORK_DIR}/sigma_monthly"
+FORCING_DIR="${WORK_DIR}/forcing_files_osse"   # must match OCO2_FORCING_DIR in adjoint GCHP.rc
+FD_DIR="${WORK_DIR}/fd_validation"
+LOG_FILE="${FD_DIR}/fd_validate.log"
+
+T_START="2016-01-01"
+T_END="2016-03-01"
+TS_DYN=1800
+NLAT=${NLAT:-46}
+NLON=${NLON:-72}
+BASE_SIGMA=${BASE_SIGMA:-1.0}
+EPS=${EPS:-0.01}
+FD_TOL=${FD_TOL:-0.05}
+RESTART=${RESTART:-false}
+
+if [ "${RESTART}" != "true" ] && [ -d "${FD_DIR}" ]; then
+    rm -rf "${FD_DIR}"
+fi
+mkdir -p "${FD_DIR}"
+exec > >(tee -a "${LOG_FILE}") 2>&1
+
+mark()   { touch "${FD_DIR}/done.$1"; log "phase $1 done"; }
+done_p() { [ -f "${FD_DIR}/done.$1" ]; }
+
+# ============================================================
+#  Environment
+# ============================================================
+GCHP_ENV="${FWD_DIR}/gchp.env"
+[ -f "${GCHP_ENV}" ] || die "${GCHP_ENV} not found"
+set +e; source "${GCHP_ENV}"; set -e
+command -v mpiexec &>/dev/null || die "mpiexec not found after sourcing ${GCHP_ENV}"
+
+PYTHON_ENV="${PYTHON_ENV:-/nobackup/ksuselj1/envs/gchp_4dvar}"
+[ -f "${PYTHON_ENV}/bin/activate" ] || die "Python env not found: ${PYTHON_ENV}"
+source "${PYTHON_ENV}/bin/activate"
+export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
+
+mkdir -p "${FORCING_DIR}" "${ADJ_DIR}/Restarts" "${FWD_DIR}/Restarts"
+
+# ============================================================
+#  P0 — preserve / enforce the plumbing-test verdict
+# ============================================================
+if ! done_p p0_verdict; then
+    if ls "${FWD_DIR}/OutputDir"/GEOSChem.Emissions.*.nc4 >/dev/null 2>&1; then
+        log "P0: Emissions output present — recording plumbing-test verdict before it is wiped"
+        _verdict_file="${BASE_DIR}/monthly_sigma_test_verdict_$(date +%Y%m%d_%H%M%S).txt"
+        if python3 "${SCRIPT_DIR}/check_monthly_sigma.py" "${FWD_DIR}/OutputDir" \
+                | tee "${_verdict_file}"; then
+            log "P0: plumbing test PASSED (verdict saved: ${_verdict_file})"
+        else
+            die "plumbing test FAILED (verdict saved: ${_verdict_file}) — fix the sigma plumbing before FD validation"
+        fi
+    else
+        log "P0: WARNING — no Emissions output in ${FWD_DIR}/OutputDir; cannot (re)confirm the plumbing test. Proceeding."
+    fi
+    mark p0_verdict
+fi
+
+# ============================================================
+#  Control files + runConfig timing (2-month window)
+# ============================================================
+rsync -a "${CTRL_FWD_DIR}/" "${FWD_DIR}/"
+rsync -a "${CTRL_ADJ_DIR}/" "${ADJ_DIR}/"
+
+NCORES=$(awk -F'[[:space:]:]+' '/^NX[[:space:]:]/ {nx=$2} /^NY[[:space:]:]/ {ny=$2} \
+         END {print nx*ny}' "${FWD_DIR}/GCHP.rc")
+{ [ -z "${NCORES}" ] || [ "${NCORES}" -le 0 ]; } && die "Could not parse NX/NY from GCHP.rc"
+
+START_FMT="$(echo "${T_START}" | tr -d '-') 000000"
+END_FMT="$(echo "${T_END}"   | tr -d '-') 000000"
+DURATION_DAYS=$(( ($(date -d "${T_END}" +%s) - $(date -d "${T_START}" +%s)) / 86400 ))
+DURATION_FMT="$(printf '%08d' "${DURATION_DAYS}") 000000"
+for _cfg in "${FWD_DIR}/runConfig_forward.sh" "${ADJ_DIR}/runConfig_adjoint.sh"; do
+    sed -i "s/^Start_Time=.*/Start_Time=\"${START_FMT}\"/" "${_cfg}"
+    sed -i "s/^End_Time=.*/End_Time=\"${END_FMT}\"/"       "${_cfg}"
+    sed -i "s/^Duration=.*/Duration=\"${DURATION_FMT}\"/"  "${_cfg}"
+done
+sed -i 's/^INITIAL_RESTART=.*/INITIAL_RESTART=gcchem_initial_restart.nc4/' \
+    "${ADJ_DIR}/runConfig_adjoint.sh"
+log "Window ${T_START} -> ${T_END} (${DURATION_DAYS} days), ${NCORES} cores, base sigma ${BASE_SIGMA}, eps ${EPS}"
+
+run_forward() {
+    cd "${FWD_DIR}"
+    rm -f gcadj_internal_checkpoint* gcadj_import_checkpoint*
+    [ -d OutputDir ] && find OutputDir -maxdepth 1 -type f -delete
+    rm -f Restarts/gcchem_internal_checkpoint* cap_restart
+    ./runConfig_forward.sh > gchp.log 2>&1 || die "runConfig_forward.sh failed"
+    mpiexec -n "${NCORES}" ./gchp >> gchp.log 2>&1 \
+        || die "Forward GCHP failed. See ${FWD_DIR}/gchp.log"
+    cd "${BASE_DIR}"
+}
+
+run_forcing() {   # $1 = destination J file
+    find "${FORCING_DIR}" -maxdepth 1 -type f \
+        \( -name 'CO2_adjoint_forcing_*.nc4' -o -name 'forcing_all_obs.nc4' \
+           -o -name 'daily_forcing_stats.nc4' -o -name 'J_value.txt' \) \
+        -delete 2>/dev/null || true
+    mapfile -t SAT_FILES < \
+        <(ls "${FWD_DIR}/OutputDir"/GEOSChem.sat_track.*.nc4 2>/dev/null || true)
+    [ "${#SAT_FILES[@]}" -eq 0 ] && die "No sat_track files in ${FWD_DIR}/OutputDir"
+    python3 "${SCRIPT_DIR}/co2_adjoint_forcing_osse.py" \
+        "${SAT_FILES[@]}" "${FORCING_DIR}" \
+        --ts-chem "${TS_DYN}" \
+        --t-start "${T_START}T00:00:00" --t-end "${T_END}T00:00:00" \
+        --no-save-diagnostics \
+        || die "co2_adjoint_forcing_osse.py failed"
+    cp "${FORCING_DIR}/J_value.txt" "$1"
+}
+
+# ============================================================
+#  P1 — base forward + J_base
+# ============================================================
+if ! done_p p1_forward; then
+    log "P1: writing base sigma (constant ${BASE_SIGMA}) and running base forward GCHP"
+    python3 "${SCRIPT_DIR}/fd_gradient_tools.py" write-sigma \
+        --sigma-dir "${SIGMA_DIR}" --base "${BASE_SIGMA}" \
+        --year "${T_START:0:4}" --nlat "${NLAT}" --nlon "${NLON}" \
+        || die "write-sigma (base) failed"
+    run_forward
+    log "P1: forward done, moving checkpoints to adjoint dir"
+    cd "${FWD_DIR}"
+    find . -maxdepth 1 \( -name 'gcadj_internal_checkpoint*' \
+         -o -name 'gcadj_import_checkpoint*' \) -exec mv -t "${ADJ_DIR}/" {} +
+    _ckpt=$(ls Restarts/gcchem_internal_checkpoint* 2>/dev/null | head -1)
+    [ -z "${_ckpt}" ] && die "No gcchem_internal_checkpoint in ${FWD_DIR}/Restarts"
+    mv "${_ckpt}" "${ADJ_DIR}/gcchem_initial_restart.nc4"
+    cd "${BASE_DIR}"
+    mark p1_forward
+fi
+
+if ! done_p p1_forcing; then
+    log "P1: computing base J_obs and adjoint forcing"
+    run_forcing "${FD_DIR}/J_base.txt"
+    log "P1: J_base = $(cat "${FD_DIR}/J_base.txt")"
+    mark p1_forcing
+fi
+
+# ============================================================
+#  P2 — adjoint + cell pick
+# ============================================================
+if ! done_p p2_adjoint; then
+    log "P2: adjoint GCHP started"
+    cd "${ADJ_DIR}"
+    [ -d OutputDir ] && rm -f OutputDir/GEOSChem*
+    rm -f Restarts/gcchem_internal_checkpoint* cap_restart
+    ./runConfig_adjoint.sh > gchp.log 2>&1 || die "runConfig_adjoint.sh failed"
+    mpiexec -n "${NCORES}" ./gchp >> gchp.log 2>&1 \
+        || die "Adjoint GCHP failed. See ${ADJ_DIR}/gchp.log"
+    cd "${BASE_DIR}"
+    log "P2: adjoint done"
+    mark p2_adjoint
+fi
+
+if ! done_p p2_pick; then
+    log "P2: reading boundary accumulators and picking the test cell"
+    python3 "${SCRIPT_DIR}/fd_gradient_tools.py" pick-cell \
+        --adj-output "${ADJ_DIR}/OutputDir" \
+        --t-start "${T_START}" --t-end "${T_END}" \
+        --nlat "${NLAT}" --nlon "${NLON}" \
+        --out "${FD_DIR}/fd_state.npz" \
+        ${FD_CELL:+--cell "${FD_CELL}"} \
+        || die "pick-cell failed"
+    # checkpoints are consumed; free the disk before the perturbed forward
+    find "${ADJ_DIR}" -maxdepth 1 \( -name 'gcadj_internal_checkpoint*' \
+         -o -name 'gcadj_import_checkpoint*' \) -delete
+    mark p2_pick
+fi
+
+# ============================================================
+#  P3 — perturbed forward + J_pert
+# ============================================================
+if ! done_p p3_forward; then
+    log "P3: writing perturbed sigma (+${EPS} at the test cell) and running perturbed forward GCHP"
+    python3 "${SCRIPT_DIR}/fd_gradient_tools.py" write-sigma \
+        --sigma-dir "${SIGMA_DIR}" --base "${BASE_SIGMA}" \
+        --year "${T_START:0:4}" --nlat "${NLAT}" --nlon "${NLON}" \
+        --perturb-state "${FD_DIR}/fd_state.npz" --eps "${EPS}" \
+        || die "write-sigma (perturbed) failed"
+    run_forward
+    # this forward's checkpoints are never consumed — delete immediately
+    find "${FWD_DIR}" -maxdepth 1 \( -name 'gcadj_internal_checkpoint*' \
+         -o -name 'gcadj_import_checkpoint*' \) -delete
+    mark p3_forward
+fi
+
+if ! done_p p3_forcing; then
+    log "P3: computing perturbed J_obs"
+    run_forcing "${FD_DIR}/J_pert.txt"
+    log "P3: J_pert = $(cat "${FD_DIR}/J_pert.txt")"
+    mark p3_forcing
+fi
+
+# ============================================================
+#  P4 — verdict
+# ============================================================
+log "P4: analyzing"
+rc=0
+python3 "${SCRIPT_DIR}/fd_gradient_tools.py" analyze \
+    --state  "${FD_DIR}/fd_state.npz" \
+    --j-base "${FD_DIR}/J_base.txt" \
+    --j-pert "${FD_DIR}/J_pert.txt" \
+    --eps "${EPS}" --base "${BASE_SIGMA}" --tol "${FD_TOL}" \
+    --report "${FD_DIR}/fd_report.txt" \
+    || rc=$?
+
+# Leave the sigma dir in a clean base state (no lingering perturbation)
+python3 "${SCRIPT_DIR}/fd_gradient_tools.py" write-sigma \
+    --sigma-dir "${SIGMA_DIR}" --base "${BASE_SIGMA}" \
+    --year "${T_START:0:4}" --nlat "${NLAT}" --nlon "${NLON}" || true
+
+log "FD validation finished with code ${rc} (0=PASS, 3=FAIL, 4=inconclusive cell)"
+log "Report: ${FD_DIR}/fd_report.txt"
+exit "${rc}"

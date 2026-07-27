@@ -26,6 +26,14 @@ Usage:
   daily_forcing.png    - daily mean forcing per model level heatmap,
                          iteration 1 vs last  (requires daily_forcing_iter_NNN.nc4
                          in --output-dir, written every iteration)
+  convergence_log.png  - cost function J (and J_obs) vs iteration, log y-scale
+  daily_forcing_animation.gif - daily mean forcing heatmap animated across
+                         iterations, one frame per iteration
+  omf_map.png          - time-averaged innovation y − H(x) on lat-lon,
+                         first vs final iteration  (requires xco2_obs/xco2_sim
+                         in forcing_iter_NNN.nc4, written from 2026-07-09 on)
+  omf_timeseries.png   - daily mean ± std of y − H(x), first vs final iteration
+  omf_histogram.png    - histogram of y − H(x), first vs final iteration
 """
 
 import argparse
@@ -119,6 +127,62 @@ def plot_map(data, lats, lons, title, path,
             fontsize=8, color='0.3', va='bottom')
 
     plt.tight_layout()
+    plt.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f'  Saved: {path}')
+
+
+MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+               'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+
+def plot_map_months(data3d, lats, lons, title, path,
+                    cmap='RdBu_r', vmin=None, vmax=None, cbar_label='',
+                    start_month=1):
+    """Save a monthly field (nmon, nlat, nlon) as one multi-panel PNG.
+
+    Monthly-sigma counterpart of plot_map: shared color scale across the
+    panels (symmetric about 0 unless vmin/vmax given), one shared colorbar.
+    Panel m is labelled with calendar month start_month+m (start_month=1=Jan),
+    so a window that does not start in January is labelled correctly.
+    """
+    nmon = data3d.shape[0]
+    if vmin is None and vmax is None:
+        amax = max(np.abs(data3d).max(), 1e-12)
+        vmin, vmax = -amax, amax
+
+    lon2d, lat2d = np.meshgrid(lons, lats)
+    ncols = 4
+    nrows = int(np.ceil(nmon / ncols))
+    subplot_kw = {'projection': ccrs.PlateCarree()} if HAS_CARTOPY else {}
+    fig, axes = plt.subplots(nrows, ncols,
+                             figsize=(4.2 * ncols, 2.2 * nrows + 0.8),
+                             subplot_kw=subplot_kw)
+    axes = np.atleast_1d(axes).ravel()
+
+    im = None
+    for m in range(nmon):
+        ax = axes[m]
+        data = data3d[m]
+        if HAS_CARTOPY:
+            _add_land(ax)
+            im = ax.pcolormesh(lon2d, lat2d, data, cmap=cmap,
+                               vmin=vmin, vmax=vmax, shading='auto',
+                               transform=ccrs.PlateCarree(), zorder=1)
+            ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
+        else:
+            im = ax.pcolormesh(lon2d, lat2d, data, cmap=cmap,
+                               vmin=vmin, vmax=vmax, shading='auto')
+        name = MONTH_NAMES[(start_month - 1 + m) % 12]
+        ax.set_title(f'{name}   min={data.min():.2f} max={data.max():.2f}',
+                     fontsize=8)
+        ax.set_xticks([]); ax.set_yticks([])
+    for k in range(nmon, len(axes)):
+        axes[k].set_visible(False)
+
+    fig.suptitle(title, fontsize=12)
+    fig.colorbar(im, ax=list(axes[:nmon]), label=cbar_label,
+                 fraction=0.02, pad=0.02)
     plt.savefig(path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f'  Saved: {path}')
@@ -266,7 +330,7 @@ def plot_forcing_profile(data_first, data_last, iter_first, iter_last, plot_dir)
     ax.set_title('Adjoint forcing profile  ∂J/∂CO₂  per model level', fontsize=11)
 
     nlev   = next((d[2].shape[1] for d in [data_first, data_last] if d is not None), 72)
-    styles = [(data_first, iter_first, 'steelblue', 'Iteration 1'),
+    styles = [(data_first, iter_first, 'steelblue', f'Iteration {iter_first}'),
               (data_last,  iter_last,  'crimson',   f'Iteration {iter_last}')]
 
     for data, it, color, label in styles:
@@ -481,6 +545,237 @@ def plot_daily_forcing(snap_dir, iter_first, iter_last, plot_dir):
     print(f'  Saved: {path}')
 
 
+def _load_omf(path):
+    """Return (lat, lon, time, omf) with omf = y − H(x) [ppm] from a
+    forcing_iter_NNN.nc4 file, or None when the file predates the xco2_obs /
+    xco2_sim diagnostics (added 2026-07-09) or cannot be read."""
+    if not HAS_XARRAY:
+        return None
+    try:
+        ds = xr.open_dataset(path)
+        if 'xco2_obs' not in ds or 'xco2_sim' not in ds:
+            ds.close()
+            return None
+        lat  = ds['lat_obs'].values.astype(float)
+        lon  = ds['lon_obs'].values.astype(float)
+        tobs = ds['time_obs'].values
+        omf  = (ds['xco2_obs'].values - ds['xco2_sim'].values).astype(float)
+        ds.close()
+        return lat, lon, tobs, omf
+    except Exception as exc:
+        print(f'  WARNING: could not read {path}: {exc}')
+        return None
+
+
+def plot_omf(d_first, d_last, iter_first, iter_last, lats, lons, plot_dir):
+    """Innovation y − H(x) diagnostics for the first and final iteration.
+
+    d_first / d_last : (lat, lon, time, omf) tuples from _load_omf, or None.
+
+    Produces three figures:
+      omf_map.png        - time-averaged y − H(x) gridded on the sigma
+                           lat-lon grid, one panel per iteration, shared
+                           symmetric colour scale
+      omf_timeseries.png - daily mean ± 1 std of y − H(x), both iterations
+                           overlaid
+      omf_histogram.png  - histogram of y − H(x), both iterations overlaid,
+                           with mean / std / rms in the legend
+    """
+    import matplotlib.dates as mdates
+
+    if d_first is None and d_last is None:
+        print('  No y − H(x) data in the forcing files — skipping omf plots '
+              '(files written before 2026-07-09 lack xco2_obs/xco2_sim).')
+        return
+
+    styles = [(d_first, iter_first, 'steelblue'),
+              (d_last,  iter_last,  'crimson')]
+
+    # ---- 1. Time-averaged spatial map --------------------------------
+    lat_edges = np.concatenate([[lats[0]  - (lats[1]  - lats[0])  / 2],
+                                (lats[:-1] + lats[1:]) / 2,
+                                [lats[-1] + (lats[-1] - lats[-2]) / 2]])
+    lon_edges = np.concatenate([[lons[0]  - (lons[1]  - lons[0])  / 2],
+                                (lons[:-1] + lons[1:]) / 2,
+                                [lons[-1] + (lons[-1] - lons[-2]) / 2]])
+
+    def _grid(d):
+        if d is None:
+            return None, 0
+        lat_o, lon_o, _, omf = d
+        sums, _, _ = np.histogram2d(lat_o, lon_o, bins=[lat_edges, lon_edges],
+                                    weights=omf)
+        cnts, _, _ = np.histogram2d(lat_o, lon_o, bins=[lat_edges, lon_edges])
+        with np.errstate(invalid='ignore'):
+            grid = np.where(cnts > 0, sums / cnts, np.nan)
+        return grid, int(cnts.sum())
+
+    grid1, n1 = _grid(d_first)
+    grid2, n2 = _grid(d_last)
+
+    valid = [g for g in [grid1, grid2] if g is not None]
+    amax  = max(np.nanmax(np.abs(g)) for g in valid)
+    amax  = max(amax, 1e-30)
+
+    lon2d, lat2d = np.meshgrid(lons, lats)
+    proj_kw = {'projection': ccrs.PlateCarree()} if HAS_CARTOPY else {}
+    fig, axes = plt.subplots(1, 2, figsize=(15, 4.5), subplot_kw=proj_kw)
+    fig.suptitle('Time-averaged innovation  y − H(x)  [ppm]', fontsize=12)
+
+    for ax, grid, n_obs, itr in [(axes[0], grid1, n1, iter_first),
+                                 (axes[1], grid2, n2, iter_last)]:
+        if grid is None:
+            ax.set_title(f'Iteration {itr}\n(no data)', fontsize=10)
+            continue
+        if HAS_CARTOPY:
+            _add_land(ax)
+            im = ax.pcolormesh(lon2d, lat2d, grid, cmap='RdBu_r',
+                               vmin=-amax, vmax=amax, shading='auto',
+                               transform=ccrs.PlateCarree(), zorder=1)
+            ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
+            _set_ticks(ax)
+            ax.gridlines(alpha=0.3, linewidth=0.5, draw_labels=False)
+        else:
+            im = ax.pcolormesh(lon2d, lat2d, grid, cmap='RdBu_r',
+                               vmin=-amax, vmax=amax, shading='auto')
+            ax.set_xlabel('Longitude')
+            ax.set_ylabel('Latitude')
+            ax.grid(True, alpha=0.3, linewidth=0.5)
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label='ppm')
+        ax.set_title(f'Iteration {itr}  (N={n_obs:,})', fontsize=10)
+
+    plt.tight_layout()
+    path = os.path.join(plot_dir, 'omf_map.png')
+    plt.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f'  Saved: {path}')
+
+    # ---- 2. Daily-mean time series ------------------------------------
+    fig, ax = plt.subplots(figsize=(12, 5))
+    for d, itr, color in styles:
+        if d is None:
+            continue
+        _, _, tobs, omf = d
+        days = tobs.astype('datetime64[D]')
+        uniq, inv = np.unique(days, return_inverse=True)
+        mean_d = np.array([omf[inv == k].mean() for k in range(len(uniq))])
+        std_d  = np.array([omf[inv == k].std()  for k in range(len(uniq))])
+        dts    = uniq.astype('datetime64[ms]').astype(object)
+        ax.plot(dts, mean_d, '-o', color=color, markersize=4,
+                linewidth=1.5, label=f'Iteration {itr}')
+        ax.fill_between(dts, mean_d - std_d, mean_d + std_d,
+                        alpha=0.20, color=color)
+    ax.axhline(0, color='k', linewidth=0.7, linestyle='--')
+    ax.set_xlabel('Date')
+    ax.set_ylabel('y − H(x)  [ppm]')
+    ax.set_title('Daily mean innovation  y − H(x)  (shading = ±1 std)',
+                 fontsize=11)
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
+    plt.tight_layout()
+    path = os.path.join(plot_dir, 'omf_timeseries.png')
+    plt.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f'  Saved: {path}')
+
+    # ---- 3. Histogram --------------------------------------------------
+    fig, ax = plt.subplots(figsize=(8, 5))
+    all_omf = np.concatenate([d[3] for d, _, _ in styles if d is not None])
+    lim  = np.percentile(np.abs(all_omf), 99.5)
+    bins = np.linspace(-lim, lim, 61)
+    for d, itr, color in styles:
+        if d is None:
+            continue
+        omf  = d[3]
+        rms  = np.sqrt((omf ** 2).mean())
+        ax.hist(omf, bins=bins, color=color, alpha=0.45,
+                label=(f'Iteration {itr}:  mean={omf.mean():+.3f}  '
+                       f'std={omf.std():.3f}  rms={rms:.3f} ppm'))
+    ax.axvline(0, color='k', linewidth=0.7, linestyle='--')
+    ax.set_xlabel('y − H(x)  [ppm]')
+    ax.set_ylabel('Number of observations')
+    ax.set_title('Innovation histogram  y − H(x)', fontsize=11)
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    path = os.path.join(plot_dir, 'omf_histogram.png')
+    plt.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f'  Saved: {path}')
+
+
+def animate_daily_forcing(snap_dir, plot_dir):
+    """GIF: daily mean adjoint forcing heatmap, one frame per iteration.
+
+    Reads every daily_forcing_iterNNN.nc4 in snap_dir.  Each frame shows the
+    (day x model level) heatmap for one iteration, with a colour scale shared
+    across all iterations so frames are directly comparable.
+    """
+    if not HAS_XARRAY:
+        return
+
+    files = sorted(glob.glob(os.path.join(snap_dir, 'daily_forcing_iter*.nc4')))
+    frames, frame_iters, dates = [], [], None
+    for fpath in files:
+        itr = int(os.path.basename(fpath)
+                  .split('daily_forcing_iter')[1].split('.')[0])
+        try:
+            ds = xr.open_dataset(fpath)
+            mf = ds['mean_forcing'].values.astype(float)   # (n_days, nlev)
+            if dates is None:
+                dates = ds['date'].values
+            ds.close()
+        except Exception as exc:
+            print(f'  WARNING: could not read {fpath}: {exc}')
+            continue
+        frames.append(mf)
+        frame_iters.append(itr)
+
+    if len(frames) < 2:
+        if files:
+            print('  Daily forcing animation needs at least 2 iterations — skipping.')
+        return
+
+    n_days, nlev = frames[0].shape
+    day_labels = [str(np.datetime_as_string(d, unit='D')) for d in dates]
+
+    # Shared symmetric colour scale across every iteration
+    amax = max(np.nanmax(np.abs(m)) for m in frames)
+    amax = max(amax, 1e-30)
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    im = ax.imshow(frames[0].T, aspect='auto', origin='lower',
+                   cmap='RdBu_r', vmin=-amax, vmax=amax,
+                   extent=[-0.5, n_days - 0.5, 0.5, nlev + 0.5])
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label='∂J/∂CO₂')
+    ax.set_xlabel('Day')
+    ax.set_ylabel('Model level  (1 = surface)')
+    ax.set_ylim(0.5, nlev + 0.5)
+    step = max(1, n_days // 10)
+    ax.set_xticks(range(0, n_days, step))
+    ax.set_xticklabels(day_labels[::step], rotation=30, ha='right', fontsize=8)
+    def _title_text(k):
+        return ('Daily mean adjoint forcing ∂J/∂CO₂ per model level  '
+                f'[1/(kg CO₂/kg dry air)]  —  iteration {frame_iters[k]}')
+
+    # Set the frame-0 title before tight_layout so space is reserved for it
+    title = ax.set_title(_title_text(0), fontsize=10)
+    fig.tight_layout()
+
+    def update(k):
+        im.set_array(frames[k].T)
+        title.set_text(_title_text(k))
+        return im, title
+
+    anim = animation.FuncAnimation(fig, update, frames=len(frames),
+                                   interval=700, blit=False)
+    gif_path = os.path.join(plot_dir, 'daily_forcing_animation.gif')
+    anim.save(gif_path, writer=animation.PillowWriter(fps=1.5), dpi=100)
+    plt.close()
+    print(f'  Saved: {gif_path}')
+
+
 def parse_log_history(log_path):
     """Recover per-iteration (J, J_obs, |g|_inf) from the optimizer log.
 
@@ -556,14 +851,34 @@ def main():
     nlat = args.nlat or int(s['nlat'])
     nlon = args.nlon or int(s['nlon'])
 
-    sigma      = s['x_next'].reshape(nlat, nlon)
-    sigma_prev = s['x_prev'].reshape(nlat, nlon)
-    grad       = s['g_prev'].reshape(nlat, nlon)
+    # Monthly state (12, nlat, nlon) vs single-window state (nlat, nlon):
+    # infer the month count from the state-vector size.
+    n2d  = nlat * nlon
+    nmon = s['x_next'].size // n2d
+    if nmon * n2d != s['x_next'].size:
+        raise SystemExit(f'state x_next size {s["x_next"].size} is not a '
+                         f'multiple of nlat*nlon={n2d}')
+    monthly = nmon > 1
+    shape   = (nmon, nlat, nlon) if monthly else (nlat, nlon)
+
+    sigma      = s['x_next'].reshape(shape)
+    sigma_prev = s['x_prev'].reshape(shape)
+    grad       = s['g_prev'].reshape(shape)
     lats, lons = make_grid(nlat, nlon)
+    # Calendar month of the first field (from the state file; older monthly
+    # states without it are assumed to start in January).
+    start_month = int(s['start_month']) if 'start_month' in s.files else 1
+    if monthly:
+        def map_one(*a, **k):
+            return plot_map_months(*a, start_month=start_month, **k)
+    else:
+        map_one = plot_map
 
     print(f'State file      : {args.state_file}')
     print(f'Iterations done : {it}')
     print(f'J               : {J:.6e}')
+    if monthly:
+        print(f'Monthly state   : {nmon} months')
     print(f'sigma           : min={sigma.min():.4f}  max={sigma.max():.4f}  '
           f'mean={sigma.mean():.4f}')
     print(f'|grad|_inf      : {np.abs(grad).max():.4e}')
@@ -572,39 +887,39 @@ def main():
     # ------------------------------------------------------------------
     # 1. Sigma map
     # ------------------------------------------------------------------
-    plot_map(sigma, lats, lons,
-             title=f'CO₂ flux scaling factor σ  (after iteration {it})',
-             path=os.path.join(plot_dir, 'sigma_map.png'),
-             cmap='RdBu_r', vmin=0.0, vmax=2.0,
-             cbar_label='σ  [ ]')
+    map_one(sigma, lats, lons,
+            title=f'CO₂ flux scaling factor σ  (after iteration {it})',
+            path=os.path.join(plot_dir, 'sigma_map.png'),
+            cmap='RdBu_r', vmin=0.0, vmax=2.0,
+            cbar_label='σ  [ ]')
 
     # ------------------------------------------------------------------
     # 2. Sigma departure from prior  (sigma - 1)
     # ------------------------------------------------------------------
-    plot_map(sigma - 1.0, lats, lons,
-             title=f'Departure from prior  σ − 1  (after iteration {it})',
-             path=os.path.join(plot_dir, 'sigma_departure.png'),
-             cmap='RdBu_r',
-             cbar_label='σ − 1  [ ]')
+    map_one(sigma - 1.0, lats, lons,
+            title=f'Departure from prior  σ − 1  (after iteration {it})',
+            path=os.path.join(plot_dir, 'sigma_departure.png'),
+            cmap='RdBu_r',
+            cbar_label='σ − 1  [ ]')
 
     # ------------------------------------------------------------------
     # 3. Gradient map
     # ------------------------------------------------------------------
-    plot_map(grad, lats, lons,
-             title=f'Total gradient ∂J/∂σ  (iteration {it})',
-             path=os.path.join(plot_dir, 'gradient_map.png'),
-             cmap='RdBu_r',
-             cbar_label='∂J/∂σ')
+    map_one(grad, lats, lons,
+            title=f'Total gradient ∂J/∂σ  (iteration {it})',
+            path=os.path.join(plot_dir, 'gradient_map.png'),
+            cmap='RdBu_r',
+            cbar_label='∂J/∂σ')
 
     # ------------------------------------------------------------------
     # 4. Last step  (sigma_next - sigma_prev)
     # ------------------------------------------------------------------
     if it >= 2:
-        plot_map(sigma - sigma_prev, lats, lons,
-                 title=f'Last optimizer step  Δσ = σ_next − σ_prev  (iteration {it})',
-                 path=os.path.join(plot_dir, 'sigma_step.png'),
-                 cmap='RdBu_r',
-                 cbar_label='Δσ  [ ]')
+        map_one(sigma - sigma_prev, lats, lons,
+                title=f'Last optimizer step  Δσ = σ_next − σ_prev  (iteration {it})',
+                path=os.path.join(plot_dir, 'sigma_step.png'),
+                cmap='RdBu_r',
+                cbar_label='Δσ  [ ]')
 
     # ------------------------------------------------------------------
     # 5. Convergence history (requires per-iter snapshot files)
@@ -648,6 +963,7 @@ def main():
                 ax1.plot(iters_obs, J_obss_clean,
                          'b--s', markersize=4, linewidth=1.2, label='J_obs')
             ax1.set_ylabel('Cost  J')
+            ax1.set_ylim(bottom=0)
             ax1.set_title('4D-Var convergence history')
             ax1.legend(fontsize=9)
             ax1.grid(True, which='both', alpha=0.3)
@@ -664,6 +980,27 @@ def main():
             plt.savefig(conv_path, dpi=150, bbox_inches='tight')
             plt.close()
             print(f'  Saved: {conv_path}')
+
+            # 5b. Cost function on a log y-scale
+            fig, ax = plt.subplots(figsize=(8, 5))
+            ax.semilogy(iters, Js, 'k-o', markersize=5, linewidth=1.5,
+                        label='J (total)')
+            if any(v is not None for v in J_obss):
+                J_obss_clean = [v for v in J_obss if v is not None]
+                iters_obs    = [iters[k] for k, v in enumerate(J_obss)
+                                if v is not None]
+                ax.semilogy(iters_obs, J_obss_clean,
+                            'b--s', markersize=4, linewidth=1.2, label='J_obs')
+            ax.set_xlabel('Iteration')
+            ax.set_ylabel('Cost  J  (log scale)')
+            ax.set_title('4D-Var cost function  (log y-scale)')
+            ax.legend(fontsize=9)
+            ax.grid(True, which='both', alpha=0.3)
+            plt.tight_layout()
+            conv_log_path = os.path.join(plot_dir, 'convergence_log.png')
+            plt.savefig(conv_log_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            print(f'  Saved: {conv_log_path}')
         elif snap_files:
             print('  Convergence plot needs at least 2 iterations — skipping.')
     elif snap_dir:
@@ -683,7 +1020,13 @@ def main():
             i  = int(sv['iteration']) - 1
             if i < 1:
                 continue
-            frames.append(sv['x_prev'].reshape(nlat, nlon))
+            xf = sv['x_prev']
+            if monthly:
+                # month-mean sigma per iteration (per-month detail is in the
+                # sigma_map.png panels); title amended below
+                frames.append(xf.reshape(nmon, nlat, nlon).mean(axis=0))
+            else:
+                frames.append(xf.reshape(nlat, nlon))
             frame_iters.append(i)
 
         if len(frames) >= 2:
@@ -721,8 +1064,9 @@ def main():
                 data = frames[frame_idx]
                 i    = frame_iters[frame_idx]
                 im.set_array(data.ravel())
+                _lbl = 'month-mean σ' if monthly else 'σ'
                 title.set_text(
-                    f'CO₂ flux scaling factor σ  (iteration {i})')
+                    f'CO₂ flux scaling factor {_lbl}  (iteration {i})')
                 stats_text.set_text(
                     f'min={data.min():.3f}  max={data.max():.3f}  '
                     f'mean={data.mean():.3f}  |inf|={np.abs(data).max():.3e}')
@@ -778,6 +1122,14 @@ def main():
 
             # 10. Daily mean forcing heatmap: iter 1 vs last
             plot_daily_forcing(snap_dir, iter_first, iter_last, plot_dir)
+
+            # 11. Daily mean forcing animated across iterations
+            animate_daily_forcing(snap_dir, plot_dir)
+
+            # 12. Innovation y − H(x): map, time series, histogram
+            #     (requires xco2_obs/xco2_sim in the consolidated files)
+            plot_omf(_load_omf(forcing_files[0]), _load_omf(forcing_files[-1]),
+                     iter_first, iter_last, lats, lons, plot_dir)
 
     # ------------------------------------------------------------------
     # 12. Obs time series  (reads per-checkpoint forcing files directly;

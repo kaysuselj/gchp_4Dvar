@@ -21,7 +21,7 @@ Usage:
         --forcing-dir  /path/forcing_files \
         --adj-output   /path/adjoint/OutputDir \
         --nlat 46 --nlon 72 \
-        --sigma-b 0.5 --m 10 \
+        --sigma-b 0.2 --m 10 \
         --t-start 2019-01-01 \
         [--gtol 1e-5] [--ftol 1e-8]
 """
@@ -101,6 +101,35 @@ def read_J_obs(forcing_dir):
     return float(open(j_path).read().strip())
 
 
+def read_N_obs(forcing_dir):
+    """Matched-obs count written by co2_adjoint_forcing_osse.py (None if absent)."""
+    n_path = os.path.join(forcing_dir, 'N_obs.txt')
+    if not os.path.exists(n_path):
+        return None
+    return int(open(n_path).read().strip())
+
+
+def print_balance_diagnostics(J_obs, J_b, g_obs, g_b, n_obs, n_ctrl):
+    """Chi-square and obs/background balance diagnostics.
+
+    2*J_obs/N_obs ~ 1 when R is statistically consistent; the gradient ratio
+    shows how strongly observations out-pull the background at the extremes
+    (>> 1 means the background barely constrains the most-active cells).
+    """
+    if n_obs:
+        print(f'          chi2: 2*J_obs/N_obs={2*J_obs/n_obs:.3f} (N_obs={n_obs})  '
+              f'2*J_b/N_ctrl={2*J_b/n_ctrl:.4f} (N_ctrl={n_ctrl})')
+    gb_inf = np.abs(g_b).max()
+    gb_rms = np.sqrt((g_b**2).mean())
+    if gb_inf < 1e-15:
+        print('          balance: g_b = 0 (sigma at prior) — ratios undefined')
+    else:
+        print(f'          balance: |g_obs|inf/|g_b|inf='
+              f'{np.abs(g_obs).max()/gb_inf:.1f}  '
+              f'rms(g_obs)/rms(g_b)='
+              f'{np.sqrt((g_obs**2).mean())/gb_rms:.1f}')
+
+
 # ---------------------------------------------------------------------------
 # L-BFGS-B two-loop recursion  (no line search; unit step)
 # ---------------------------------------------------------------------------
@@ -154,7 +183,7 @@ def main():
                         help='Adjoint OutputDir containing GEOSChem.Adjoint.*.nc4')
     parser.add_argument('--nlat',    type=int,   default=46)
     parser.add_argument('--nlon',    type=int,   default=72)
-    parser.add_argument('--sigma-b', type=float, default=0.5)
+    parser.add_argument('--sigma-b', type=float, default=0.2)
     parser.add_argument('--m',       type=int,   default=10,
                         help='L-BFGS-B memory (number of vector pairs)')
     parser.add_argument('--t-start', default='2019-01-01')
@@ -213,6 +242,8 @@ def main():
     print(f'          |g_obs|_inf={np.abs(g_obs).max():.4e}  '
           f'|g_b|_inf={np.abs(g_b).max():.4e}  '
           f'|g|_inf={np.abs(g_cur).max():.4e}')
+    print_balance_diagnostics(J_obs, J_b, g_obs, g_b,
+                              read_N_obs(args.forcing_dir), n)
 
     # ------------------------------------------------------------------
     # Convergence check

@@ -9,12 +9,18 @@ the cell assignment using State_Grid%{X,Y}{Min,Max} cell boundaries.
 This is the OSSE version using synthetic observations from ORCHIDEE-ECCO2.
 
 Usage:
-    python ./co2_adjoint_forcing_osse.py gchp_file output_dir \\
+    python ./co2_adjoint_forcing_osse.py gchp_file [gchp_file ...] output_dir \\
         --ts-chem 1200 \\
         --t-start 2016-01-01T00:00:00 --t-end 2016-01-31T23:59:59
 
 Arguments:
-    gchp_file    : GCHP sat-track netCDF file (GEOSChem.sat_track.*)
+    gchp_file    : one or more GCHP sat-track netCDF files
+                   (GEOSChem.sat_track.*).  A year-long run keeps its 12
+                   monthly sat_track files as-is: pass them all and the
+                   results are joined here — J summed over files, forcing
+                   merged onto one checkpoint grid.  Files are processed one
+                   at a time (never concatenated in memory) and must be
+                   disjoint in time, which MAPL monthly files are.
     output_dir   : output directory (created if absent); one file per checkpoint
 
     --ts-chem    : chemistry timestep [s] for checkpoint binning (required)
@@ -46,6 +52,7 @@ Notes:
 
 import os
 import sys
+import glob
 import argparse
 import numpy as np
 import pandas as pd
@@ -304,9 +311,79 @@ def regrid_latlon_to_cubedsphere(ds_ll, cs_res):
 # Core computation
 # ---------------------------------------------------------------------------
 
-def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s):
+def _window_months(t_start, t_end):
+    """Calendar months the window [t_start, t_end] spans, as {(year, month)}.
+
+    A t_end anywhere within the FIRST DAY of a month is treated as ending at
+    that month boundary: run scripts pad the window end by up to a day
+    (e.g. --t-end 2016-02-01T23:59:59 for a January window), and a monthly
+    run 2016-01-01 -> 2017-01-01 must span 12 months, not 13.
     """
-    Load GCHP sat-track file, apply obs operator, and collect per-obs forcing.
+    end_eff = t_end
+    if t_end.day == 1:
+        end_eff = t_end.normalize() - pd.Timedelta(seconds=1)
+    periods = pd.period_range(pd.Period(t_start, 'M'), pd.Period(end_eff, 'M'))
+    return {(p.year, p.month) for p in periods}
+
+
+def _check_input_files(gchp_files, t_start, t_end):
+    """Fail loudly on the silent-failure modes of a multi-month run.
+
+    Reads only the time coordinate of each file and enforces:
+      - file count == number of months the window spans (a 12-month run must
+        supply exactly 12 monthly sat_track files);
+      - every month of the window is covered by exactly one file.  A month
+        in two files means a stale sat_track file from a previous simulation
+        is in the list; a month in none means its observations would
+        silently be dropped.
+
+    NOTE: a stale file from a previous *iteration* over the same window is
+    indistinguishable by content — the run script must clear old sat_track
+    files from OutputDir before each forward run.
+    """
+    expected_months = _window_months(t_start, t_end)
+    month_files = {}   # (year, month) -> [files with in-window profiles]
+    for f in gchp_files:
+        with xr.open_dataset(f) as ds:
+            times = pd.DatetimeIndex(pd.to_datetime(ds['time'].values).round('s'))
+        in_win = times[(times >= t_start) & (times <= t_end)]
+        if len(in_win) == 0:
+            print(f'WARNING: no profiles inside the window in '
+                  f'{os.path.basename(f)} — stale file from a previous '
+                  'simulation?')
+        for ym in sorted(set(zip(in_win.year, in_win.month))):
+            month_files.setdefault(ym, []).append(f)
+
+    problems = []
+    if len(gchp_files) != len(expected_months):
+        problems.append(
+            f'got {len(gchp_files)} input file(s) but the window '
+            f'{t_start} -> {t_end} spans {len(expected_months)} month(s); '
+            'a monthly sat_track run must supply exactly one file per month')
+    missing = expected_months - set(month_files)
+    if missing:
+        problems.append('no input file covers '
+                        + ', '.join(f'{y}-{m:02d}' for y, m in sorted(missing)))
+    for (y, m), fs in sorted(month_files.items()):
+        if len(fs) > 1:
+            problems.append(
+                f'{y}-{m:02d} appears in {len(fs)} files — stale sat_track '
+                'file from a previous simulation? '
+                + ', '.join(os.path.basename(x) for x in fs))
+    if problems:
+        raise ValueError('Input sat_track check FAILED:\n  - '
+                         + '\n  - '.join(problems))
+    print(f'Input check OK: {len(gchp_files)} file(s), one per month, '
+          f'covering all {len(expected_months)} month(s) of the window')
+
+
+def _accumulate_forcing(gchp_files, t_start, t_end, ts_chem_s,
+                        obs_error_inflation=1.0):
+    """
+    Apply the obs operator to one or more GCHP sat-track files (e.g. the 12
+    monthly files of a year-long run) and merge everything onto a single
+    checkpoint grid.  Files are opened, matched, and closed one at a time,
+    so the joined dataset never exists in memory or on disk.
 
     Each GCHP profile is matched to the nearest OCO-2 observation by time,
     lat, and lon (within tolerances).  Forcing is accumulated per observation,
@@ -316,8 +393,49 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s):
     Returns
     -------
     checkpoints  : pd.DatetimeIndex  all checkpoint times in the window
-    obs_by_ckpt  : dict {ckpt_idx: [(lat, lon, force_profile), ...]}
-    levs         : model level coordinate array
+    obs_by_ckpt  : dict {ckpt_idx: [(lat, lon, force_profile, t_obs,
+                                     xco2_obs_ppm, xco2_sim_ppm,
+                                     xco2_std_ppm), ...]}  merged over files
+    levs         : model level coordinate array (identical across files)
+    J_total      : cost function summed over all files
+    """
+    _check_input_files(gchp_files, t_start, t_end)
+
+    checkpoints = make_checkpoint_grid(t_start, t_end, ts_chem_s)
+    n_ckpt      = len(checkpoints)
+    obs_by_ckpt = {i: [] for i in range(n_ckpt)}
+    J_total     = 0.0
+    levs        = None
+    stats       = {'matched': 0, 'time_rejected': 0, 'spatial_rejected': 0}
+
+    for gchp_file in gchp_files:
+        print(f'=== {os.path.basename(gchp_file)}')
+        levs_f, J_file = _accumulate_forcing_one_file(
+            gchp_file, checkpoints, obs_by_ckpt, stats, t_start, t_end,
+            ts_chem_s, obs_error_inflation)
+        J_total += J_file
+        if levs is None:
+            levs = levs_f
+        elif not np.array_equal(levs, levs_f):
+            raise ValueError(f'{gchp_file}: lev coordinate differs from '
+                             'earlier input files')
+
+    n_with_obs = sum(1 for obs_list in obs_by_ckpt.values() if obs_list)
+    print(f"Total observations matched: {stats['matched']}  "
+          f'({n_with_obs}/{n_ckpt} checkpoints have at least one obs)')
+    print(f"Rejected by time tolerance: {stats['time_rejected']}")
+    print(f"Rejected by spatial tolerance: {stats['spatial_rejected']}")
+    print(f'Cost function J = {J_total:.6e}')
+
+    return checkpoints, obs_by_ckpt, levs, J_total
+
+
+def _accumulate_forcing_one_file(gchp_file, checkpoints, obs_by_ckpt, stats,
+                                 t_start, t_end, ts_chem_s,
+                                 obs_error_inflation=1.0):
+    """Match one sat-track file's profiles and append into obs_by_ckpt.
+
+    Returns (levs, J_file); updates obs_by_ckpt and stats in place.
     """
     OBS_MATCH_TOL_TIME = pd.Timedelta(seconds=60)  # 60 seconds
     OBS_MATCH_TOL_LAT  = 0.1   # degrees latitude
@@ -332,13 +450,8 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s):
     if 'longitude' not in ds_gchp and 'lon' not in ds_gchp:
         raise ValueError('GCHP sat-track file must contain longitude coordinate')
 
-    nlev = ds_gchp.sizes['lev']
-    levs = ds_gchp['lev'].values
-
-    checkpoints = make_checkpoint_grid(t_start, t_end, ts_chem_s)
-    n_ckpt      = len(checkpoints)
-    obs_by_ckpt = {i: [] for i in range(n_ckpt)}
-    J_total     = 0.0
+    levs   = ds_gchp['lev'].values
+    J_file = 0.0
 
     # Restrict GCHP profiles to the assimilation window
     times_gchp  = pd.DatetimeIndex(ds_gchp['time'].values)
@@ -348,13 +461,11 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s):
 
     if len(times_win) == 0:
         print('No GCHP profiles within the assimilation window.')
-        return checkpoints, obs_by_ckpt, levs, J_total
+        ds_gchp.close()
+        return levs, J_file
 
     # Only read OCO-2 months that are actually needed
     year_months = sorted(set(zip(times_win.year, times_win.month)))
-    total = 0
-    n_time_rejected = 0
-    n_spatial_rejected = 0
 
     for year, month in year_months:
         print(f'Processing {year}-{month:02d}')
@@ -399,6 +510,12 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s):
             print('  WARNING: no uncertainty variable found, using 1 ppm')
             xco2_std_all = np.ones(len(obs_times))
 
+        # Observation-error inflation: accounts for correlated retrieval
+        # errors that a diagonal R overcounts.  Scales J_obs and the adjoint
+        # forcing by 1/inflation^2.
+        if obs_error_inflation != 1.0:
+            xco2_std_all = xco2_std_all * obs_error_inflation
+
         # Loop over GCHP profiles; match each to an OCO-2 obs by time, lat, lon
         for j in range(len(gchp_times_m)):
             t_gchp   = gchp_times_m[j]
@@ -410,7 +527,7 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s):
             time_mask   = time_deltas <= OBS_MATCH_TOL_TIME
 
             if not np.any(time_mask):
-                n_time_rejected += 1
+                stats['time_rejected'] += 1
                 continue
 
             # Among time-matched obs, find the closest in lat/lon
@@ -428,7 +545,7 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s):
             # Check if the closest match is within tolerances
             if (lat_diffs[min_spatial_idx] > OBS_MATCH_TOL_LAT or
                 lon_diffs[min_spatial_idx] > OBS_MATCH_TOL_LON):
-                n_spatial_rejected += 1
+                stats['spatial_rejected'] += 1
                 continue
 
             # Map back to original observation index
@@ -463,24 +580,25 @@ def _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s):
                 prs_mod_j, prs_obs_j,
                 xAK_all[idx_obs], xco2_hat_ppm, xco2_obs_ppm, xco2_std_ppm,
             )
-            J_total += 0.5 * (diff / xco2_std_ppm) ** 2
-            # Normalize lon to [-180, 180) and store per-obs entry
+            J_file += 0.5 * (diff / xco2_std_ppm) ** 2
+            # Normalize lon to [-180, 180) and store per-obs entry.
+            # float32 keeps the year-long merged store bounded; output files
+            # are float32 anyway.
             lon_norm = float((float(obs_lons[idx_obs]) + 180) % 360 - 180)
             obs_by_ckpt[ckpt_idx].append((
                 float(obs_lats[idx_obs]),
                 lon_norm,
-                force_model * PPM_TO_MMR_ADJ,   # ppm^-1 → 1/(kg_CO2/kg_dry_air)
+                (force_model * PPM_TO_MMR_ADJ).astype(np.float32),
+                                                # ppm^-1 → 1/(kg_CO2/kg_dry_air)
+                np.datetime64(obs_times[idx_obs], 'ns'),
+                xco2_obs_ppm,                   # y      [ppm]
+                xco2_hat_ppm,                   # H(x)   [ppm]
+                xco2_std_ppm,                   # sigma  [ppm]
             ))
-            total += 1
+            stats['matched'] += 1
 
-    n_with_obs = sum(1 for obs_list in obs_by_ckpt.values() if obs_list)
-    print(f'Total observations matched: {total}  '
-          f'({n_with_obs}/{n_ckpt} checkpoints have at least one obs)')
-    print(f'Rejected by time tolerance: {n_time_rejected}')
-    print(f'Rejected by spatial tolerance: {n_spatial_rejected}')
-    print(f'Cost function J = {J_total:.6e}')
-
-    return checkpoints, obs_by_ckpt, levs, J_total
+    ds_gchp.close()
+    return levs, J_file
 
 
 # ---------------------------------------------------------------------------
@@ -549,13 +667,25 @@ def write_consolidated(output_path, obs_by_ckpt, levs):
     count is very large.
 
     forcing : (n_total_obs, nlev)  — same units as the per-checkpoint files.
+
+    Also stores per-obs XCO2 diagnostics so y − H(x) plots can be made
+    without rerunning the forward model:
+        time_obs  (obs)  observation time
+        xco2_obs  (obs)  observed XCO2          y      [ppm]
+        xco2_sim  (obs)  simulated XCO2         H(x)   [ppm]
+        xco2_std  (obs)  observation uncertainty sigma [ppm]
     """
     all_lats, all_lons, all_forcing = [], [], []
+    all_time, all_y, all_hx, all_std = [], [], [], []
     for obs_list in obs_by_ckpt.values():
-        for lat, lon, force in obs_list:
+        for lat, lon, force, t_obs, y, hx, std in obs_list:
             all_lats.append(lat)
             all_lons.append(lon)
             all_forcing.append(force)
+            all_time.append(t_obs)
+            all_y.append(y)
+            all_hx.append(hx)
+            all_std.append(std)
 
     if not all_lats:
         print('  No observations — consolidated forcing file not written.')
@@ -572,11 +702,22 @@ def write_consolidated(output_path, obs_by_ckpt, levs):
             'forcing': (['obs', 'lev'],
                         np.array(all_forcing, dtype=np.float32),
                         FORCING_ATTRS),
+            'time_obs': (['obs'], np.array(all_time, dtype='datetime64[ns]'),
+                         {'long_name': 'Observation time'}),
+            'xco2_obs': (['obs'], np.array(all_y, dtype=np.float32),
+                         {'long_name': 'Observed XCO2  (y)', 'units': 'ppm'}),
+            'xco2_sim': (['obs'], np.array(all_hx, dtype=np.float32),
+                         {'long_name': 'Simulated XCO2  H(x)', 'units': 'ppm'}),
+            'xco2_std': (['obs'], np.array(all_std, dtype=np.float32),
+                         {'long_name': 'XCO2 observation uncertainty sigma',
+                          'units': 'ppm'}),
         },
         coords={'lev': levs},
     )
     ds['lev'].attrs = {'long_name': 'Model level (1=surface, LLPAR=TOA)'}
-    ds.to_netcdf(output_path, encoding={'forcing': FORCING_ENCODING})
+    ds.to_netcdf(output_path,
+                 encoding={'forcing': FORCING_ENCODING,
+                           'time_obs': TIME_ENCODING})
     print(f'  Consolidated forcing written: {output_path}  ({n_obs} obs total)')
 
 
@@ -602,8 +743,8 @@ def write_daily_forcing(output_path, obs_by_ckpt, levs, checkpoints):
         t_day = pd.Timestamp(checkpoints[ckpt_idx]).normalize()
         if t_day not in daily:
             daily[t_day] = []
-        for _, _, force in obs_list:
-            daily[t_day].append(force)   # force is (nlev,)
+        for entry in obs_list:
+            daily[t_day].append(entry[2])   # force_profile is (nlev,)
 
     if not daily:
         print('  No observations — daily forcing file not written.')
@@ -643,18 +784,48 @@ def write_daily_forcing(output_path, obs_by_ckpt, levs, checkpoints):
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def co2_adjoint_forcing(gchp_file, output_dir, ts_chem_s, t_start, t_end,
-                        save_diagnostics=True):
+def co2_adjoint_forcing(gchp_files, output_dir, ts_chem_s, t_start, t_end,
+                        save_diagnostics=True, obs_error_inflation=1.0):
+
+    if isinstance(gchp_files, (str, os.PathLike)):
+        gchp_files = [gchp_files]
 
     os.makedirs(output_dir, exist_ok=True)
+    if obs_error_inflation != 1.0:
+        print(f'Observation-error inflation factor: {obs_error_inflation} '
+              f'(J_obs and forcing scale by 1/{obs_error_inflation**2:g})')
 
     checkpoints, obs_by_ckpt, levs, J = \
-        _accumulate_forcing(gchp_file, t_start, t_end, ts_chem_s)
+        _accumulate_forcing(gchp_files, t_start, t_end, ts_chem_s,
+                            obs_error_inflation)
+
+    # Remove forcing files left over from a previous simulation.  Everything
+    # on the current checkpoint grid is overwritten below, but a file at a
+    # timestamp OFF the grid (older run with a different window or timestep)
+    # would sit there and be read by the adjoint.
+    expected = {_checkpoint_filename(output_dir, t) for t in checkpoints}
+    stale = [f for f in glob.glob(os.path.join(output_dir,
+                                               'CO2_adjoint_forcing_*.nc4'))
+             if f not in expected]
+    for f in stale:
+        os.remove(f)
+    if stale:
+        print(f'Removed {len(stale)} stale forcing file(s) from a previous '
+              f'simulation in {output_dir}')
 
     j_path = os.path.join(output_dir, 'J_value.txt')
     with open(j_path, 'w') as fh:
         fh.write(f'{J:.10e}\n')
     print(f'J written to {j_path}')
+
+    # Total matched-observation count, for chi-square diagnostics in the
+    # L-BFGS step (2*J_obs/N_obs ~ 1 when R is consistent).  Separate file:
+    # J_value.txt must stay single-value (readers float() the whole file).
+    n_obs_total = sum(len(v) for v in obs_by_ckpt.values())
+    n_path = os.path.join(output_dir, 'N_obs.txt')
+    with open(n_path, 'w') as fh:
+        fh.write(f'{n_obs_total}\n')
+    print(f'N_obs = {n_obs_total} written to {n_path}')
 
     nlev = len(levs)
     n_with_obs = 0
@@ -693,7 +864,9 @@ if __name__ == '__main__':
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument('gchp_file',   help='GCHP sat-track netCDF file')
+    parser.add_argument('gchp_files', nargs='+', metavar='gchp_file',
+                        help='GCHP sat-track netCDF file(s); pass ALL monthly '
+                             'files covering the assimilation window')
     parser.add_argument('output_dir',  help='Output directory (created if absent)')
     parser.add_argument('--ts-chem', type=int, required=True, dest='ts_chem_s',
                         help='Chemistry timestep in seconds')
@@ -704,13 +877,21 @@ if __name__ == '__main__':
     parser.add_argument('--no-save-diagnostics', dest='save_diagnostics',
                         action='store_false', default=True,
                         help='Skip writing forcing_all_obs.nc4 (use for large obs counts)')
+    parser.add_argument('--obs-error-inflation', type=float, default=1.0,
+                        help='Multiply all observation uncertainties by this '
+                             'factor (accounts for correlated retrieval '
+                             'errors; scales J_obs and forcing by 1/f^2)')
     args = parser.parse_args()
 
+    if args.obs_error_inflation <= 0:
+        parser.error('--obs-error-inflation must be > 0')
+
     co2_adjoint_forcing(
-        gchp_file        = args.gchp_file,
+        gchp_files       = args.gchp_files,
         output_dir       = args.output_dir,
         ts_chem_s        = args.ts_chem_s,
         t_start          = pd.Timestamp(args.t_start),
         t_end            = pd.Timestamp(args.t_end),
         save_diagnostics = args.save_diagnostics,
+        obs_error_inflation = args.obs_error_inflation,
     )

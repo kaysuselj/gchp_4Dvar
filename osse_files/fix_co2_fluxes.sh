@@ -11,13 +11,21 @@
 # Usage: bash fix_co2_fluxes.sh YEAR
 # Example: bash fix_co2_fluxes.sh 2016
 
-if [ $# -ne 1 ]; then
-    echo "Usage: $0 YEAR"
-    echo "Example: $0 2016"
+if [ $# -lt 1 ] || [ $# -gt 2 ]; then
+    echo "Usage: $0 YEAR [COMPONENT]"
+    echo "  COMPONENT (optional): ALL (default) | FF | OCEAN | NBE | GPP | TER"
+    echo "Example: $0 2016        # all components"
+    echo "Example: $0 2016 NBE    # only balanced biosphere"
     exit 1
 fi
 
 YEAR=$1
+
+# Optional 2nd arg: which component(s) to (re)process. Default ALL.
+#   ALL | FF | OCEAN | NBE | GPP | TER
+# Example: bash fix_co2_fluxes.sh 2016 NBE   # only rebuild the balanced biosphere
+COMPONENT="${2:-ALL}"
+want() { [[ "${COMPONENT}" == "ALL" || "${COMPONENT}" == "$1" ]]; }
 
 # Source and destination directories
 SRC_BASE="/nobackupp17/jliu7/INVENTORY/V4"
@@ -28,28 +36,21 @@ echo "Fixing emission files for year ${YEAR}"
 echo "========================================"
 echo ""
 
-# Check if NCO tools are available
-if ! command -v ncatted &> /dev/null; then
-    echo "ERROR: ncatted (NCO tools) not found. Load the NCO module:"
-    echo "  module load nco"
-    exit 1
-fi
-
-if ! command -v ncap2 &> /dev/null; then
-    echo "ERROR: ncap2 (NCO tools) not found. Load the NCO module:"
-    echo "  module load nco"
-    exit 1
-fi
-
-if ! command -v ncrename &> /dev/null; then
-    echo "ERROR: ncrename (NCO tools) not found. Load the NCO module:"
-    echo "  module load nco"
-    exit 1
+# Check if NCO tools are available (NBE is now pure-python and needs no NCO)
+if want FF || want OCEAN || want GPP || want TER; then
+    for tool in ncatted ncap2 ncrename ncecat; do
+        if ! command -v ${tool} &> /dev/null; then
+            echo "ERROR: ${tool} (NCO tools) not found. Load the NCO module:"
+            echo "  module load nco"
+            exit 1
+        fi
+    done
 fi
 
 # -----------------------------------------------------------------------------
 # 1. Fix Fossil Fuel files (daily: YYYY/MM/DD.nc)
 # -----------------------------------------------------------------------------
+if want FF; then
 echo "1. Processing Fossil Fuel emissions (daily files)..."
 SRC_FF="${SRC_BASE}/Fossilfuel/FF_regrid2/${YEAR}"
 DEST_FF="${DEST_BASE}/Fossilfuel/FF_regrid2/${YEAR}"
@@ -95,12 +96,14 @@ else
     FF_COUNT=$(find "${DEST_FF}" -name "*.nc" 2>/dev/null | wc -l)
     echo "   Completed: ${FF_COUNT} Fossil Fuel files processed"
 fi
+fi  # end want FF
 
 echo ""
 
 # -----------------------------------------------------------------------------
 # 2. Fix Ocean files (monthly: YYYY/MM.nc) - ADD TIME COORDINATE
 # -----------------------------------------------------------------------------
+if want OCEAN; then
 echo "2. Processing Ocean emissions (monthly files)..."
 SRC_OCEAN="${SRC_BASE}/Ocean/ECCO-Darwin-MON-v05/${YEAR}"
 DEST_OCEAN="${DEST_BASE}/Ocean/ECCO-Darwin-MON-v05/${YEAR}"
@@ -152,12 +155,14 @@ else
     OCEAN_COUNT=$(find "${DEST_OCEAN}" -name "*.nc" 2>/dev/null | wc -l)
     echo "   Completed: ${OCEAN_COUNT} Ocean files processed"
 fi
+fi  # end want OCEAN
 
 echo ""
 
 # -----------------------------------------------------------------------------
 # 3. Fix NBE files (daily: YYYY/MM/DD.nc)
 # -----------------------------------------------------------------------------
+if want NBE; then
 echo "3. Processing NBE emissions (daily files)..."
 SRC_NBE="${SRC_BASE}/Balbio/CARDAMOM-ECCO/${YEAR}"
 DEST_NBE="${DEST_BASE}/Balbio/CARDAMOM-ECCO/${YEAR}"
@@ -185,30 +190,55 @@ else
 
             DAY=$(basename "${DAY_FILE}" .nc)
             DEST_FILE="${DEST_NBE}/${MONTH}/${DAY}.nc"
-
-            # Copy file first
-            cp "${DAY_FILE}" "${DEST_FILE}"
-
-            # Rename longitude -> lon and latitude -> lat
-            ncrename -O -v longitude,lon -v latitude,lat "${DEST_FILE}"
-
-            # Fix time units: change "hour" to proper CF format with reference time for this specific day
             REF_DATE="${YEAR}-${MONTH}-${DAY} 00:00:00"
-            ncatted -O -a units,time,o,c,"hours since ${REF_DATE}" "${DEST_FILE}"
 
-            echo "   Fixed: ${YEAR}/${MONTH}/${DAY}"
+            # Resample 3-hourly (8 records, centered at 1.5,4.5,..,22.5 h) to HOURLY
+            # (24 records at 0.5,1.5,..,23.5 h) by holding each 3-hourly value over its
+            # 3 hours. HEMCO only cycles the diurnal cycle of a per-day file when there is
+            # one record per requested hour (as with the hourly Fossilfuel field); with 8
+            # records it holds a single slice all day, so the balanced biosphere must be
+            # expanded to 24 hourly records. Also renames longitude/latitude -> lon/lat.
+            python3 - "${DAY_FILE}" "${DEST_FILE}" "${REF_DATE}" <<'PYEOF'
+import sys, numpy as np, netCDF4 as nc
+src, dst, ref = sys.argv[1], sys.argv[2], sys.argv[3]
+si = nc.Dataset(src)
+lonv = 'longitude' if 'longitude' in si.variables else 'lon'
+latv = 'latitude'  if 'latitude'  in si.variables else 'lat'
+lon = np.array(si.variables[lonv][:]); lat = np.array(si.variables[latv][:])
+flux = np.array(si.variables['CO2_Flux'][:], dtype='f4')   # (nt, lat, lon)
+si.close()
+nt = flux.shape[0]
+if nt == 24:                       # already hourly
+    flux24 = flux
+elif 24 % nt == 0:                 # e.g. 8 (3-hourly) -> repeat each 24/8=3x
+    flux24 = np.repeat(flux, 24 // nt, axis=0)
+else:
+    raise SystemExit(f"unexpected record count {nt} in {src}")
+times = np.arange(24, dtype='f8') + 0.5
+do = nc.Dataset(dst, 'w', format='NETCDF4')
+do.createDimension('time', 24); do.createDimension('lat', lat.size); do.createDimension('lon', lon.size)
+tv = do.createVariable('time', 'f8', ('time',)); tv.units = 'hours since ' + ref; tv.long_name = 'time'; tv[:] = times
+yv = do.createVariable('lat', 'f4', ('lat',)); yv.units = 'degrees_north'; yv[:] = lat
+xv = do.createVariable('lon', 'f4', ('lon',)); xv.units = 'degrees_east'; xv[:] = lon
+fv = do.createVariable('CO2_Flux', 'f4', ('time', 'lat', 'lon',)); fv.units = 'Kg C/Km^2/sec'; fv[:] = flux24
+do.close()
+PYEOF
+
+            echo "   Fixed (resampled 3-hourly -> hourly): ${YEAR}/${MONTH}/${DAY}"
         done
     done
 
     NBE_COUNT=$(find "${DEST_NBE}" -name "*.nc" 2>/dev/null | wc -l)
     echo "   Completed: ${NBE_COUNT} NBE files processed"
 fi
+fi  # end want NBE
 
 echo ""
 
 # -----------------------------------------------------------------------------
 # 4. Fix GPP files (monthly: YYYY/MM.nc) - RENAME COORDINATES
 # -----------------------------------------------------------------------------
+if want GPP; then
 echo "4. Processing GPP emissions (monthly files)..."
 SRC_GPP="${SRC_BASE}/GPP/ORCHIDEE/${YEAR}"
 DEST_GPP="${DEST_BASE}/GPP/ORCHIDEE/${YEAR}"
@@ -256,12 +286,14 @@ else
     GPP_COUNT=$(find "${DEST_GPP}" -name "*.nc" 2>/dev/null | wc -l)
     echo "   Completed: ${GPP_COUNT} GPP files processed"
 fi
+fi  # end want GPP
 
 echo ""
 
 # -----------------------------------------------------------------------------
 # 5. Fix TER files (monthly: YYYY/MM.nc) - RENAME COORDINATES
 # -----------------------------------------------------------------------------
+if want TER; then
 echo "5. Processing TER emissions (monthly files)..."
 SRC_TER="${SRC_BASE}/TER2/CLASS-CTEM/${YEAR}"
 DEST_TER="${DEST_BASE}/TER/CLASS-CTEM/${YEAR}"
@@ -309,6 +341,7 @@ else
     TER_COUNT=$(find "${DEST_TER}" -name "*.nc" 2>/dev/null | wc -l)
     echo "   Completed: ${TER_COUNT} TER files processed"
 fi
+fi  # end want TER
 
 echo ""
 

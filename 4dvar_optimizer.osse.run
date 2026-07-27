@@ -2,7 +2,7 @@
 #PBS -S /bin/bash
 #PBS -N gchp_4dvar_osse
 #PBS -l select=1:ncpus=24:mpiprocs=24:model=bro_ele
-##PBS -l walltime=72:00:00
+##PBS -l walltime=24:00:00
 ##PBS -q long
 #PBS -l walltime=8:00:00
 ##PBS -q debug
@@ -52,19 +52,29 @@ STATE_FILE="${WORK_DIR}/4dvar_state_osse.npz" # L-BFGS-B state, persisted betwee
 OUTPUT_DIR="${WORK_DIR}/4dvar_output_osse"    # sigma_iter_NNN.npy, J_iter_NNN.txt
 LOG_FILE="${WORK_DIR}/4dvar_optimizer_osse.log"
 
+# Diagnostic plots go in a per-run subdirectory named by the wall-clock start
+# time of this job (YYYYMMDD_HHMMSS), so each run keeps its own figures and a
+# rerun/restart never overwrites an earlier run's plots.
+RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
+PLOT_DIR="${WORK_DIR}/plots_osse/${RUN_STAMP}"
+mkdir -p "${PLOT_DIR}"
+
 # Tee all stdout+stderr to LOG_FILE for the rest of the script (append so restarts don't erase history)
 exec > >(tee -a "${LOG_FILE}") 2>&1
 
 # Simulation window (OSSE: one month in 2016)
 T_START="2016-01-01"
 T_END="2016-02-01"
-TS_CHEM=1200                             # chemistry timestep [s]
-TS_DYN=600                               # dynamic timestep [s] - forcing file frequency
+TS_CHEM=1800                             # chemistry timestep [s]
+TS_DYN=1800                              # dynamic timestep [s] - forcing file frequency
 
 # Optimization
 NLAT=${NLAT:-46}
 NLON=${NLON:-72}
-SIGMA_B=${SIGMA_B:-0.5}
+# Default lowered 0.5 -> 0.2 on 2026-07-13 (background term was ~0.5% of J,
+# its gradient 30-200x weaker than g_obs at hotspots; 1/sigma_b^2 -> 6.25x
+# stronger background). Do not change across a RESTART of an ongoing run.
+SIGMA_B=${SIGMA_B:-0.2}
 MAX_ITER=${MAX_ITER:-20}
 GTOL=${GTOL:-1e-5}
 FTOL=${FTOL:-1e-8}
@@ -201,6 +211,24 @@ else
 fi
 
 # ============================================================
+#  Plot helper — regenerate all diagnostic figures into PLOT_DIR.
+#  Called after every iteration and once more at the end.  A plot
+#  failure must never abort the optimization, hence the '|| log' tail
+#  (the function then still returns 0 under set -e).
+# ============================================================
+make_plots() {
+    log "Generating plots → ${PLOT_DIR}"
+    python3 "${SCRIPT_DIR}/plot_4dvar.py" \
+        --state-file  "${STATE_FILE}" \
+        --output-dir  "${OUTPUT_DIR}" \
+        --forcing-dir "${FORCING_DIR}" \
+        --log-file    "${LOG_FILE}" \
+        --plot-dir    "${PLOT_DIR}" \
+        && log "Plots saved to ${PLOT_DIR}" \
+        || log "WARNING: plot_4dvar.py failed (plots not generated)"
+}
+
+# ============================================================
 #  Outer loop
 # ============================================================
 log "========================================================"
@@ -300,10 +328,11 @@ for iter in $(seq 1 "${MAX_ITER}"); do
     # ----------------------------------------------------------
     log "[${iter}/${MAX_ITER}] Moving checkpoints forward → adjoint"
     cd "${FWD_DIR}"
+    _nckpt=0
     for f in gcadj_internal_checkpoint* gcadj_import_checkpoint*; do
-        [ -f "${f}" ] && mv "${f}" "${ADJ_DIR}/" \
-            && echo "  Moved ${f}"
+        [ -f "${f}" ] && mv "${f}" "${ADJ_DIR}/" && _nckpt=$((_nckpt + 1))
     done
+    echo "  Moved ${_nckpt} adjoint checkpoint file(s) → ${ADJ_DIR}/"
 
     # Forward restart → adjoint initial condition (fixed name expected by runConfig)
     _ckpt=$(ls Restarts/gcchem_internal_checkpoint* 2>/dev/null | head -1)
@@ -328,6 +357,17 @@ for iter in $(seq 1 "${MAX_ITER}"); do
         || die "Adjoint GCHP failed (iter ${iter}). See ${ADJ_DIR}/gchp.log"
     log "[${iter}/${MAX_ITER}] Adjoint GCHP — done"
 
+    # Free the consumed gcadj checkpoints now the adjoint has succeeded.  The
+    # L-BFGS step below reads SurfaceFluxAdj from OutputDir, not these, so they
+    # are dead weight from here on; leaving them let ~1 TB accumulate before
+    # (esp. across a timestep change that renames the files).  find -delete
+    # avoids the ARG_MAX limit a shell glob would hit on ~35k files.
+    _nrm=$(find . -maxdepth 1 \( -name 'gcadj_internal_checkpoint*' \
+           -o -name 'gcadj_import_checkpoint*' \) | wc -l)
+    find . -maxdepth 1 \( -name 'gcadj_internal_checkpoint*' \
+         -o -name 'gcadj_import_checkpoint*' \) -delete
+    log "  Deleted ${_nrm} consumed gcadj checkpoint file(s)"
+
     # ----------------------------------------------------------
     # (6) L-BFGS-B step: update sigma, check convergence
     # ----------------------------------------------------------
@@ -347,6 +387,11 @@ for iter in $(seq 1 "${MAX_ITER}"); do
 
     # Save sigma snapshot for diagnostics
     cp "${STATE_FILE}" "${OUTPUT_DIR}/4dvar_state_iter$(printf '%03d' "${TRUE_ITER}").npz"
+
+    # Regenerate diagnostic figures after every iteration.  Cost is ~60 s,
+    # almost entirely Python/library import startup (the figures render in
+    # ~1 s), i.e. ~1% of the ~80 min GCHP cost per iteration.
+    make_plots
 
     if [ "${rc}" -eq 1 ]; then
         log "========================================================"
@@ -369,15 +414,6 @@ log " Log:                     ${LOG_FILE}"
 log "========================================================"
 
 # ============================================================
-#  Post-optimization plots
+#  Post-optimization plots (final refresh; also covers MAX_ITER=0)
 # ============================================================
-PLOT_DIR="${WORK_DIR}/plots_osse"
-log "Generating plots → ${PLOT_DIR}"
-python3 "${SCRIPT_DIR}/plot_4dvar.py" \
-    --state-file  "${STATE_FILE}" \
-    --output-dir  "${OUTPUT_DIR}" \
-    --forcing-dir "${FORCING_DIR}" \
-    --log-file    "${LOG_FILE}" \
-    --plot-dir    "${PLOT_DIR}" \
-    && log "Plots saved to ${PLOT_DIR}" \
-    || log "WARNING: plot_4dvar.py failed (plots not generated)"
+make_plots
