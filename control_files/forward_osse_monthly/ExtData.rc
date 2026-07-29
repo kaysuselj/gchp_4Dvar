@@ -81,14 +81,14 @@ Z0 1 N Y F0;003000 none none Z0M ./MetDir/%y4/%m2/MERRA2.%y4%m2%d2.A1.4x5.nc4
 
 # --- Surface pressure, 3-hr instantaneous ---
 PS1 Pa  N Y 0        none 0.01 PS ./MetDir/%y4/%m2/MERRA2.%y4%m2%d2.I3.4x5.nc4
-PS2 Pa  N Y 0;001000 none 0.01 PS ./MetDir/%y4/%m2/MERRA2.%y4%m2%d2.I3.4x5.nc4
+PS2 Pa  N Y 0;003000 none 0.01 PS ./MetDir/%y4/%m2/MERRA2.%y4%m2%d2.I3.4x5.nc4
 
 # --- 3D variables, 3-hr instantaneous ---
 SPHU1 kg_kg-1 N Y 0        none none QV ./MetDir/%y4/%m2/MERRA2.%y4%m2%d2.I3.4x5.nc4
-SPHU2 kg_kg-1 N Y 0;001000 none none QV ./MetDir/%y4/%m2/MERRA2.%y4%m2%d2.I3.4x5.nc4
+SPHU2 kg_kg-1 N Y 0;003000 none none QV ./MetDir/%y4/%m2/MERRA2.%y4%m2%d2.I3.4x5.nc4
 
 TMPU1 K N Y 0        none none T ./MetDir/%y4/%m2/MERRA2.%y4%m2%d2.I3.4x5.nc4
-TMPU2 K N Y 0;001000 none none T ./MetDir/%y4/%m2/MERRA2.%y4%m2%d2.I3.4x5.nc4
+TMPU2 K N Y 0;003000 none none T ./MetDir/%y4/%m2/MERRA2.%y4%m2%d2.I3.4x5.nc4
 
 # --- 3D variables, 3-hr averaged ---
 QI     1 N Y F0;013000 none none QI       ./MetDir/%y4/%m2/MERRA2.%y4%m2%d2.A3cld.4x5.nc4

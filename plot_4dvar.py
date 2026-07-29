@@ -72,6 +72,50 @@ def make_grid(nlat, nlon):
     return lats, lons
 
 
+# Native cubed-sphere support (GRID=cs). NF faces; control vector is the flat
+# (6, im, im) C-order field written by write_sigma.py --grid cs.
+NF = 6
+
+
+def to_faces(arr, im):
+    """Normalize a CS record to (6, im, im) from either stacked or face layout."""
+    a = np.asarray(arr)
+    if a.shape == (NF, im, im):
+        return a
+    if a.shape == (NF * im, im):
+        return a.reshape(NF, im, im)
+    raise ValueError(f'cannot interpret shape {a.shape} as C{im} cubed sphere')
+
+
+def load_cs_coords(im, coord_file=None, search_dirs=()):
+    """Native-CS cell-centre lats/lons (6, im, im), read from the first GCHP
+    output file that carries 'lats'/'lons' coordinate variables.  Tries an
+    explicit coord_file first, then GEOSChem.*.nc4 under each search dir."""
+    cands = [coord_file] if coord_file else []
+    patterns = ['GEOSChem.Adjoint.*.nc4', 'GEOSChem.SpeciesConc.*.nc4',
+                'GEOSChem.Emissions.*.nc4', '*.nc4']
+    for d in search_dirs:
+        if not d or not os.path.isdir(d):
+            continue
+        for pat in patterns:
+            cands += sorted(glob.glob(os.path.join(d, '**', pat), recursive=True))
+    seen = set()
+    for p in cands:
+        if not p or p in seen or not os.path.exists(p):
+            continue
+        seen.add(p)
+        try:
+            with xr.open_dataset(p) as ds:
+                if 'lats' in ds and 'lons' in ds:
+                    return (to_faces(np.squeeze(ds['lats'].values), im),
+                            to_faces(np.squeeze(ds['lons'].values), im))
+        except Exception:
+            continue
+    raise RuntimeError(
+        'CS plotting needs native "lats"/"lons"; none found among candidates. '
+        'Pass --coord-file <a GEOSChem.*.nc4 on the C-grid>.')
+
+
 def _add_land(ax):
     """Add land fill and coastlines to a cartopy GeoAxes."""
     ax.add_feature(cfeature.LAND,      facecolor='0.85', zorder=0)
@@ -114,6 +158,56 @@ def plot_map(data, lats, lons, title, path,
                            cmap=cmap, vmin=vmin, vmax=vmax, shading='auto')
         ax.set_xlabel('Longitude')
         ax.set_ylabel('Latitude')
+        ax.set_xticks(range(-180, 181, 60))
+        ax.set_yticks(range(-90,   91, 30))
+        ax.grid(True, alpha=0.3, linewidth=0.5)
+
+    plt.colorbar(im, ax=ax, label=cbar_label, fraction=0.046, pad=0.04)
+    ax.set_title(title, fontsize=12)
+
+    stats = (f'min={data.min():.3f}  max={data.max():.3f}  '
+             f'mean={data.mean():.3f}  |inf|={np.abs(data).max():.3e}')
+    ax.text(0.01, 0.02, stats, transform=ax.transAxes,
+            fontsize=8, color='0.3', va='bottom')
+
+    plt.tight_layout()
+    plt.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f'  Saved: {path}')
+
+
+def plot_map_cs(data, lats, lons, title, path,
+                cmap='RdBu_r', vmin=None, vmax=None, cbar_label=''):
+    """Save a single native cubed-sphere field as a PNG.
+
+    Drop-in for plot_map: the 6 faces do not tile a lat-lon rectangle, so the
+    field is drawn as a scatter of its (6, im, im) cell centres on a PlateCarree
+    map (the proven adjoint_validation g_map_cs.png approach) — no regrid, so the
+    native grid-scale structure is shown faithfully.  data/lats/lons are (6,im,im).
+    """
+    if vmin is None and vmax is None:
+        amax = max(np.abs(data).max(), 1e-12)
+        vmin, vmax = -amax, amax
+
+    if HAS_CARTOPY:
+        proj = ccrs.PlateCarree()
+        _, ax = plt.subplots(figsize=(12, 5),
+                             subplot_kw={'projection': proj})
+        _add_land(ax)
+        im = ax.scatter(lons.ravel(), lats.ravel(), c=data.ravel(),
+                        s=16, marker='s', cmap=cmap, vmin=vmin, vmax=vmax,
+                        transform=proj, zorder=1)
+        ax.set_extent([-180, 180, -90, 90], crs=proj)
+        _set_ticks(ax)
+        ax.gridlines(alpha=0.3, linewidth=0.5, draw_labels=False)
+    else:
+        _, ax = plt.subplots(figsize=(12, 5))
+        im = ax.scatter(lons.ravel(), lats.ravel(), c=data.ravel(),
+                        s=16, marker='s', cmap=cmap, vmin=vmin, vmax=vmax)
+        ax.set_xlabel('Longitude')
+        ax.set_ylabel('Latitude')
+        ax.set_xlim(-180, 180)
+        ax.set_ylim(-90, 90)
         ax.set_xticks(range(-180, 181, 60))
         ax.set_yticks(range(-90,   91, 30))
         ax.grid(True, alpha=0.3, linewidth=0.5)
@@ -836,6 +930,9 @@ def main():
                         help='Override grid rows (read from state file by default)')
     parser.add_argument('--nlon', type=int, default=None,
                         help='Override grid cols (read from state file by default)')
+    parser.add_argument('--coord-file', default=None,
+                        help='NetCDF file with native-CS lats/lons (GRID=cs '
+                             'only; auto-probed from --output-dir if omitted)')
     args = parser.parse_args()
 
     plot_dir = args.plot_dir or os.path.dirname(os.path.abspath(args.state_file))
@@ -850,29 +947,50 @@ def main():
 
     nlat = args.nlat or int(s['nlat'])
     nlon = args.nlon or int(s['nlon'])
+    grid = str(s['grid']) if 'grid' in s.files else 'latlon'   # back-compat
 
-    # Monthly state (12, nlat, nlon) vs single-window state (nlat, nlon):
-    # infer the month count from the state-vector size.
-    n2d  = nlat * nlon
-    nmon = s['x_next'].size // n2d
-    if nmon * n2d != s['x_next'].size:
-        raise SystemExit(f'state x_next size {s["x_next"].size} is not a '
-                         f'multiple of nlat*nlon={n2d}')
-    monthly = nmon > 1
-    shape   = (nmon, nlat, nlon) if monthly else (nlat, nlon)
-
-    sigma      = s['x_next'].reshape(shape)
-    sigma_prev = s['x_prev'].reshape(shape)
-    grad       = s['g_prev'].reshape(shape)
+    # Lat-lon display grid: used by the obs/forcing/innovation plots regardless
+    # of the control-vector grid (their data are obs at lat/lon locations).
     lats, lons = make_grid(nlat, nlon)
-    # Calendar month of the first field (from the state file; older monthly
-    # states without it are assumed to start in January).
-    start_month = int(s['start_month']) if 'start_month' in s.files else 1
-    if monthly:
-        def map_one(*a, **k):
-            return plot_map_months(*a, start_month=start_month, **k)
+
+    if grid == 'cs':
+        # Native cubed-sphere control vector: flat (6, im, im) C-order, single
+        # field (cs is annual-only, so no monthly panels).
+        cs_im   = int(s['cs_res'])
+        shape   = (NF, cs_im, cs_im)
+        sigma      = s['x_next'].reshape(shape)
+        sigma_prev = s['x_prev'].reshape(shape)
+        grad       = s['g_prev'].reshape(shape)
+        monthly, nmon, start_month = False, 1, 1
+        if not HAS_XARRAY:
+            raise SystemExit('CS plotting needs xarray to read native lats/lons.')
+        map_lats, map_lons = load_cs_coords(
+            cs_im, coord_file=args.coord_file,
+            search_dirs=(args.output_dir, args.forcing_dir,
+                         os.path.dirname(os.path.abspath(args.state_file))))
+        map_one = plot_map_cs
     else:
-        map_one = plot_map
+        # Monthly state (nmon, nlat, nlon) vs single-window (nlat, nlon):
+        # infer the month count from the state-vector size.
+        n2d  = nlat * nlon
+        nmon = s['x_next'].size // n2d
+        if nmon * n2d != s['x_next'].size:
+            raise SystemExit(f'state x_next size {s["x_next"].size} is not a '
+                             f'multiple of nlat*nlon={n2d}')
+        monthly = nmon > 1
+        shape   = (nmon, nlat, nlon) if monthly else (nlat, nlon)
+        sigma      = s['x_next'].reshape(shape)
+        sigma_prev = s['x_prev'].reshape(shape)
+        grad       = s['g_prev'].reshape(shape)
+        # Calendar month of the first field (older monthly states without it
+        # are assumed to start in January).
+        start_month = int(s['start_month']) if 'start_month' in s.files else 1
+        map_lats, map_lons = lats, lons
+        if monthly:
+            def map_one(*a, **k):
+                return plot_map_months(*a, start_month=start_month, **k)
+        else:
+            map_one = plot_map
 
     print(f'State file      : {args.state_file}')
     print(f'Iterations done : {it}')
@@ -887,7 +1005,7 @@ def main():
     # ------------------------------------------------------------------
     # 1. Sigma map
     # ------------------------------------------------------------------
-    map_one(sigma, lats, lons,
+    map_one(sigma, map_lats, map_lons,
             title=f'CO₂ flux scaling factor σ  (after iteration {it})',
             path=os.path.join(plot_dir, 'sigma_map.png'),
             cmap='RdBu_r', vmin=0.0, vmax=2.0,
@@ -896,7 +1014,7 @@ def main():
     # ------------------------------------------------------------------
     # 2. Sigma departure from prior  (sigma - 1)
     # ------------------------------------------------------------------
-    map_one(sigma - 1.0, lats, lons,
+    map_one(sigma - 1.0, map_lats, map_lons,
             title=f'Departure from prior  σ − 1  (after iteration {it})',
             path=os.path.join(plot_dir, 'sigma_departure.png'),
             cmap='RdBu_r',
@@ -905,7 +1023,7 @@ def main():
     # ------------------------------------------------------------------
     # 3. Gradient map
     # ------------------------------------------------------------------
-    map_one(grad, lats, lons,
+    map_one(grad, map_lats, map_lons,
             title=f'Total gradient ∂J/∂σ  (iteration {it})',
             path=os.path.join(plot_dir, 'gradient_map.png'),
             cmap='RdBu_r',
@@ -915,7 +1033,7 @@ def main():
     # 4. Last step  (sigma_next - sigma_prev)
     # ------------------------------------------------------------------
     if it >= 2:
-        map_one(sigma - sigma_prev, lats, lons,
+        map_one(sigma - sigma_prev, map_lats, map_lons,
                 title=f'Last optimizer step  Δσ = σ_next − σ_prev  (iteration {it})',
                 path=os.path.join(plot_dir, 'sigma_step.png'),
                 cmap='RdBu_r',
@@ -1021,7 +1139,9 @@ def main():
             if i < 1:
                 continue
             xf = sv['x_prev']
-            if monthly:
+            if grid == 'cs':
+                frames.append(xf.reshape(NF, cs_im, cs_im))
+            elif monthly:
                 # month-mean sigma per iteration (per-month detail is in the
                 # sigma_map.png panels); title amended below
                 frames.append(xf.reshape(nmon, nlat, nlon).mean(axis=0))
@@ -1030,24 +1150,34 @@ def main():
             frame_iters.append(i)
 
         if len(frames) >= 2:
-            lon2d, lat2d = np.meshgrid(lons, lats)
+            _cs = (grid == 'cs')
+            if not _cs:
+                lon2d, lat2d = np.meshgrid(lons, lats)
+
+            def _anim_artist(ax, proj=None):
+                # scatter of native-CS cell centres for cs; lat-lon mesh otherwise
+                kw = {'transform': proj} if proj is not None else {}
+                if _cs:
+                    return ax.scatter(map_lons.ravel(), map_lats.ravel(),
+                                      c=frames[0].ravel(), s=16, marker='s',
+                                      cmap='RdBu_r', vmin=0.0, vmax=2.0,
+                                      zorder=1, **kw)
+                return ax.pcolormesh(lon2d, lat2d, frames[0],
+                                     cmap='RdBu_r', vmin=0.0, vmax=2.0,
+                                     shading='auto', zorder=1, **kw)
 
             if HAS_CARTOPY:
                 proj = ccrs.PlateCarree()
                 fig, ax = plt.subplots(figsize=(12, 5),
                                        subplot_kw={'projection': proj})
                 _add_land(ax)
-                im = ax.pcolormesh(lon2d, lat2d, frames[0],
-                                   cmap='RdBu_r', vmin=0.0, vmax=2.0,
-                                   shading='auto', transform=proj, zorder=1)
+                im = _anim_artist(ax, proj)
                 ax.set_extent([-180, 180, -90, 90], crs=proj)
                 _set_ticks(ax)
                 ax.gridlines(alpha=0.3, linewidth=0.5, draw_labels=False)
             else:
                 fig, ax = plt.subplots(figsize=(12, 5))
-                im = ax.pcolormesh(lon2d, lat2d, frames[0],
-                                   cmap='RdBu_r', vmin=0.0, vmax=2.0,
-                                   shading='auto')
+                im = _anim_artist(ax)
                 ax.set_xlabel('Longitude')
                 ax.set_ylabel('Latitude')
                 ax.set_xticks(range(-180, 181, 60))
