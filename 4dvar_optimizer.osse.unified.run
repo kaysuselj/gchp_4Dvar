@@ -69,6 +69,23 @@ cd "$PBS_O_WORKDIR"
 die() { echo "ERROR: $*" >&2; exit 1; }
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
+# assert_gchp_ok <gchp.log> <label>
+# GCHP/MPT can abort mid-run yet return exit status 0 (e.g. "MPT ERROR: ...
+# aborting with error code 0"), so a bare `mpiexec ... || die` does NOT catch
+# a crash. This scans the log for unambiguous fatal-error signatures and dies
+# if any are present, turning a silent failure into a hard stop before the
+# optimizer moves incomplete checkpoints downstream.
+assert_gchp_ok() {
+    local logf="$1" label="$2"
+    [ -f "${logf}" ] || die "${label}: ${logf} not found (GCHP produced no log)"
+    local hit
+    hit=$(grep -m1 -E \
+        'MPT ERROR|FAIL at line=|terminated without calling MPI_Finalize|MPI_ABORT was invoked|aborting with error code|Abnormal termination|forrtl: severe|SIGSEGV|SIGBUS' \
+        "${logf}" || true)
+    [ -n "${hit}" ] && die "${label}: GCHP aborted despite exit 0 — matched '${hit}' in ${logf}"
+    return 0
+}
+
 # ============================================================
 #  Mode
 # ============================================================
@@ -370,12 +387,20 @@ save_progress
 # ============================================================
 make_plots() {
     log "Generating plots → ${PLOT_DIR}"
+    # GRID=cs plots need native lats/lons from a C-grid GCHP file; adjoint output
+    # carries them.  Empty string is harmless: plot_4dvar.py then auto-probes
+    # --output-dir.  (No effect for GRID=latlon.)
+    local coord_file
+    coord_file=$(ls -1t "${ADJ_DIR}/OutputDir"/GEOSChem.Adjoint.*.nc4 \
+                        "${FWD_DIR}/OutputDir"/GEOSChem.SpeciesConc.*.nc4 \
+                        2>/dev/null | head -1)
     python3 "${SCRIPT_DIR}/plot_4dvar.py" \
         --state-file  "${STATE_FILE}" \
         --output-dir  "${OUTPUT_DIR}" \
         --forcing-dir "${FORCING_DIR}" \
         --log-file    "${LOG_FILE}" \
         --plot-dir    "${PLOT_DIR}" \
+        --coord-file  "${coord_file}" \
         && log "Plots saved to ${PLOT_DIR}" \
         || log "WARNING: plot_4dvar.py failed (plots not generated)"
 }
@@ -389,6 +414,18 @@ log " window ${T_START} -> ${T_END}  (${NMON} months)  nlat=${NLAT} nlon=${NLON}
 log " starting at iteration ${CUR_ITER}, after phase '${CUR_PHASE}'  (max_iter=${MAX_ITER})"
 log " log → ${LOG_FILE}"
 log "========================================================"
+
+# ------------------------------------------------------------
+#  Submission record — one block appended per (re)submission
+#  (initial launch + every self-chained/restart job), durable in
+#  the work tree, so how the run was launched is always recoverable.
+# ------------------------------------------------------------
+# single-string -v list (no embedded spaces) so the reproduce line is copy-pasteable
+_repro_v="MODE=${MODE},GRID=${GRID},T_START=${T_START},T_END=${T_END},MAX_ITER=${MAX_ITER},EXP_NAME=${EXP_NAME},SIGMA_B=${SIGMA_B}"
+{
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] job=${PBS_JOBID:-interactive} chain=${CHAIN_N} restart=${RESTART} resume(iter=${CUR_ITER},phase=${CUR_PHASE})"
+    echo "    reproduce: qsub -v ${_repro_v} $(basename "${SELF:-$0}")"
+} >> "${WORK_DIR}/submit.log"
 
 while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
 
@@ -428,6 +465,7 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
             || die "runConfig_forward.sh failed (iter ${CUR_ITER})"
         mpiexec -n "${NCORES}" ./gchp >> gchp.log 2>&1 \
             || die "Forward GCHP failed (iter ${CUR_ITER}). See ${FWD_DIR}/gchp.log"
+        assert_gchp_ok "${FWD_DIR}/gchp.log" "Forward GCHP (iter ${CUR_ITER})"
         log "[iter ${CUR_ITER}] Forward GCHP — done"
 
         # Move gcadj checkpoints forward -> adjoint (mv = rename, no copy).
@@ -507,6 +545,7 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
             || die "runConfig_adjoint.sh failed (iter ${CUR_ITER})"
         mpiexec -n "${NCORES}" ./gchp >> gchp.log 2>&1 \
             || die "Adjoint GCHP failed (iter ${CUR_ITER}). See ${ADJ_DIR}/gchp.log"
+        assert_gchp_ok "${ADJ_DIR}/gchp.log" "Adjoint GCHP (iter ${CUR_ITER})"
         log "[iter ${CUR_ITER}] Adjoint GCHP — done"
 
         # Free the consumed gcadj checkpoints (only after adjoint success, since a
