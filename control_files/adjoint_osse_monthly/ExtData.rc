@@ -399,7 +399,6 @@ SPC_CO  mol/mol N Y -  none none SPC_CO  gcchem_initial_restart.nc4
 SPC_CH4 mol/mol N Y -  none none SPC_CH4 gcchem_initial_restart.nc4
 SPC_OCS mol/mol N Y -  none none SPC_OCS gcchem_initial_restart.nc4
 DELPDRY hPa N Y -  none none DELP_DRY gcchem_initial_restart.nc4
-Sigma_CO2  1  N  N  -  none  none  Sigma_CO2  ../sigma_co2_const.nc4
 
 # --- CO2 Fossil Fuel (FF_regrid2 from sim.template - daily files in YYYY/MM/ subdirs - corrected units attribute) ---
 FOSSILCO2_ODIAC  kg/m2/s N Y F%y4-%m2-%d2T%h2:00:00 none none CO2_Flux /nobackup/ksuselj1/gchp_14.5.3_adjoint_surfaceF/surface_fluxes_osse/Fossilfuel/FF_regrid2/%y4/%m2/%d2.nc
@@ -553,7 +552,6 @@ CO2_WEEKLY  1 D Y F2006-01-01T00:00:00   none none weekly_scale_factors  ./HcoDi
 AVIATION_SURF_CORR      1       Y  Y F2004-01-01T00:00:00  none none CO2 ./HcoDir/CO2/v2022-11/FOSSIL/Aviation_SurfCorr_SclFac.1x1.nc
 
 # --- 4D-Var CO2 surface flux scaling factor (updated between optimizer iterations) ---
-Sigma_CO2  1  N  N  -  none  none  Sigma_CO2  ../sigma_co2_const.nc4
 
 ###############################################################################
 ###

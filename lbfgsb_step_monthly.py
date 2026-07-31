@@ -365,8 +365,9 @@ def main():
     # ------------------------------------------------------------------
     try:
         J_obs = read_J_obs(args.forcing_dir)
-        g_obs = monthly_obs_gradient(args.adj_output, args.t_start, args.t_end,
-                                     args.nlat, args.nlon, nmon)
+        g_obs, A_bnd, boundaries = monthly_obs_gradient(
+            args.adj_output, args.t_start, args.t_end,
+            args.nlat, args.nlon, nmon)
     except Exception as exc:
         print(f'ERROR reading J / gradient: {exc}', file=sys.stderr)
         sys.exit(2)
@@ -386,6 +387,10 @@ def main():
           f'|g|_inf={np.abs(g_cur).max():.4e}')
     print_balance_diagnostics(J_obs, J_b, g_obs, g_b,
                               read_N_obs(args.forcing_dir), n)
+
+    if args.archive_dir:
+        save_boundary_diagnostics(A_bnd, g_obs, boundaries, args.archive_dir,
+                                  it, args.nlat, args.nlon)
 
     # ------------------------------------------------------------------
     # Convergence check

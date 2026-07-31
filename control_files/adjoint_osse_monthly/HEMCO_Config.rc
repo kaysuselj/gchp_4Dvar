@@ -1483,7 +1483,6 @@ Mask fractions:              false
 # --- 4D-Var CO2 surface flux scaling factor (written by 4dvar_optimizer.py) ---
 # Path must match SIGMA_FILE in 4dvar_optimizer.py.  Flag 'C' = constant in
 # time (sigma does not vary within a single GCHP run; updated between iters).
-750 Sigma_CO2 ../sigma_co2_osse.nc4 Sigma_CO2 2016/1/1/0 C xy 1 1
 751 CO2_UNIT_CONV 3.667e-6 - - - xy 1 1
 
 )))USE_CO2_DATA

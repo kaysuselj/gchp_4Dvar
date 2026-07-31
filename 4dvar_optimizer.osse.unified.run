@@ -48,14 +48,16 @@
 # Submit from gchp_4Dvar/:
 #   qsub 4dvar_optimizer.osse.unified.run                       # annual (GRID=cs), fresh
 #   qsub -v GRID=latlon 4dvar_optimizer.osse.unified.run        # annual on lat-lon
-#   qsub -v MODE=monthly 4dvar_optimizer.osse.unified.run       # monthly, fresh
+#   qsub -v MODE=monthly,T_END=2016-04-01 4dvar_optimizer.osse.unified.run  # monthly, fresh (3-month Jan-Mar)
 #   qsub -v EXP_NAME=expA 4dvar_optimizer.osse.unified.run      # isolated parallel run
-#   qsub -v RESTART=true[,MODE=monthly][,EXP_NAME=expA] 4dvar_optimizer.osse.unified.run
+#   qsub -v RESTART=true,MODE=monthly,T_END=2016-04-01[,EXP_NAME=expA] 4dvar_optimizer.osse.unified.run
 #   qsub -v MODE=annual,MAX_ITER=10,SIGMA_B=0.3 4dvar_optimizer.osse.unified.run
 #   # short annual run needs less walltime:
 #   qsub -l walltime=8:00:00 -v WALLTIME_S=28800 4dvar_optimizer.osse.unified.run
 # If you change the #PBS walltime, pass the matching WALLTIME_S (seconds).
 # RESTART=true resumes an EXP_NAME run from its private work tree.
+# MODE=monthly has NO T_END default: T_END is required (month boundary, day 1)
+# on fresh launch AND manual restart, so a multi-month window is never accidental.
 #
 # Logs: the optimizer log is written under  <work tree>/logs/ .
 # ============================================================================
@@ -119,7 +121,10 @@ if [ "${MODE}" = "monthly" ]; then
     CTRL_ADJ_DIR="${BASE_DIR}/control_files/adjoint_osse_monthly"
     STATE_BASENAME="4dvar_state_osse_monthly.npz"
     LOG_NAME="4dvar_optimizer_osse_monthly"
-    T_END_DEFAULT="2017-01-01"
+    # No T_END default: monthly mode requires an explicit T_END (enforced below)
+    # so a multi-month window is never launched by accident (a silent full-year
+    # default previously ran a 12-month forward when a 3-month one was intended).
+    T_END_DEFAULT=""
 else
     GRID=${GRID:-cs}
     BASE_WORK_NAME="4dvar_design_osse"
@@ -165,6 +170,12 @@ exec > >(tee -a "${LOG_FILE}") 2>&1
 # ============================================================
 T_START=${T_START:-2016-01-01}
 T_END=${T_END:-${T_END_DEFAULT}}
+# Monthly mode has no T_END default: require it explicitly so a multi-month
+# window is a deliberate choice, never a silent full-year default.  T_END must
+# carry through restarts too (it patches runConfig every run and rides in
+# VPASS on self-resubmission), so this fires on fresh launch and restart alike.
+[ "${MODE}" = "monthly" ] && [ -z "${T_END}" ] && \
+    die "MODE=monthly requires an explicit T_END (month boundary, day 1). e.g. T_END=2016-04-01 for a 3-month Jan-Mar window; T_END=2017-01-01 for a full year."
 TS_CHEM=1800
 TS_DYN=1800
 
@@ -213,6 +224,12 @@ VPASS="${VPASS},MAX_CHAIN=${MAX_CHAIN},WALLTIME_S=${WALLTIME_S},WALLTIME_MARGIN_
 VPASS="${VPASS},EST_MONTH_FWD_S=${EST_MONTH_FWD_S},EST_MONTH_ADJ_S=${EST_MONTH_ADJ_S}"
 VPASS="${VPASS},GRID=${GRID},EXP_NAME=${EXP_NAME}"
 
+# Queue job name: derive from EXP_NAME so runs are distinguishable in qstat
+# (e.g. EXP_NAME=1year_osse -> "gchp_1year_osse").  Falls back to the historic
+# default when EXP_NAME is unset.  Chained resubmissions below pass this with
+# -N so the whole chain keeps the same name.
+JOB_NAME=${JOB_NAME:-gchp_${EXP_NAME:-4dvar_osse}}
+
 save_progress() {
     echo "iter=${CUR_ITER} phase=${CUR_PHASE}" > "${PROGRESS_FILE}"
 }
@@ -227,7 +244,7 @@ resubmit() {
         die "MAX_CHAIN=${MAX_CHAIN} chained jobs reached — refusing to resubmit (raise MAX_CHAIN if intended)"
     fi
     log "Resubmitting self (chain job $((CHAIN_N + 1)))"
-    qsub -v "RESTART=true,CHAIN_N=$((CHAIN_N + 1)),${VPASS}" "${SELF}" \
+    qsub -N "${JOB_NAME}" -v "RESTART=true,CHAIN_N=$((CHAIN_N + 1)),${VPASS}" "${SELF}" \
         || die "qsub resubmission failed — resume manually with RESTART=true"
     exit 0
 }
@@ -333,7 +350,18 @@ fi
 START_FMT="$(echo "${T_START}" | tr -d '-') 000000"
 END_FMT="$(echo "${T_END}"   | tr -d '-') 000000"
 DURATION_DAYS=$(( ($(date -d "${T_END}" +%s) - $(date -d "${T_START}" +%s)) / 86400 ))
-DURATION_FMT="$(printf '%08d' "${DURATION_DAYS}") 000000"
+# CAP.rc JOB_SGMT (= runConfig Duration) is a YYYYMMDD calendar increment, NOT a
+# raw day count.  The DD field is only 2 digits, so a plain %08d of the total
+# days overflows into the MM field once the window reaches 100 days: e.g. 366 ->
+# "00000366" is parsed as 0y 03m 66d ~ 157 days, so a 1-year run stopped on
+# 2016-06-06.  Decompose into calendar Y/M/D instead.  OSSE windows are whole
+# months (day = 01), so the day component is exact.
+_sY=$(date -d "${T_START}" +%Y); _sM=$(date -d "${T_START}" +%m); _sD=$(date -d "${T_START}" +%d)
+_eY=$(date -d "${T_END}"   +%Y); _eM=$(date -d "${T_END}"   +%m); _eD=$(date -d "${T_END}"   +%d)
+_dD=$(( 10#${_eD} - 10#${_sD} ))
+_dtotM=$(( (10#${_eY}*12 + 10#${_eM}) - (10#${_sY}*12 + 10#${_sM}) ))
+if [ "${_dD}" -lt 0 ]; then _dtotM=$(( _dtotM - 1 )); _dD=$(( _dD + 30 )); fi
+DURATION_FMT="$(printf '%04d%02d%02d' $(( _dtotM / 12 )) $(( _dtotM % 12 )) "${_dD}") 000000"
 
 for _cfg in "${FWD_DIR}/runConfig_forward.sh" "${ADJ_DIR}/runConfig_adjoint.sh"; do
     sed -i "s/^Start_Time=.*/Start_Time=\"${START_FMT}\"/" "${_cfg}"
@@ -391,9 +419,12 @@ make_plots() {
     # carries them.  Empty string is harmless: plot_4dvar.py then auto-probes
     # --output-dir.  (No effect for GRID=latlon.)
     local coord_file
+    # NB: keep this tolerant of missing globs — under `set -euo pipefail` a
+    # non-zero `ls` (e.g. no forward SpeciesConc files on an adjoint-only
+    # resume) would otherwise abort the whole script here.  Empty is harmless.
     coord_file=$(ls -1t "${ADJ_DIR}/OutputDir"/GEOSChem.Adjoint.*.nc4 \
                         "${FWD_DIR}/OutputDir"/GEOSChem.SpeciesConc.*.nc4 \
-                        2>/dev/null | head -1)
+                        2>/dev/null | head -1 || true)
     python3 "${SCRIPT_DIR}/plot_4dvar.py" \
         --state-file  "${STATE_FILE}" \
         --output-dir  "${OUTPUT_DIR}" \
@@ -416,16 +447,26 @@ log " log → ${LOG_FILE}"
 log "========================================================"
 
 # ------------------------------------------------------------
-#  Submission record — one block appended per (re)submission
-#  (initial launch + every self-chained/restart job), durable in
-#  the work tree, so how the run was launched is always recoverable.
+#  Submission record — one block per (re)submission, appended to a durable
+#  log in the work tree so how a run was actually launched is always
+#  recoverable.  A fresh (non-restart) launch starts a clean record; restarts
+#  and self-chained resubmissions append, keeping the full launch history.
+#  The block logs the DERIVED window (months + days), not just the raw -v
+#  args, so a mismatch between EXP_NAME and the real T_END (e.g. a "3months"
+#  experiment accidentally launched full-year) is obvious at a glance.
 # ------------------------------------------------------------
 # single-string -v list (no embedded spaces) so the reproduce line is copy-pasteable
 _repro_v="MODE=${MODE},GRID=${GRID},T_START=${T_START},T_END=${T_END},MAX_ITER=${MAX_ITER},EXP_NAME=${EXP_NAME},SIGMA_B=${SIGMA_B}"
+_submit_log="${WORK_DIR}/submit.log"
+# Fresh launch (RESTART!=true) resets the record — consistent with the fresh
+# start above that clears state/progress; a brand-new EXP begins a clean log.
+[ "${RESTART}" = "true" ] || : > "${_submit_log}"
 {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] job=${PBS_JOBID:-interactive} chain=${CHAIN_N} restart=${RESTART} resume(iter=${CUR_ITER},phase=${CUR_PHASE})"
+    echo "    mode=${MODE} grid=${GRID} exp=${EXP_NAME:-<none>} sigma_b=${SIGMA_B} max_iter=${MAX_ITER}"
+    echo "    window ${T_START} -> ${T_END}  (${NMON} months, ${DURATION_DAYS} days)"
     echo "    reproduce: qsub -v ${_repro_v} $(basename "${SELF:-$0}")"
-} >> "${WORK_DIR}/submit.log"
+} >> "${_submit_log}" || log "WARNING: could not write submission record to ${_submit_log}"
 
 while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
 
@@ -436,7 +477,7 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
         budget_ok "${EST_FORWARD_S}" || resubmit
 
         if [ "${MODE}" = "monthly" ]; then
-            log "[iter ${CUR_ITER}] Writing ${NMON} monthly sigma files"
+            log "[iter ${CUR_ITER}] Writing ${NMON} monthly sigma files (+1 boundary)"
             python3 "${SCRIPT_DIR}/write_sigma_monthly.py" \
                 --sigma-dir  "${SIGMA_DIR}" \
                 --state-file "${STATE_FILE}" \

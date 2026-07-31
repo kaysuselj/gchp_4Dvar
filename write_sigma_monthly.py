@@ -25,6 +25,15 @@ For a shorter window (e.g. a 3-month shakedown) pass --n-months 3; the files
 are written for --start-month, --start-month+1, ... with year rollover, so the
 control-vector length is n-months * nlat * nlon.
 
+One EXTRA "boundary" file is written for the month after the last control
+month (start-month + n-months).  The forward/adjoint window ends at that month
+boundary, and while ExtData integrates the final control month it needs that
+file as the RIGHT time-bracket -- without it the forward aborts at the last
+month boundary in ExtData (ExtDataGridCompMod.F90 right-bracket file search).
+Sigma_CO2 uses an F-persisted refresh (no interpolation), so the boundary
+file's values never enter the solution; it duplicates the last control month
+and is NOT part of the control vector.
+
 Usage:
     python write_sigma_monthly.py --sigma-dir /path/sigma_monthly \
                                  [--state-file /path/4dvar_state.npz] \
@@ -129,6 +138,18 @@ def main():
         write_month(sigma[m], lats, lons, path, t_stamp)
         print(f'[iter {it}] {yy}-{mm:02d}: min={sigma[m].min():.4f} '
               f'max={sigma[m].max():.4f} mean={sigma[m].mean():.4f} -> {path}')
+
+    # Boundary file at month (start_month + nmon): the window ends at this month
+    # boundary and ExtData needs the file as the RIGHT time-bracket while it
+    # integrates the final control month.  Sigma_CO2 is F-persisted (no
+    # interpolation), so these values never enter the solution -- the file only
+    # has to exist -- so duplicate the last control month.  Not a control var.
+    tot = base + nmon
+    yy, mm = tot // 12, tot % 12 + 1
+    t_stamp = pd.Timestamp(f'{yy}-{mm:02d}-01')
+    path = os.path.join(args.sigma_dir, f'{yy}', f'{mm:02d}.nc4')
+    write_month(sigma[nmon - 1], lats, lons, path, t_stamp)
+    print(f'[iter {it}] {yy}-{mm:02d}: boundary (=last control month) -> {path}')
 
 
 if __name__ == '__main__':

@@ -36,3 +36,6 @@ monthly_sigma_test_verdict_*.txt
 
 # Status scratch files
 MONTHLY_SIGMA_STATUS.md
+
+# local python environment (large, machine-specific)
+gchp-env/
