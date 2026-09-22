@@ -324,6 +324,21 @@ python3 -c "import numpy, pandas, xarray, netCDF4" 2>/dev/null \
     || die "Python env is missing required packages (numpy pandas xarray netCDF4)"
 echo "Python env: $(python3 --version)  from ${PYTHON_ENV}"
 
+# Copy PROJ database to /dev/shm (RAM-backed tmpfs) so pyproj/cartopy can do
+# its SQLite random-reads locally instead of over NFS.  Also pre-import
+# cartopy now so its .so files are warm in the page cache before plotting runs.
+_PROJ_CACHE="/dev/shm/proj_data_$$"
+_PROJ_SRC=$(python3 -c \
+    "import pyproj, os; print(os.path.join(os.path.dirname(pyproj.__file__), 'proj_dir','share','proj'))" \
+    2>/dev/null || true)
+if [ -n "${_PROJ_SRC}" ] && [ -d "${_PROJ_SRC}" ]; then
+    cp -r "${_PROJ_SRC}" "${_PROJ_CACHE}" 2>/dev/null \
+        && export PROJ_DATA="${_PROJ_CACHE}" \
+        && log "PROJ_DATA set to ${_PROJ_CACHE} (proj.db in RAM)"
+fi
+python3 -c "import cartopy.crs, cartopy.feature" 2>/dev/null \
+    && log "cartopy pre-warmed" || log "WARNING: cartopy pre-warm failed (plots may be slow)"
+
 # Core count = NODES * 24, driven through runConfig's TOTAL_CORES. NXNY_AUTO=ON
 # regenerates GCHP.rc NX/NY from TOTAL_CORES on every run (line ~509), so the
 # durable knob is TOTAL_CORES in runConfig — patching GCHP.rc directly would be
@@ -445,9 +460,12 @@ make_plots() {
     # NB: keep this tolerant of missing globs — under `set -euo pipefail` a
     # non-zero `ls` (e.g. no forward SpeciesConc files on an adjoint-only
     # resume) would otherwise abort the whole script here.  Empty is harmless.
-    coord_file=$(ls -1t "${ADJ_DIR}/OutputDir"/GEOSChem.Adjoint.*.nc4 \
+    # -S sorts by size (largest first); tail -1 picks the smallest file.
+    # The final-step adjoint file (~1 MB) carries lats/lons just as well as the
+    # full-record file (~4 GB), so prefer small to avoid slow NFS open.
+    coord_file=$(ls -1S "${ADJ_DIR}/OutputDir"/GEOSChem.Adjoint.*.nc4 \
                         "${FWD_DIR}/OutputDir"/GEOSChem.SpeciesConc.*.nc4 \
-                        2>/dev/null | head -1 || true)
+                        2>/dev/null | tail -1 || true)
     python3 "${SCRIPT_DIR}/plot_4dvar.py" \
         --state-file  "${STATE_FILE}" \
         --output-dir  "${OUTPUT_DIR}" \
