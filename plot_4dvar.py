@@ -53,13 +53,54 @@ except ImportError:
     print('WARNING: xarray not found — forcing diagnostic plots will be skipped')
 
 try:
-    import cartopy.crs as ccrs
-    import cartopy.feature as cfeature
-    from cartopy.mpl.ticker import LongitudeFormatter, LatitudeFormatter
-    HAS_CARTOPY = True
+    import shapefile as _shp
+    HAS_SHAPEFILE = True
 except ImportError:
-    HAS_CARTOPY = False
-    print('WARNING: cartopy not found — land mask will not be drawn')
+    HAS_SHAPEFILE = False
+
+# Cached shapefile geometry (loaded once on first use)
+_COAST_LINES  = None   # list of (lon_arr, lat_arr) for coastlines
+_LAND_PATCHES = None   # list of matplotlib Polygon patches for land fill
+
+def _load_coast():
+    """Load Natural Earth 110m coastlines from the cartopy cache (lazy)."""
+    global _COAST_LINES
+    if _COAST_LINES is not None or not HAS_SHAPEFILE:
+        return
+    candidates = [
+        os.path.expanduser('~/.local/share/cartopy/shapefiles/natural_earth/physical/ne_110m_coastline.shp'),
+        os.path.expanduser('~/.local/share/cartopy/shapefiles/natural_earth/physical/ne_50m_coastline.shp'),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                sf = _shp.Reader(path)
+                _COAST_LINES = [np.array(s.points) for s in sf.shapes()]
+                return
+            except Exception:
+                continue
+
+def _load_land():
+    """Load Natural Earth 110m land polygons from the cartopy cache (lazy)."""
+    global _LAND_PATCHES
+    if _LAND_PATCHES is not None or not HAS_SHAPEFILE:
+        return
+    from matplotlib.patches import Polygon as MplPolygon
+    candidates = [
+        os.path.expanduser('~/.local/share/cartopy/shapefiles/natural_earth/physical/ne_110m_land.shp'),
+        os.path.expanduser('~/.local/share/cartopy/shapefiles/natural_earth/physical/ne_50m_land.shp'),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                sf = _shp.Reader(path)
+                _LAND_PATCHES = [MplPolygon(np.array(s.points), closed=True,
+                                            facecolor='0.85', edgecolor='none',
+                                            zorder=0)
+                                 for s in sf.shapes() if len(s.points) > 2]
+                return
+            except Exception:
+                continue
 
 
 # -----------------------------------------------------------------------
@@ -91,45 +132,62 @@ def load_cs_coords(im, coord_file=None, search_dirs=()):
     """Native-CS cell-centre lats/lons (6, im, im), read from the first GCHP
     output file that carries 'lats'/'lons' coordinate variables.  Tries an
     explicit coord_file first, then GEOSChem.*.nc4 under each search dir."""
-    cands = [coord_file] if coord_file else []
-    patterns = ['GEOSChem.Adjoint.*.nc4', 'GEOSChem.SpeciesConc.*.nc4',
-                'GEOSChem.Emissions.*.nc4', '*.nc4']
-    for d in search_dirs:
-        if not d or not os.path.isdir(d):
-            continue
-        for pat in patterns:
-            cands += sorted(glob.glob(os.path.join(d, '**', pat), recursive=True))
-    seen = set()
-    for p in cands:
-        if not p or p in seen or not os.path.exists(p):
-            continue
-        seen.add(p)
+    def _try(p):
+        if not p or not os.path.exists(p):
+            return None
         try:
             with xr.open_dataset(p) as ds:
                 if 'lats' in ds and 'lons' in ds:
                     return (to_faces(np.squeeze(ds['lats'].values), im),
                             to_faces(np.squeeze(ds['lons'].values), im))
         except Exception:
+            pass
+        return None
+
+    # Try the explicit coord_file first — avoids expensive NFS glob
+    if coord_file:
+        result = _try(coord_file)
+        if result is not None:
+            return result
+
+    patterns = ['GEOSChem.Adjoint.*.nc4', 'GEOSChem.SpeciesConc.*.nc4',
+                'GEOSChem.Emissions.*.nc4', '*.nc4']
+    seen = set()
+    for d in search_dirs:
+        if not d or not os.path.isdir(d):
             continue
+        for pat in patterns:
+            for p in sorted(glob.glob(os.path.join(d, '**', pat), recursive=True)):
+                if p in seen:
+                    continue
+                seen.add(p)
+                result = _try(p)
+                if result is not None:
+                    return result
     raise RuntimeError(
         'CS plotting needs native "lats"/"lons"; none found among candidates. '
         'Pass --coord-file <a GEOSChem.*.nc4 on the C-grid>.')
 
 
 def _add_land(ax):
-    """Add land fill and coastlines to a cartopy GeoAxes."""
-    ax.add_feature(cfeature.LAND,      facecolor='0.85', zorder=0)
-    ax.add_feature(cfeature.COASTLINE, linewidth=0.5,    zorder=2)
-    ax.add_feature(cfeature.BORDERS,   linewidth=0.3,    zorder=2,
-                   linestyle=':', edgecolor='0.4')
+    """Add land fill and coastlines using cached Natural Earth shapefiles."""
+    import copy
+    _load_land()
+    if _LAND_PATCHES:
+        for patch in _LAND_PATCHES:
+            ax.add_patch(copy.copy(patch))
+    _load_coast()
+    if _COAST_LINES:
+        for pts in _COAST_LINES:
+            ax.plot(pts[:, 0], pts[:, 1], color='0.3', linewidth=0.5,
+                    zorder=2, transform=ax.transData)
 
 
 def _set_ticks(ax):
-    ax.set_xticks(range(-180, 181, 60), crs=ccrs.PlateCarree())
-    ax.set_yticks(range(-90,   91, 30), crs=ccrs.PlateCarree())
-    ax.xaxis.set_major_formatter(LongitudeFormatter())
-    ax.yaxis.set_major_formatter(LatitudeFormatter())
-    ax.tick_params(labelsize=8)
+    ax.set_xticks(range(-180, 181, 60))
+    ax.set_yticks(range(-90,   91, 30))
+    ax.set_xticklabels([f'{x}°{"W" if x < 0 else ("E" if x > 0 else "")}' for x in range(-180, 181, 60)], fontsize=8)
+    ax.set_yticklabels([f'{y}°{"S" if y < 0 else ("N" if y > 0 else "")}' for y in range(-90, 91, 30)], fontsize=8)
 
 
 def plot_map(data, lats, lons, title, path,
@@ -141,27 +199,14 @@ def plot_map(data, lats, lons, title, path,
 
     lon2d, lat2d = np.meshgrid(lons, lats)
 
-    if HAS_CARTOPY:
-        proj = ccrs.PlateCarree()
-        _, ax = plt.subplots(figsize=(12, 5),
-                              subplot_kw={'projection': proj})
-        _add_land(ax)
-        im = ax.pcolormesh(lon2d, lat2d, data,
-                           cmap=cmap, vmin=vmin, vmax=vmax,
-                           shading='auto', transform=proj, zorder=1)
-        ax.set_extent([-180, 180, -90, 90], crs=proj)
-        _set_ticks(ax)
-        ax.gridlines(alpha=0.3, linewidth=0.5, draw_labels=False)
-    else:
-        _, ax = plt.subplots(figsize=(12, 5))
-        im = ax.pcolormesh(lon2d, lat2d, data,
-                           cmap=cmap, vmin=vmin, vmax=vmax, shading='auto')
-        ax.set_xlabel('Longitude')
-        ax.set_ylabel('Latitude')
-        ax.set_xticks(range(-180, 181, 60))
-        ax.set_yticks(range(-90,   91, 30))
-        ax.grid(True, alpha=0.3, linewidth=0.5)
-
+    _, ax = plt.subplots(figsize=(12, 5))
+    _add_land(ax)
+    im = ax.pcolormesh(lon2d, lat2d, data,
+                       cmap=cmap, vmin=vmin, vmax=vmax, shading='auto', zorder=1)
+    ax.set_xlim(-180, 180)
+    ax.set_ylim(-90, 90)
+    _set_ticks(ax)
+    ax.grid(True, alpha=0.3, linewidth=0.5)
     plt.colorbar(im, ax=ax, label=cbar_label, fraction=0.046, pad=0.04)
     ax.set_title(title, fontsize=12)
 
@@ -189,29 +234,15 @@ def plot_map_cs(data, lats, lons, title, path,
         amax = max(np.abs(data).max(), 1e-12)
         vmin, vmax = -amax, amax
 
-    if HAS_CARTOPY:
-        proj = ccrs.PlateCarree()
-        _, ax = plt.subplots(figsize=(12, 5),
-                             subplot_kw={'projection': proj})
-        _add_land(ax)
-        im = ax.scatter(lons.ravel(), lats.ravel(), c=data.ravel(),
-                        s=16, marker='s', cmap=cmap, vmin=vmin, vmax=vmax,
-                        transform=proj, zorder=1)
-        ax.set_extent([-180, 180, -90, 90], crs=proj)
-        _set_ticks(ax)
-        ax.gridlines(alpha=0.3, linewidth=0.5, draw_labels=False)
-    else:
-        _, ax = plt.subplots(figsize=(12, 5))
-        im = ax.scatter(lons.ravel(), lats.ravel(), c=data.ravel(),
-                        s=16, marker='s', cmap=cmap, vmin=vmin, vmax=vmax)
-        ax.set_xlabel('Longitude')
-        ax.set_ylabel('Latitude')
-        ax.set_xlim(-180, 180)
-        ax.set_ylim(-90, 90)
-        ax.set_xticks(range(-180, 181, 60))
-        ax.set_yticks(range(-90,   91, 30))
-        ax.grid(True, alpha=0.3, linewidth=0.5)
-
+    _, ax = plt.subplots(figsize=(12, 5))
+    _add_land(ax)
+    im = ax.scatter(lons.ravel(), lats.ravel(), c=data.ravel(),
+                    s=16, marker='s', cmap=cmap, vmin=vmin, vmax=vmax,
+                    zorder=1)
+    ax.set_xlim(-180, 180)
+    ax.set_ylim(-90, 90)
+    _set_ticks(ax)
+    ax.grid(True, alpha=0.3, linewidth=0.5)
     plt.colorbar(im, ax=ax, label=cbar_label, fraction=0.046, pad=0.04)
     ax.set_title(title, fontsize=12)
 
@@ -248,25 +279,18 @@ def plot_map_months(data3d, lats, lons, title, path,
     lon2d, lat2d = np.meshgrid(lons, lats)
     ncols = 4
     nrows = int(np.ceil(nmon / ncols))
-    subplot_kw = {'projection': ccrs.PlateCarree()} if HAS_CARTOPY else {}
     fig, axes = plt.subplots(nrows, ncols,
-                             figsize=(4.2 * ncols, 2.2 * nrows + 0.8),
-                             subplot_kw=subplot_kw)
+                             figsize=(4.2 * ncols, 2.2 * nrows + 0.8))
     axes = np.atleast_1d(axes).ravel()
 
     im = None
     for m in range(nmon):
         ax = axes[m]
         data = data3d[m]
-        if HAS_CARTOPY:
-            _add_land(ax)
-            im = ax.pcolormesh(lon2d, lat2d, data, cmap=cmap,
-                               vmin=vmin, vmax=vmax, shading='auto',
-                               transform=ccrs.PlateCarree(), zorder=1)
-            ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
-        else:
-            im = ax.pcolormesh(lon2d, lat2d, data, cmap=cmap,
-                               vmin=vmin, vmax=vmax, shading='auto')
+        _add_land(ax)
+        im = ax.pcolormesh(lon2d, lat2d, data, cmap=cmap,
+                           vmin=vmin, vmax=vmax, shading='auto', zorder=1)
+        ax.set_xlim(-180, 180); ax.set_ylim(-90, 90)
         name = MONTH_NAMES[(start_month - 1 + m) % 12]
         ax.set_title(f'{name}   min={data.min():.2f} max={data.max():.2f}',
                      fontsize=8)
@@ -400,23 +424,12 @@ def plot_obs_locations(lat, lon, n_iter, plot_dir):
     path  = os.path.join(plot_dir, 'obs_locations.png')
     c     = np.arange(len(lat))
 
-    if HAS_CARTOPY:
-        proj = ccrs.PlateCarree()
-        fig, ax = plt.subplots(figsize=(12, 5), subplot_kw={'projection': proj})
-        _add_land(ax)
-        sc = ax.scatter(lon, lat, c=c, s=3, cmap='rainbow',
-                        transform=proj, zorder=3, alpha=0.7)
-        ax.set_extent([-180, 180, -90, 90], crs=proj)
-        _set_ticks(ax)
-        ax.gridlines(alpha=0.3, linewidth=0.5, draw_labels=False)
-    else:
-        fig, ax = plt.subplots(figsize=(12, 5))
-        sc = ax.scatter(lon, lat, c=c, s=3, cmap='rainbow', alpha=0.7)
-        ax.set_xlabel('Longitude')
-        ax.set_ylabel('Latitude')
-        ax.set_xticks(range(-180, 181, 60))
-        ax.set_yticks(range(-90,   91, 30))
-        ax.grid(True, alpha=0.3, linewidth=0.5)
+    fig, ax = plt.subplots(figsize=(12, 5))
+    _add_land(ax)
+    sc = ax.scatter(lon, lat, c=c, s=3, cmap='rainbow', alpha=0.7, zorder=3)
+    ax.set_xlim(-180, 180); ax.set_ylim(-90, 90)
+    _set_ticks(ax)
+    ax.grid(True, alpha=0.3, linewidth=0.5)
 
     plt.colorbar(sc, ax=ax, label='Observation index (proxy for time in window)',
                  fraction=0.046, pad=0.04)
@@ -533,8 +546,7 @@ def plot_forcing_latlon(data_first, data_last, iter_first, iter_last,
 
     lon2d, lat2d = np.meshgrid(lons, lats)
 
-    proj_kw = {'projection': ccrs.PlateCarree()} if HAS_CARTOPY else {}
-    fig, axes = plt.subplots(1, 3, figsize=(19, 5), subplot_kw=proj_kw)
+    fig, axes = plt.subplots(1, 3, figsize=(19, 5))
     fig.suptitle(
         'Column-integrated adjoint forcing  Σ(∂J/∂CO₂ · Δm_dry)  [m²/kg CO₂]',
         fontsize=11)
@@ -543,22 +555,13 @@ def plot_forcing_latlon(data_first, data_last, iter_first, iter_last,
         if grid is None:
             ax.set_title(f'{title}\n(no data)', fontsize=10)
             return
-        if HAS_CARTOPY:
-            _add_land(ax)
-            im = ax.pcolormesh(lon2d, lat2d, grid, cmap=cmap,
-                               vmin=vmin, vmax=vmax, shading='auto',
-                               transform=ccrs.PlateCarree(), zorder=1)
-            ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
-            _set_ticks(ax)
-            ax.gridlines(alpha=0.3, linewidth=0.5, draw_labels=False)
-        else:
-            im = ax.pcolormesh(lon2d, lat2d, grid, cmap=cmap,
-                               vmin=vmin, vmax=vmax, shading='auto')
-            ax.set_xlabel('Longitude')
-            ax.set_ylabel('Latitude')
-            ax.set_xticks(range(-180, 181, 60))
-            ax.set_yticks(range(-90,   91, 30))
-            ax.grid(True, alpha=0.3, linewidth=0.5)
+        _add_land(ax)
+        im = ax.pcolormesh(lon2d, lat2d, grid, cmap=cmap,
+                           vmin=vmin, vmax=vmax, shading='auto', zorder=1)
+        ax.set_xlim(-180, 180)
+        ax.set_ylim(-90, 90)
+        _set_ticks(ax)
+        ax.grid(True, alpha=0.3, linewidth=0.5)
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         lbl = f'{title}  (N={n_obs:,})' if n_obs else title
         ax.set_title(lbl, fontsize=10)
@@ -726,8 +729,7 @@ def plot_omf(d_first, d_last, iter_first, iter_last, lats, lons, plot_dir):
     amax  = max(amax, 1e-30)
 
     lon2d, lat2d = np.meshgrid(lons, lats)
-    proj_kw = {'projection': ccrs.PlateCarree()} if HAS_CARTOPY else {}
-    fig, axes = plt.subplots(1, 2, figsize=(15, 4.5), subplot_kw=proj_kw)
+    fig, axes = plt.subplots(1, 2, figsize=(15, 4.5))
     fig.suptitle('Time-averaged innovation  y − H(x)  [ppm]', fontsize=12)
 
     for ax, grid, n_obs, itr in [(axes[0], grid1, n1, iter_first),
@@ -735,20 +737,13 @@ def plot_omf(d_first, d_last, iter_first, iter_last, lats, lons, plot_dir):
         if grid is None:
             ax.set_title(f'Iteration {itr}\n(no data)', fontsize=10)
             continue
-        if HAS_CARTOPY:
-            _add_land(ax)
-            im = ax.pcolormesh(lon2d, lat2d, grid, cmap='RdBu_r',
-                               vmin=-amax, vmax=amax, shading='auto',
-                               transform=ccrs.PlateCarree(), zorder=1)
-            ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
-            _set_ticks(ax)
-            ax.gridlines(alpha=0.3, linewidth=0.5, draw_labels=False)
-        else:
-            im = ax.pcolormesh(lon2d, lat2d, grid, cmap='RdBu_r',
-                               vmin=-amax, vmax=amax, shading='auto')
-            ax.set_xlabel('Longitude')
-            ax.set_ylabel('Latitude')
-            ax.grid(True, alpha=0.3, linewidth=0.5)
+        _add_land(ax)
+        im = ax.pcolormesh(lon2d, lat2d, grid, cmap='RdBu_r',
+                           vmin=-amax, vmax=amax, shading='auto', zorder=1)
+        ax.set_xlim(-180, 180)
+        ax.set_ylim(-90, 90)
+        _set_ticks(ax)
+        ax.grid(True, alpha=0.3, linewidth=0.5)
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label='ppm')
         ax.set_title(f'Iteration {itr}  (N={n_obs:,})', fontsize=10)
 
@@ -1207,23 +1202,13 @@ def main():
                                      cmap='RdBu_r', vmin=0.0, vmax=2.0,
                                      shading='auto', zorder=1, **kw)
 
-            if HAS_CARTOPY:
-                proj = ccrs.PlateCarree()
-                fig, ax = plt.subplots(figsize=(12, 5),
-                                       subplot_kw={'projection': proj})
-                _add_land(ax)
-                im = _anim_artist(ax, proj)
-                ax.set_extent([-180, 180, -90, 90], crs=proj)
-                _set_ticks(ax)
-                ax.gridlines(alpha=0.3, linewidth=0.5, draw_labels=False)
-            else:
-                fig, ax = plt.subplots(figsize=(12, 5))
-                im = _anim_artist(ax)
-                ax.set_xlabel('Longitude')
-                ax.set_ylabel('Latitude')
-                ax.set_xticks(range(-180, 181, 60))
-                ax.set_yticks(range(-90,   91, 30))
-                ax.grid(True, alpha=0.3, linewidth=0.5)
+            fig, ax = plt.subplots(figsize=(12, 5))
+            _add_land(ax)
+            im = _anim_artist(ax)
+            ax.set_xlim(-180, 180)
+            ax.set_ylim(-90, 90)
+            _set_ticks(ax)
+            ax.grid(True, alpha=0.3, linewidth=0.5)
 
             plt.colorbar(im, ax=ax, label='σ  [ ]',
                          fraction=0.046, pad=0.04)
