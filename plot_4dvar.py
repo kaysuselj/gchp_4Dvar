@@ -1038,7 +1038,7 @@ def main():
     ax.legend(fontsize=9)
     ax.set_xlim(args.sigma_min, args.sigma_max)
     fig.tight_layout()
-    path = os.path.join(plot_dir, 'sigma_pdf.png')
+    path = os.path.join(plot_dir, f'sigma_pdf_iter{it:03d}.png')
     fig.savefig(path, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f'  Saved: {path}')
@@ -1048,7 +1048,7 @@ def main():
     # ------------------------------------------------------------------
     map_one(sigma, map_lats, map_lons,
             title=f'CO₂ flux scaling factor σ  (after iteration {it})',
-            path=os.path.join(plot_dir, 'sigma_map.png'),
+            path=os.path.join(plot_dir, f'sigma_map_iter{it:03d}.png'),
             cmap='RdBu_r', vmin=0.0, vmax=2.0,
             cbar_label='σ  [ ]')
 
@@ -1057,7 +1057,7 @@ def main():
     # ------------------------------------------------------------------
     map_one(sigma - 1.0, map_lats, map_lons,
             title=f'Departure from prior  σ − 1  (after iteration {it})',
-            path=os.path.join(plot_dir, 'sigma_departure.png'),
+            path=os.path.join(plot_dir, f'sigma_departure_iter{it:03d}.png'),
             cmap='RdBu_r',
             cbar_label='σ − 1  [ ]')
 
@@ -1066,7 +1066,7 @@ def main():
     # ------------------------------------------------------------------
     map_one(grad, map_lats, map_lons,
             title=f'Total gradient ∂J/∂σ  (iteration {it})',
-            path=os.path.join(plot_dir, 'gradient_map.png'),
+            path=os.path.join(plot_dir, f'gradient_map_iter{it:03d}.png'),
             cmap='RdBu_r',
             cbar_label='∂J/∂σ')
 
@@ -1076,7 +1076,7 @@ def main():
     if it >= 2:
         map_one(sigma - sigma_prev, map_lats, map_lons,
                 title=f'Last optimizer step  Δσ = σ_next − σ_prev  (iteration {it})',
-                path=os.path.join(plot_dir, 'sigma_step.png'),
+                path=os.path.join(plot_dir, f'sigma_step_iter{it:03d}.png'),
                 cmap='RdBu_r',
                 cbar_label='Δσ  [ ]')
 
