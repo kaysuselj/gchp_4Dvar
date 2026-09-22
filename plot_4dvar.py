@@ -138,8 +138,11 @@ def load_cs_coords(im, coord_file=None, search_dirs=()):
         try:
             with xr.open_dataset(p) as ds:
                 if 'lats' in ds and 'lons' in ds:
+                    raw_lons = np.squeeze(ds['lons'].values).astype(float)
+                    # GCHP stores lons in 0-360; wrap to -180..180 for plotting
+                    raw_lons = ((raw_lons + 180.0) % 360.0) - 180.0
                     return (to_faces(np.squeeze(ds['lats'].values), im),
-                            to_faces(np.squeeze(ds['lons'].values), im))
+                            to_faces(raw_lons, im))
         except Exception:
             pass
         return None
