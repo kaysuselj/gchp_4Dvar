@@ -400,14 +400,18 @@ def lbfgs_backtrack_step(x_cur, g_cur, J_cur, st, m, c1, max_bt):
         actual_dJ = float(J_cur - st['J_anchor'])
         info['pred_dJ'], info['actual_dJ'] = pred_dJ, actual_dJ
         info['rho'] = actual_dJ / pred_dJ if pred_dJ != 0.0 else float('nan')
-        # Armijo sufficient decrease (pred_dJ<0): accept only a genuine decrease.
-        accept = (actual_dJ < 0.0) and (actual_dJ <= c1 * pred_dJ)
+        # Armijo sufficient decrease: require pred_dJ<0 (descent after clipping),
+        # J decreased, and the decrease meets the Armijo bound.
+        # Without the pred_dJ<0 guard, heavy bounds-clipping can make pred_dJ>0
+        # and the Armijo inequality is then trivially satisfied by any J decrease,
+        # allowing a non-descent step with an unconstrained step size to be accepted.
+        accept = (pred_dJ < 0.0) and (actual_dJ < 0.0) and (actual_dJ <= c1 * pred_dJ)
         if not accept:
             info['reject'] = True
-            if actual_dJ >= 0.0:
-                info['reject_reason'] = 'J_rose'          # step increased the cost
-            elif pred_dJ >= 0.0:
-                info['reject_reason'] = 'nondescent_step'  # clip made the step non-descent
+            if pred_dJ >= 0.0:
+                info['reject_reason'] = 'nondescent_step'  # clip destroyed descent property
+            elif actual_dJ >= 0.0:
+                info['reject_reason'] = 'J_rose'           # step increased the cost
             else:
                 info['reject_reason'] = 'insufficient_decrease'  # decreased < Armijo bound
 
