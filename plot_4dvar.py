@@ -304,46 +304,60 @@ def _load_forcing_file(path):
 
 
 def plot_obs_time_series(forcing_dir, plot_dir):
-    """Bar chart: number of observations per hour from per-checkpoint forcing files.
+    """Bar chart: number of observations per hour.
 
-    Reads every CO2_adjoint_forcing_YYYYMMDD_HHMMz.nc4 in forcing_dir, parses
-    the timestamp from the filename, and counts len(lat_obs) in each file.
-    The obs count is the same every iteration, so any iteration's forcing dir
-    works.
+    Uses forcing_all_obs.nc4 (time_obs variable) when present — avoids opening
+    thousands of per-checkpoint files.  Falls back to the per-file glob only
+    when forcing_all_obs.nc4 is absent.
     """
-    import re
     import matplotlib.dates as mdates
 
-    pattern = os.path.join(forcing_dir, 'CO2_adjoint_forcing_*.nc4')
-    files   = sorted(glob.glob(pattern))
-    if not files:
-        print(f'  No CO2_adjoint_forcing_*.nc4 files in {forcing_dir} — '
-              'obs time series skipped.')
-        return
+    n_checkpoints = len(glob.glob(os.path.join(forcing_dir, 'CO2_adjoint_forcing_*.nc4')))
 
-    re_ts = re.compile(r'CO2_adjoint_forcing_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})z\.nc4$')
-    times, counts = [], []
-    for fpath in files:
-        m = re_ts.search(os.path.basename(fpath))
-        if not m:
-            continue
-        yr, mo, dy, hh, mm = (int(x) for x in m.groups())
-        t = np.datetime64(f'{yr:04d}-{mo:02d}-{dy:02d}T{hh:02d}:{mm:02d}', 'ns')
+    all_obs_path = os.path.join(forcing_dir, 'forcing_all_obs.nc4')
+    if os.path.isfile(all_obs_path):
         try:
-            ds = xr.open_dataset(fpath)
-            n  = ds.sizes.get('obs', 0)
+            ds     = xr.open_dataset(all_obs_path)
+            times  = ds['time_obs'].values.astype('datetime64[ns]')
             ds.close()
-        except Exception:
-            n = 0
-        times.append(t)
-        counts.append(n)
+        except Exception as e:
+            print(f'  WARNING: could not read {all_obs_path}: {e} — obs time series skipped.')
+            return
+        counts = np.ones(len(times), dtype=int)
+    else:
+        # Slow fallback: open every checkpoint file individually
+        import re
+        pattern = os.path.join(forcing_dir, 'CO2_adjoint_forcing_*.nc4')
+        files   = sorted(glob.glob(pattern))
+        if not files:
+            print(f'  No CO2_adjoint_forcing_*.nc4 files in {forcing_dir} — '
+                  'obs time series skipped.')
+            return
+        re_ts = re.compile(r'CO2_adjoint_forcing_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})z\.nc4$')
+        t_list, c_list = [], []
+        for fpath in files:
+            m = re_ts.search(os.path.basename(fpath))
+            if not m:
+                continue
+            yr, mo, dy, hh, mm = (int(x) for x in m.groups())
+            t = np.datetime64(f'{yr:04d}-{mo:02d}-{dy:02d}T{hh:02d}:{mm:02d}', 'ns')
+            try:
+                ds = xr.open_dataset(fpath)
+                n  = ds.sizes.get('obs', 0)
+                ds.close()
+            except Exception:
+                n = 0
+            t_list.append(np.repeat(t, n) if n > 0 else [])
+            c_list.append(n)
+        if not t_list:
+            print('  Could not parse any checkpoint files — obs time series skipped.')
+            return
+        times  = np.concatenate([x for x in t_list if len(x)]).astype('datetime64[ns]')
+        counts = np.ones(len(times), dtype=int)
 
-    if not times:
-        print('  Could not parse any checkpoint files — obs time series skipped.')
+    if len(times) == 0:
+        print('  No observations found — obs time series skipped.')
         return
-
-    times  = np.array(times,  dtype='datetime64[ns]')
-    counts = np.array(counts, dtype=int)
 
     # Bin into hourly buckets (sum checkpoints within the same hour)
     hours_trunc = times.astype('datetime64[h]')
@@ -371,7 +385,7 @@ def plot_obs_time_series(forcing_dir, plot_dir):
     ax.grid(True, axis='y', alpha=0.4, linewidth=0.5)
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d\n%HZ'))
     ax.xaxis.set_major_locator(mdates.HourLocator(interval=max(1, len(all_h) // 12)))
-    ax.text(0.01, 0.97, f'Total: {int(all_c.sum()):,} obs  |  {len(files)} checkpoints',
+    ax.text(0.01, 0.97, f'Total: {int(all_c.sum()):,} obs  |  {n_checkpoints} checkpoints',
             transform=ax.transAxes, fontsize=9, va='top', color='0.3')
     plt.tight_layout()
     path = os.path.join(plot_dir, 'obs_time_series.png')
