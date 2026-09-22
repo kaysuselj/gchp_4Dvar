@@ -294,7 +294,8 @@ def _gamma_scale(g, s_hist, y_hist, m_used):
 # — identical to lbfgsb_step_monthly.py (control-vector agnostic; flat arrays)
 # ---------------------------------------------------------------------------
 
-def lbfgs_backtrack_step(x_cur, g_cur, J_cur, st, m, c1, max_bt):
+def lbfgs_backtrack_step(x_cur, g_cur, J_cur, st, m, c1, max_bt,
+                         sigma_min=0.0, sigma_max=3.0):
     """One projected L-BFGS step with a line search deferred across outer
     iterations.  PURE (no I/O) so it can be unit-tested on a toy quadratic.
 
@@ -403,7 +404,7 @@ def lbfgs_backtrack_step(x_cur, g_cur, J_cur, st, m, c1, max_bt):
 
     # projected trial point along d from the current anchor
     x_raw  = st['x_anchor'] + st['alpha'] * st['d']
-    x_next = np.clip(x_raw, 0.0, None)
+    x_next = np.clip(x_raw, sigma_min, sigma_max)
     info['gTd']        = gTd
     info['alpha']      = st['alpha']
     info['n_backtrack'] = st['n_bt']
@@ -431,7 +432,11 @@ def main():
     parser.add_argument('--nlon',    type=int,   default=72)
     parser.add_argument('--cs-res',  type=int,   default=24,
                         help='Cubed-sphere face size im (C{im}) for --grid cs')
-    parser.add_argument('--sigma-b', type=float, default=0.2)
+    parser.add_argument('--sigma-b',   type=float, default=0.2)
+    parser.add_argument('--sigma-min', type=float, default=0.0,
+                        help='Lower bound for sigma (default: 0)')
+    parser.add_argument('--sigma-max', type=float, default=3.0,
+                        help='Upper bound for sigma (default: 3)')
     parser.add_argument('--m',       type=int,   default=10,
                         help='L-BFGS-B memory (number of vector pairs)')
     parser.add_argument('--t-start', default='2019-01-01')
@@ -565,7 +570,8 @@ def main():
               x_best=x_best, J_best=J_best, it_best=it_best,
               n_reject_total=n_reject_total)
     x_next, st, info = lbfgs_backtrack_step(x_cur, g_cur, J_cur, st,
-                                            m, args.c1, args.max_backtrack)
+                                            m, args.c1, args.max_backtrack,
+                                            args.sigma_min, args.sigma_max)
 
     # console step report
     if info.get('action') in ('accept', 'init'):

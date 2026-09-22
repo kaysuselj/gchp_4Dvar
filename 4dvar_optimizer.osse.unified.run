@@ -197,6 +197,8 @@ NLON=${NLON:-72}
 # gradient 30-200x weaker than g_obs at hotspots; 1/sigma_b^2 -> 6.25x stronger).
 # Do not change across a RESTART (J would jump discontinuously mid-optimization).
 SIGMA_B=${SIGMA_B:-0.2}
+SIGMA_MIN=${SIGMA_MIN:-0.0}              # lower bound for sigma (physical: >= 0)
+SIGMA_MAX=${SIGMA_MAX:-3.0}              # upper bound for sigma (sanity cap)
 MAX_ITER=${MAX_ITER:-20}                 # GLOBAL iteration cap across all chained jobs
 GTOL=${GTOL:-1e-5}
 FTOL=${FTOL:-1e-8}
@@ -229,7 +231,7 @@ EST_MONTH_ADJ_S=${EST_MONTH_ADJ_S:-1200} # ~20 min/mo adjoint budget (measured ~
 EST_FORWARD_S=${EST_FORWARD_S:-$(( NMON * EST_MONTH_FWD_S ))}
 EST_ADJOINT_S=${EST_ADJOINT_S:-$(( NMON * EST_MONTH_ADJ_S ))}
 
-VPASS="MODE=${MODE},MAX_ITER=${MAX_ITER},SIGMA_B=${SIGMA_B},GTOL=${GTOL},FTOL=${FTOL}"
+VPASS="MODE=${MODE},MAX_ITER=${MAX_ITER},SIGMA_B=${SIGMA_B},SIGMA_MIN=${SIGMA_MIN},SIGMA_MAX=${SIGMA_MAX},GTOL=${GTOL},FTOL=${FTOL}"
 VPASS="${VPASS},T_START=${T_START},T_END=${T_END}"
 VPASS="${VPASS},SAVE_DIAG=${SAVE_DIAG},NLAT=${NLAT},NLON=${NLON},CHAIN=${CHAIN}"
 VPASS="${VPASS},MAX_CHAIN=${MAX_CHAIN},WALLTIME_S=${WALLTIME_S},WALLTIME_MARGIN_S=${WALLTIME_MARGIN_S}"
@@ -454,6 +456,8 @@ make_plots() {
         --log-file    "${LOG_FILE}" \
         --plot-dir    "${PLOT_DIR}" \
         --coord-file  "${coord_file}" \
+        --sigma-min   "${SIGMA_MIN}" \
+        --sigma-max   "${SIGMA_MAX}" \
         && log "Plots saved to ${PLOT_DIR}" \
         || log "WARNING: plot_4dvar.py failed (plots not generated)"
 }
@@ -640,6 +644,7 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
                 --nlat "${NLAT}" --nlon "${NLON}" \
                 --n-months "${NMON}" \
                 --sigma-b "${SIGMA_B}" \
+                --sigma-min "${SIGMA_MIN}" --sigma-max "${SIGMA_MAX}" \
                 --t-start "${T_START}" --t-end "${T_END}" \
                 --gtol "${GTOL}" --ftol "${FTOL}" \
                 || rc=$?
@@ -651,6 +656,7 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
                 --grid "${GRID}" \
                 --nlat "${NLAT}" --nlon "${NLON}" --cs-res "${CS_RES}" \
                 --sigma-b "${SIGMA_B}" \
+                --sigma-min "${SIGMA_MIN}" --sigma-max "${SIGMA_MAX}" \
                 --t-start "${T_START}" \
                 --gtol "${GTOL}" --ftol "${FTOL}" \
                 || rc=$?

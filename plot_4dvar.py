@@ -933,6 +933,10 @@ def main():
     parser.add_argument('--coord-file', default=None,
                         help='NetCDF file with native-CS lats/lons (GRID=cs '
                              'only; auto-probed from --output-dir if omitted)')
+    parser.add_argument('--sigma-min', type=float, default=0.0,
+                        help='Lower bound for sigma PDF x-axis (default: 0)')
+    parser.add_argument('--sigma-max', type=float, default=3.0,
+                        help='Upper bound for sigma PDF x-axis (default: 3)')
     args = parser.parse_args()
 
     plot_dir = args.plot_dir or os.path.dirname(os.path.abspath(args.state_file))
@@ -1003,7 +1007,30 @@ def main():
     print()
 
     # ------------------------------------------------------------------
-    # 1. Sigma map
+    # 1. Sigma PDF
+    # ------------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(7, 4))
+    bins = np.linspace(args.sigma_min, args.sigma_max, 101)
+    ax.hist(sigma.ravel(), bins=bins, density=True,
+            color='steelblue', edgecolor='white', linewidth=0.3)
+    ax.axvline(1.0, color='k', linestyle='--', linewidth=1.0, label='prior (σ=1)')
+    ax.axvline(sigma.mean(), color='red', linestyle='-', linewidth=1.2,
+               label=f'mean={sigma.mean():.3f}')
+    ax.set_xlabel('σ  [ ]')
+    ax.set_ylabel('Probability density')
+    ax.set_title(f'σ distribution  (after iteration {it})\n'
+                 f'min={sigma.min():.3f}  max={sigma.max():.3f}  '
+                 f'mean={sigma.mean():.3f}  n_cells={sigma.size}')
+    ax.legend(fontsize=9)
+    ax.set_xlim(args.sigma_min, args.sigma_max)
+    fig.tight_layout()
+    path = os.path.join(plot_dir, 'sigma_pdf.png')
+    fig.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f'  Saved: {path}')
+
+    # ------------------------------------------------------------------
+    # 2. Sigma map  (was 1)
     # ------------------------------------------------------------------
     map_one(sigma, map_lats, map_lons,
             title=f'CO₂ flux scaling factor σ  (after iteration {it})',
