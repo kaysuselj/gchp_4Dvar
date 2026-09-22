@@ -50,6 +50,7 @@
 #   qsub -v GRID=latlon 4dvar_optimizer.osse.unified.run        # annual on lat-lon
 #   qsub -v MODE=monthly,T_END=2016-04-01 4dvar_optimizer.osse.unified.run  # monthly, fresh (3-month Jan-Mar)
 #   qsub -v EXP_NAME=expA 4dvar_optimizer.osse.unified.run      # isolated parallel run
+#   qsub -l select=2:ncpus=24:mpiprocs=24:model=bro_ele -v NODES=2 4dvar_optimizer.osse.unified.run  # 48 cores (2 nodes)
 #   qsub -v RESTART=true,MODE=monthly,T_END=2016-04-01[,EXP_NAME=expA] 4dvar_optimizer.osse.unified.run
 #   qsub -v MODE=annual,MAX_ITER=10,SIGMA_B=0.3 4dvar_optimizer.osse.unified.run
 #   # short annual run needs less walltime:
@@ -202,6 +203,13 @@ FTOL=${FTOL:-1e-8}
 SAVE_DIAG=${SAVE_DIAG:-true}
 RESTART=${RESTART:-false}
 
+# Parallelism knob: one PBS node = 24 MPI ranks, so total cores = NODES * 24,
+# mapped to a cubed-sphere layout by NXNY_AUTO in runConfig. Default 1 node
+# (24 cores) = the historic behavior. NODES>1 also needs a matching PBS
+# allocation on the initial submit (the self-resubmit sets it automatically):
+#   qsub -l select=${NODES}:ncpus=24:mpiprocs=24:model=bro_ele -v NODES=${NODES},...
+NODES=${NODES:-1}
+
 # ============================================================
 #  Job chaining / walltime budget
 # ============================================================
@@ -212,8 +220,12 @@ WALLTIME_S=${WALLTIME_S:-86400}          # must match the #PBS walltime
 WALLTIME_MARGIN_S=${WALLTIME_MARGIN_S:-1800}
 # Per-simulated-month cost estimates; the whole forward/adjoint estimate scales
 # with the window so both annual (1 month) and monthly (12 months) are correct.
-EST_MONTH_FWD_S=${EST_MONTH_FWD_S:-6000} # ~1.7 h forward per simulated month
-EST_MONTH_ADJ_S=${EST_MONTH_ADJ_S:-6000} # ~1.7 h adjoint per simulated month
+# Measured on the C24 3-month monthly run (3months_osse, 2026-08-05): forward
+# ~18 min/mo, adjoint ~12 min/mo. Defaults set above measured + margin for slow
+# nodes. The old 6000 (1.7 h/mo) over-budgeted a 12-month iteration past 24 h and
+# forced constant self-resubmit; override via -v for an unusually slow platform.
+EST_MONTH_FWD_S=${EST_MONTH_FWD_S:-1800} # ~30 min/mo forward budget (measured ~18)
+EST_MONTH_ADJ_S=${EST_MONTH_ADJ_S:-1200} # ~20 min/mo adjoint budget (measured ~12)
 EST_FORWARD_S=${EST_FORWARD_S:-$(( NMON * EST_MONTH_FWD_S ))}
 EST_ADJOINT_S=${EST_ADJOINT_S:-$(( NMON * EST_MONTH_ADJ_S ))}
 
@@ -222,7 +234,7 @@ VPASS="${VPASS},T_START=${T_START},T_END=${T_END}"
 VPASS="${VPASS},SAVE_DIAG=${SAVE_DIAG},NLAT=${NLAT},NLON=${NLON},CHAIN=${CHAIN}"
 VPASS="${VPASS},MAX_CHAIN=${MAX_CHAIN},WALLTIME_S=${WALLTIME_S},WALLTIME_MARGIN_S=${WALLTIME_MARGIN_S}"
 VPASS="${VPASS},EST_MONTH_FWD_S=${EST_MONTH_FWD_S},EST_MONTH_ADJ_S=${EST_MONTH_ADJ_S}"
-VPASS="${VPASS},GRID=${GRID},EXP_NAME=${EXP_NAME}"
+VPASS="${VPASS},GRID=${GRID},EXP_NAME=${EXP_NAME},NODES=${NODES}"
 
 # Queue job name: derive from EXP_NAME so runs are distinguishable in qstat
 # (e.g. EXP_NAME=1year_osse -> "gchp_1year_osse").  Falls back to the historic
@@ -244,7 +256,8 @@ resubmit() {
         die "MAX_CHAIN=${MAX_CHAIN} chained jobs reached — refusing to resubmit (raise MAX_CHAIN if intended)"
     fi
     log "Resubmitting self (chain job $((CHAIN_N + 1)))"
-    qsub -N "${JOB_NAME}" -v "RESTART=true,CHAIN_N=$((CHAIN_N + 1)),${VPASS}" "${SELF}" \
+    qsub -N "${JOB_NAME}" -l "select=${NODES}:ncpus=24:mpiprocs=24:model=bro_ele" \
+        -v "RESTART=true,CHAIN_N=$((CHAIN_N + 1)),${VPASS}" "${SELF}" \
         || die "qsub resubmission failed — resume manually with RESTART=true"
     exit 0
 }
@@ -310,11 +323,20 @@ rsync -a "${CTRL_FWD_DIR}/" "${FWD_DIR}/"
 rsync -a "${CTRL_ADJ_DIR}/" "${ADJ_DIR}/"
 log "Control files synced to run directories"
 
-NCORES=$(awk -F'[[:space:]:]+' '/^NX[[:space:]:]/ {nx=$2} /^NY[[:space:]:]/ {ny=$2} \
-         END {print nx*ny}' "${FWD_DIR}/GCHP.rc")
-{ [ -z "${NCORES}" ] || [ "${NCORES}" -le 0 ]; } && \
-    die "Could not parse NX/NY from ${FWD_DIR}/GCHP.rc (got '${NCORES}')"
-log "Core count from GCHP.rc: ${NCORES}"
+# Core count = NODES * 24, driven through runConfig's TOTAL_CORES. NXNY_AUTO=ON
+# regenerates GCHP.rc NX/NY from TOTAL_CORES on every run (line ~509), so the
+# durable knob is TOTAL_CORES in runConfig — patching GCHP.rc directly would be
+# overwritten. Applied to both the forward and adjoint run dirs.
+NCORES=$(( NODES * 24 ))
+# runConfig enforces TOTAL_CORES == NUM_NODES * NUM_CORES_PER_NODE, so set both
+# (NUM_CORES_PER_NODE stays 24, NUM_NODES = NODES).
+for _rcfg in "${FWD_DIR}/runConfig_forward.sh" "${ADJ_DIR}/runConfig_adjoint.sh"; do
+    [ -f "${_rcfg}" ] || die "runConfig not found: ${_rcfg}"
+    sed -i -E "s/^TOTAL_CORES=.*/TOTAL_CORES=${NCORES}/; s/^NUM_NODES=.*/NUM_NODES=${NODES}/" "${_rcfg}"
+    grep -qxE "TOTAL_CORES=${NCORES}" "${_rcfg}" || die "failed to set TOTAL_CORES=${NCORES} in ${_rcfg}"
+    grep -qxE "NUM_NODES=${NODES}"    "${_rcfg}" || die "failed to set NUM_NODES=${NODES} in ${_rcfg}"
+done
+log "Core count: NODES=${NODES} -> ${NCORES} cores (runConfig TOTAL_CORES=${NCORES} NUM_NODES=${NODES}, NXNY_AUTO)"
 
 [ -f "${FWD_DIR}/gchp" ] || die "Forward GCHP executable not found: ${FWD_DIR}/gchp"
 [ -f "${ADJ_DIR}/gchp" ] || die "Adjoint GCHP executable not found: ${ADJ_DIR}/gchp"

@@ -13,6 +13,13 @@ Usage:
         --ts-chem 1200 \\
         --t-start 2016-01-01T00:00:00 --t-end 2016-01-31T23:59:59
 
+    # OSSE with semi-obs truth (replaces ORCHIDEE-ECCO2 xCO2 with truth from
+    # the default forward run; AK / apriori / uncertainty still from L2#):
+    python ./co2_adjoint_forcing_osse.py gchp_file [...] output_dir \\
+        --ts-chem 1200 \\
+        --t-start 2016-01-01T00:00:00 --t-end 2016-04-01T00:00:00 \\
+        --semi-obs-dir /path/to/semi-obs/forward_run/OutputDir
+
 Arguments:
     gchp_file    : one or more GCHP sat-track netCDF files
                    (GEOSChem.sat_track.*).  A year-long run keeps its 12
@@ -23,9 +30,15 @@ Arguments:
                    disjoint in time, which MAPL monthly files are.
     output_dir   : output directory (created if absent); one file per checkpoint
 
-    --ts-chem    : chemistry timestep [s] for checkpoint binning (required)
-    --t-start    : start of assimilation window YYYY-MM-DDTHH:MM:SS (required)
-    --t-end      : end of assimilation window (required)
+    --ts-chem       : chemistry timestep [s] for checkpoint binning (required)
+    --t-start       : start of assimilation window YYYY-MM-DDTHH:MM:SS (required)
+    --t-end         : end of assimilation window (required)
+    --semi-obs-dir  : directory containing GEOSChem.sat_track.*.nc4 from the
+                      default (unperturbed) forward run (semi-observations truth).
+                      When given, AK is applied to the semi-obs CO2 profiles to
+                      produce truth xCO2, replacing the ORCHIDEE-ECCO2 xCO2.
+                      The observation AK, apriori, pressure, and uncertainty are
+                      still read from the ORCHIDEE-ECCO2 L2# dataset.
 
 Environment setup:
     python -m venv gchp-env
@@ -197,6 +210,147 @@ def read_oco_monthly_osse(year, month, base_fold):
         return combined
     else:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Semi-obs truth reader
+# ---------------------------------------------------------------------------
+
+def _load_semi_obs_month(semi_obs_dir, year, month):
+    """Load semi-obs GEOSChem.sat_track.*.nc4 files for one month.
+
+    Returns a dict with keys 'times', 'lats', 'lons', 'co2', 'prs', where:
+      times : pd.DatetimeIndex (N,)
+      lats  : (N,) degrees_north
+      lons  : (N,) degrees, normalized to [0, 360)
+      co2   : (N, nlev) SpeciesConcVV_CO2 [mol/mol]
+      prs   : (N, nlev) Met_PMIDDRY [hPa]
+
+    Returns None if no matching files are found.
+    """
+    pattern = os.path.join(semi_obs_dir,
+                           f'GEOSChem.sat_track.{year:04d}{month:02d}*.nc4')
+    files = sorted(glob.glob(pattern))
+    if not files:
+        print(f'  semi-obs: no files matching {pattern}')
+        return None
+
+    all_times, all_lats, all_lons, all_co2, all_prs = [], [], [], [], []
+    for f in files:
+        ds = xr.open_dataset(f)
+        times = pd.DatetimeIndex(pd.to_datetime(ds['time'].values).round('s'))
+        lats  = (ds['latitude'].values  if 'latitude'  in ds else ds['lat'].values)
+        lons  = (ds['longitude'].values if 'longitude' in ds else ds['lon'].values) % 360
+        co2   = ds['SpeciesConcVV_CO2'].transpose('time', 'lev').values
+        prs   = ds['Met_PMIDDRY'].transpose('time', 'lev').values
+        all_times.extend(list(times))
+        all_lats.extend(list(lats))
+        all_lons.extend(list(lons))
+        all_co2.extend(list(co2))
+        all_prs.extend(list(prs))
+        ds.close()
+
+    print(f'  semi-obs: loaded {len(all_times)} profiles from {len(files)} file(s) '
+          f'({year}-{month:02d})')
+    return {
+        'times': pd.DatetimeIndex(all_times),
+        'lats':  np.array(all_lats,  dtype=np.float64),
+        'lons':  np.array(all_lons,  dtype=np.float64),
+        'co2':   np.array(all_co2,   dtype=np.float64),
+        'prs':   np.array(all_prs,   dtype=np.float64),
+    }
+
+
+def _get_truth_xco2(semi_obs, t_gchp, lat_gchp, lon_gchp,
+                    prs_obs_j, xAK_j, co2_apr_j, xco2_apr_j,
+                    tol_time_s=60, tol_lat=0.1, tol_lon=0.1):
+    """Apply AK operator to the matching semi-obs profile to get truth xCO2.
+
+    Finds the semi-obs profile closest in time/lat/lon to (t_gchp, lat_gchp,
+    lon_gchp), then applies the L2# averaging kernel to its CO2 column to
+    compute truth xCO2 [ppm].  Returns None if no match within tolerance.
+    """
+    tol_time = pd.Timedelta(seconds=tol_time_s)
+    time_deltas = np.abs(semi_obs['times'] - t_gchp)
+    time_mask   = time_deltas <= tol_time
+    if not np.any(time_mask):
+        return None
+
+    idxs     = np.where(time_mask)[0]
+    lats_m   = semi_obs['lats'][idxs]
+    lons_m   = semi_obs['lons'][idxs]
+    lon_norm = lon_gchp % 360
+
+    lat_diffs = np.abs(lats_m - lat_gchp)
+    lon_diffs = np.abs(lons_m - lon_norm)
+    lon_diffs = np.minimum(lon_diffs, 360 - lon_diffs)
+
+    best = np.argmin(np.sqrt(lat_diffs**2 + lon_diffs**2))
+    if lat_diffs[best] > tol_lat or lon_diffs[best] > tol_lon:
+        return None
+
+    idx = idxs[best]
+    prs_semi = semi_obs['prs'][idx]   # (nlev,) hPa, surface-first (descending)
+    co2_semi = semi_obs['co2'][idx]   # (nlev,) mol/mol
+
+    # Interpolate semi-obs CO2 to satellite pressure levels (same as OSSE profile)
+    sort_idx      = np.argsort(prs_semi)
+    co2_semi_interp = np.interp(prs_obs_j,
+                                prs_semi[sort_idx],
+                                co2_semi[sort_idx])
+
+    # Apply AK: x̂ = x_a + AK^T (x_model - x_a)  [mol/mol]
+    co2_pert   = co2_semi_interp - co2_apr_j
+    xco2_truth = xco2_apr_j + np.sum(xAK_j * co2_pert)
+    return float(xco2_truth) * 1e6   # mol/mol → ppm
+
+
+def _load_semi_obs_file(path):
+    """Load pre-computed truth xCO2 from make_semi_obs_xco2.py output.
+
+    Returns a dict keyed by (time_ns, lat_4dp, lon_4dp) — the rounded L2# obs
+    position — mapping to (xco2_truth_ppm, xco2_uncertainty_ppm).
+
+    Keying by the L2# obs position (not the GCHP track position) guarantees that
+    the forcing script looks up truth xCO2 for exactly the same L2# obs record
+    that provided the AK for ŷ_k, so both ŷ_k and y_k always use the same kernel.
+    """
+    ds = xr.open_dataset(path)
+    times = pd.DatetimeIndex(pd.to_datetime(ds['time'].values).round('s'))
+    lats  = ds['latitude'].values.astype(np.float64)
+    lons  = ds['longitude'].values.astype(np.float64) % 360
+    xco2  = ds['xco2_truth'].values.astype(np.float64)
+    unc   = (ds['xco2_uncertainty'].values.astype(np.float64)
+             if 'xco2_uncertainty' in ds else np.ones(len(times)))
+    ds.close()
+
+    lookup = {}
+    for i in range(len(times)):
+        key = (times[i].value,
+               round(float(lats[i]), 4),
+               round(float(lons[i]), 4))
+        lookup[key] = (float(xco2[i]), float(unc[i]))
+
+    print(f'Semi-obs file: {len(lookup)} truth xCO2 obs loaded from '
+          f'{os.path.basename(path)}')
+    return lookup
+
+
+def _get_truth_xco2_from_file(semi_obs_lookup, t_l2obs, lat_l2obs, lon_l2obs):
+    """Look up pre-computed truth xCO2 using the matched L2# obs position.
+
+    Pass the time/lat/lon of the L2# obs record (obs_times[idx_obs],
+    obs_lats[idx_obs], obs_lons[idx_obs]) — NOT the GCHP track position.
+    This guarantees the same L2# obs (and thus the same AK) is used for
+    both ŷ_k (simulated xCO2) and y_k (truth xCO2).
+
+    Returns (xco2_truth_ppm, xco2_unc_ppm) or (None, None) if not found.
+    """
+    t_ns  = pd.Timestamp(t_l2obs).round('s').value
+    key   = (t_ns,
+             round(float(lat_l2obs), 4),
+             round(float(lon_l2obs % 360), 4))
+    return semi_obs_lookup.get(key, (None, None))
 
 
 # ---------------------------------------------------------------------------
@@ -378,7 +532,8 @@ def _check_input_files(gchp_files, t_start, t_end):
 
 
 def _accumulate_forcing(gchp_files, t_start, t_end, ts_chem_s,
-                        obs_error_inflation=1.0):
+                        obs_error_inflation=1.0, semi_obs_dir=None,
+                        semi_obs_data=None):
     """
     Apply the obs operator to one or more GCHP sat-track files (e.g. the 12
     monthly files of a year-long run) and merge everything onto a single
@@ -408,11 +563,17 @@ def _accumulate_forcing(gchp_files, t_start, t_end, ts_chem_s,
     levs        = None
     stats       = {'matched': 0, 'time_rejected': 0, 'spatial_rejected': 0}
 
+    if semi_obs_dir:
+        print(f'Semi-obs dir: {semi_obs_dir}')
+    if semi_obs_data is not None:
+        print(f'Semi-obs file: {len(semi_obs_data)} pre-computed truth obs')
+
     for gchp_file in gchp_files:
         print(f'=== {os.path.basename(gchp_file)}')
         levs_f, J_file = _accumulate_forcing_one_file(
             gchp_file, checkpoints, obs_by_ckpt, stats, t_start, t_end,
-            ts_chem_s, obs_error_inflation)
+            ts_chem_s, obs_error_inflation, semi_obs_dir=semi_obs_dir,
+            semi_obs_data=semi_obs_data)
         J_total += J_file
         if levs is None:
             levs = levs_f
@@ -432,10 +593,13 @@ def _accumulate_forcing(gchp_files, t_start, t_end, ts_chem_s,
 
 def _accumulate_forcing_one_file(gchp_file, checkpoints, obs_by_ckpt, stats,
                                  t_start, t_end, ts_chem_s,
-                                 obs_error_inflation=1.0):
+                                 obs_error_inflation=1.0, semi_obs_dir=None,
+                                 semi_obs_data=None):
     """Match one sat-track file's profiles and append into obs_by_ckpt.
 
     Returns (levs, J_file); updates obs_by_ckpt and stats in place.
+    When semi_obs_dir is given, truth xCO2 is derived from the AK applied to
+    the semi-obs CO2 profile (replacing ORCHIDEE-ECCO2 xco2_obs).
     """
     OBS_MATCH_TOL_TIME = pd.Timedelta(seconds=60)  # 60 seconds
     OBS_MATCH_TOL_LAT  = 0.1   # degrees latitude
@@ -492,6 +656,13 @@ def _accumulate_forcing_one_file(gchp_file, checkpoints, obs_by_ckpt, stats,
         if ds_obs is None:
             print('  No OSSE OCO-2 data, skipping')
             continue
+
+        semi_obs_month = None
+        if semi_obs_dir:
+            semi_obs_month = _load_semi_obs_month(semi_obs_dir, year, month)
+            if semi_obs_month is None:
+                print(f'  WARNING: no semi-obs files for {year}-{month:02d}; '
+                      'falling back to ORCHIDEE-ECCO2 xCO2 for this month')
 
         obs_times    = pd.DatetimeIndex(ds_obs['time'].values)
         obs_lats     = ds_obs['latitude'].values
@@ -571,6 +742,26 @@ def _accumulate_forcing_one_file(gchp_file, checkpoints, obs_by_ckpt, stats,
             xco2_hat_ppm = float(xco2_hat)                 * 1e6
             xco2_obs_ppm = float(xco2_obs_all[idx_obs])    * 1e6
             xco2_std_ppm = float(xco2_std_all[idx_obs])    * 1e6
+
+            # Truth xCO2 priority:
+            #   1. pre-computed file (--semi-obs-file): AK already applied.
+            #      Look up by the L2# obs position (obs_times/lats/lons[idx_obs])
+            #      so ŷ_k and y_k are guaranteed to use the same AK record.
+            #   2. sat_track dir (--semi-obs-dir): apply AK on-the-fly
+            #   3. L2# ORCHIDEE-ECCO2 xco2_obs (default)
+            if semi_obs_data is not None:
+                xco2_truth, _ = _get_truth_xco2_from_file(
+                    semi_obs_data,
+                    obs_times[idx_obs], obs_lats[idx_obs], obs_lons[idx_obs])
+                if xco2_truth is not None:
+                    xco2_obs_ppm = xco2_truth
+            elif semi_obs_month is not None:
+                xco2_truth = _get_truth_xco2(
+                    semi_obs_month, t_gchp, lat_gchp, lon_gchp,
+                    prs_obs_j, xAK_all[idx_obs],
+                    co2_apr_all[idx_obs], xco2_apr_all[idx_obs])
+                if xco2_truth is not None:
+                    xco2_obs_ppm = xco2_truth
 
             ckpt_idx = nearest_checkpoint(t_gchp, checkpoints, ts_chem_s)
             if ckpt_idx < 0:
@@ -785,7 +976,8 @@ def write_daily_forcing(output_path, obs_by_ckpt, levs, checkpoints):
 # ---------------------------------------------------------------------------
 
 def co2_adjoint_forcing(gchp_files, output_dir, ts_chem_s, t_start, t_end,
-                        save_diagnostics=True, obs_error_inflation=1.0):
+                        save_diagnostics=True, obs_error_inflation=1.0,
+                        semi_obs_dir=None, semi_obs_file=None):
 
     if isinstance(gchp_files, (str, os.PathLike)):
         gchp_files = [gchp_files]
@@ -795,9 +987,14 @@ def co2_adjoint_forcing(gchp_files, output_dir, ts_chem_s, t_start, t_end,
         print(f'Observation-error inflation factor: {obs_error_inflation} '
               f'(J_obs and forcing scale by 1/{obs_error_inflation**2:g})')
 
+    semi_obs_data = None
+    if semi_obs_file:
+        semi_obs_data = _load_semi_obs_file(semi_obs_file)
+
     checkpoints, obs_by_ckpt, levs, J = \
         _accumulate_forcing(gchp_files, t_start, t_end, ts_chem_s,
-                            obs_error_inflation)
+                            obs_error_inflation, semi_obs_dir=semi_obs_dir,
+                            semi_obs_data=semi_obs_data)
 
     # Remove forcing files left over from a previous simulation.  Everything
     # on the current checkpoint grid is overwritten below, but a file at a
@@ -881,17 +1078,30 @@ if __name__ == '__main__':
                         help='Multiply all observation uncertainties by this '
                              'factor (accounts for correlated retrieval '
                              'errors; scales J_obs and forcing by 1/f^2)')
+    parser.add_argument('--semi-obs-file', default=None, dest='semi_obs_file',
+                        help='Path to pre-computed truth xCO2 netCDF from '
+                             'make_semi_obs_xco2.py (contains xco2_truth with '
+                             'AK already applied). Preferred over --semi-obs-dir.')
+    parser.add_argument('--semi-obs-dir', default=None, dest='semi_obs_dir',
+                        help='Directory containing GEOSChem.sat_track.*.nc4 '
+                             'from the default (unperturbed) forward run. '
+                             'AK is applied on-the-fly each iteration. '
+                             'Use --semi-obs-file instead when available.')
     args = parser.parse_args()
 
     if args.obs_error_inflation <= 0:
         parser.error('--obs-error-inflation must be > 0')
+    if args.semi_obs_file and args.semi_obs_dir:
+        parser.error('--semi-obs-file and --semi-obs-dir are mutually exclusive')
 
     co2_adjoint_forcing(
-        gchp_files       = args.gchp_files,
-        output_dir       = args.output_dir,
-        ts_chem_s        = args.ts_chem_s,
-        t_start          = pd.Timestamp(args.t_start),
-        t_end            = pd.Timestamp(args.t_end),
-        save_diagnostics = args.save_diagnostics,
+        gchp_files          = args.gchp_files,
+        output_dir          = args.output_dir,
+        ts_chem_s           = args.ts_chem_s,
+        t_start             = pd.Timestamp(args.t_start),
+        t_end               = pd.Timestamp(args.t_end),
+        save_diagnostics    = args.save_diagnostics,
         obs_error_inflation = args.obs_error_inflation,
+        semi_obs_file       = args.semi_obs_file,
+        semi_obs_dir        = args.semi_obs_dir,
     )
