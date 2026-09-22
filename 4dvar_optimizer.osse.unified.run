@@ -296,6 +296,17 @@ if [ -n "${EXP_NAME}" ]; then
 fi
 
 # ============================================================
+#  Copy control files to run directories (must come before gchp.env source)
+# ============================================================
+[ -d "${CTRL_FWD_DIR}" ] || die "Forward control files not found: ${CTRL_FWD_DIR}"
+[ -d "${CTRL_ADJ_DIR}" ] || die "Adjoint control files not found: ${CTRL_ADJ_DIR}"
+mkdir -p "${FORCING_DIR}" "${OUTPUT_DIR}" "${ADJ_DIR}/Restarts" "${FWD_DIR}/Restarts"
+[ "${MODE}" = "monthly" ] && mkdir -p "${SIGMA_DIR}"
+rsync -a "${CTRL_FWD_DIR}/" "${FWD_DIR}/"
+rsync -a "${CTRL_ADJ_DIR}/" "${ADJ_DIR}/"
+log "Control files synced to run directories"
+
+# ============================================================
 #  Environment
 # ============================================================
 GCHP_ENV="${FWD_DIR}/gchp.env"
@@ -312,18 +323,6 @@ export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
 python3 -c "import numpy, pandas, xarray, netCDF4" 2>/dev/null \
     || die "Python env is missing required packages (numpy pandas xarray netCDF4)"
 echo "Python env: $(python3 --version)  from ${PYTHON_ENV}"
-
-mkdir -p "${FORCING_DIR}" "${OUTPUT_DIR}" "${ADJ_DIR}/Restarts" "${FWD_DIR}/Restarts"
-[ "${MODE}" = "monthly" ] && mkdir -p "${SIGMA_DIR}"
-
-# ============================================================
-#  Copy control files to run directories
-# ============================================================
-[ -d "${CTRL_FWD_DIR}" ] || die "Forward control files not found: ${CTRL_FWD_DIR}"
-[ -d "${CTRL_ADJ_DIR}" ] || die "Adjoint control files not found: ${CTRL_ADJ_DIR}"
-rsync -a "${CTRL_FWD_DIR}/" "${FWD_DIR}/"
-rsync -a "${CTRL_ADJ_DIR}/" "${ADJ_DIR}/"
-log "Control files synced to run directories"
 
 # Core count = NODES * 24, driven through runConfig's TOTAL_CORES. NXNY_AUTO=ON
 # regenerates GCHP.rc NX/NY from TOTAL_CORES on every run (line ~509), so the
