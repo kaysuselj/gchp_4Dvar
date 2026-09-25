@@ -53,6 +53,7 @@ GRID_LABELS: #PE24x144-CF
 # Declare collection names and toggle on/off with #
 #==============================================================================
 COLLECTIONS: 'sat_track',
+             'SurfaceFluxMonthly',
              #'Emissions',
              #'SpeciesConc',
              #'Metrics',
@@ -179,6 +180,24 @@ COLLECTIONS: 'sat_track',
                               #'EmisCO2_Aviation     ', 'GCHPchem',
                               #'EmisCO2_CO2SurfCorr  ', 'GCHPchem',
                               #'EmisCO2_BiomassBurn  ', 'GCHPchem',
+::
+#==============================================================================
+# Monthly mean surface CO2 fluxes (active OSSE sources only; CO2SurfCorr excluded)
+  SurfaceFluxMonthly.template:         '%y4%m2z.nc4',
+  SurfaceFluxMonthly.format:           'CFIO',
+  SurfaceFluxMonthly.timestampStart:   .true.
+  SurfaceFluxMonthly.monthly:          1
+  SurfaceFluxMonthly.frequency:        010000
+  SurfaceFluxMonthly.duration:         010000
+  SurfaceFluxMonthly.mode:             'time-averaged'
+  SurfaceFluxMonthly.fields:           'EmisCO2_Total        ', 'GCHPchem',
+                                       'EmisCO2_FossilFuel   ', 'GCHPchem',
+                                       'EmisCO2_Ocean        ', 'GCHPchem',
+                                       'EmisCO2_BalBiosph    ', 'GCHPchem',
+                                       'EmisCO2_BiomassBurn  ', 'GCHPchem',
+                                       'EmisCO2_NetTerrExch  ', 'GCHPchem',
+                                       'EmisCO2_Ship         ', 'GCHPchem',
+                                       'EmisCO2_Aviation     ', 'GCHPchem',
 ::
 #==========================================================================
 # Species concentrations (per advected species) - time-averaged values

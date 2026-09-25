@@ -1,7 +1,7 @@
 #!/bin/bash
 #PBS -S /bin/bash
 #PBS -N gchp_4dvar_osse
-#PBS -l select=1:ncpus=24:mpiprocs=24:model=bro_ele
+#PBS -l select=2:ncpus=24:mpiprocs=24:model=bro_ele
 #PBS -l walltime=24:00:00
 #PBS -q long
 #PBS -j oe
@@ -210,7 +210,7 @@ RESTART=${RESTART:-false}
 # (24 cores) = the historic behavior. NODES>1 also needs a matching PBS
 # allocation on the initial submit (the self-resubmit sets it automatically):
 #   qsub -l select=${NODES}:ncpus=24:mpiprocs=24:model=bro_ele -v NODES=${NODES},...
-NODES=${NODES:-1}
+NODES=${NODES:-2}
 
 # ============================================================
 #  Job chaining / walltime budget
