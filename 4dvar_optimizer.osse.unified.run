@@ -324,20 +324,21 @@ python3 -c "import numpy, pandas, xarray, netCDF4" 2>/dev/null \
     || die "Python env is missing required packages (numpy pandas xarray netCDF4)"
 echo "Python env: $(python3 --version)  from ${PYTHON_ENV}"
 
-# Copy PROJ database to /dev/shm (RAM-backed tmpfs) so pyproj/cartopy can do
-# its SQLite random-reads locally instead of over NFS.  Also pre-import
-# cartopy now so its .so files are warm in the page cache before plotting runs.
-_PROJ_CACHE="/dev/shm/proj_data_$$"
-_PROJ_SRC=$(python3 -c \
-    "import pyproj, os; print(os.path.join(os.path.dirname(pyproj.__file__), 'proj_dir','share','proj'))" \
-    2>/dev/null || true)
-if [ -n "${_PROJ_SRC}" ] && [ -d "${_PROJ_SRC}" ]; then
-    cp -r "${_PROJ_SRC}" "${_PROJ_CACHE}" 2>/dev/null \
-        && export PROJ_DATA="${_PROJ_CACHE}" \
-        && log "PROJ_DATA set to ${_PROJ_CACHE} (proj.db in RAM)"
-fi
-python3 -c "import cartopy.crs, cartopy.feature" 2>/dev/null \
-    && log "cartopy pre-warmed" || log "WARNING: cartopy pre-warm failed (plots may be slow)"
+# Pre-import plotting libraries so their .so/.pyc files and matplotlib's font
+# cache are warm in the OS page cache before the first plotting call.
+# plt.figure()/plt.close() forces the font-cache build to happen here rather
+# than inside the first iteration's plot run (avoids a ~40-min NFS cold-start).
+python3 -c "
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+import xarray as xr
+import shapefile as _shp
+plt.figure(); plt.close()    # triggers font cache build
+" 2>/dev/null \
+    && log "plot libraries pre-warmed (matplotlib/xarray/shapefile)" \
+    || log "WARNING: plot pre-warm failed (first-iteration plots may be slow)"
 
 # Core count = NODES * 24, driven through runConfig's TOTAL_CORES. NXNY_AUTO=ON
 # regenerates GCHP.rc NX/NY from TOTAL_CORES on every run (line ~509), so the
