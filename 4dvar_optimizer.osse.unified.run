@@ -140,6 +140,16 @@ fi
 CTRL_FWD_DIR="${CTRL_FWD_DIR:-${_CTRL_FWD_DEFAULT}}"
 CTRL_ADJ_DIR="${CTRL_ADJ_DIR:-${_CTRL_ADJ_DEFAULT}}"
 
+# Satellite track file referenced in HISTORY.rc / sat_track.rcx.
+# Patched into both files after the control-files rsync so they always agree,
+# regardless of what the template HISTORY.rc says.
+# Defaults:
+#   track_file_osse_2016.nc        — OCO-2 orbital track, Jan–Dec 2016 (standard OSSE)
+#   track_file_c24_6h_3months.nc   — full C24 grid every 6 h, Jan–Mar 2016 (6-hourly OSSE)
+#   track_file_daily_c24_3months.nc — full C24 grid daily, Jan–Mar 2016
+# setup_osse_exp.sh auto-detects the default from the control_files sat_track.rcx.
+SAT_TRACK_FILE="${SAT_TRACK_FILE:-track_file_osse_2016.nc}"
+
 # WORK_DIR override: set to experiment dir when using experiment-as-work-tree layout
 # (osse_4dvar experiments).  Leave unset to use the default gchp_4Dvar derivation.
 _WORK_DIR_OVERRIDE="${WORK_DIR:-}"
@@ -270,6 +280,7 @@ VPASS="${VPASS},SAVE_DIAG=${SAVE_DIAG},NLAT=${NLAT},NLON=${NLON},CHAIN=${CHAIN}"
 VPASS="${VPASS},MAX_CHAIN=${MAX_CHAIN},WALLTIME_S=${WALLTIME_S},WALLTIME_MARGIN_S=${WALLTIME_MARGIN_S}"
 VPASS="${VPASS},EST_MONTH_FWD_S=${EST_MONTH_FWD_S},EST_MONTH_ADJ_S=${EST_MONTH_ADJ_S}"
 VPASS="${VPASS},GRID=${GRID},EXP_NAME=${EXP_NAME},NODES=${NODES}"
+VPASS="${VPASS},SAT_TRACK_FILE=${SAT_TRACK_FILE}"
 VPASS="${VPASS},OBS_MODE=${OBS_MODE}"
 [ -n "${SEMI_OBS_FILE}" ]       && VPASS="${VPASS},SEMI_OBS_FILE=${SEMI_OBS_FILE}"
 [ -n "${SIMPLIFIED_AK_FILE}" ]  && VPASS="${VPASS},SIMPLIFIED_AK_FILE=${SIMPLIFIED_AK_FILE}"
@@ -346,6 +357,16 @@ mkdir -p "${FORCING_DIR}" "${OUTPUT_DIR}" "${ADJ_DIR}/Restarts" "${FWD_DIR}/Rest
 rsync -a "${CTRL_FWD_DIR}/" "${FWD_DIR}/"
 rsync -a "${CTRL_ADJ_DIR}/" "${ADJ_DIR}/"
 log "Control files synced to run directories"
+
+# Patch the sat_track track_file into both HISTORY.rc and sat_track.rcx so they
+# always agree, regardless of what the template control files contain.
+for _stcfg in "${FWD_DIR}/HISTORY.rc" "${FWD_DIR}/sat_track.rcx"; do
+    [ -f "${_stcfg}" ] && \
+        sed -i "s|\(sat_track\.track_file:[[:space:]]*\).*|\1${SAT_TRACK_FILE}|" "${_stcfg}"
+done
+[ -f "${FWD_DIR}/${SAT_TRACK_FILE}" ] || [ -L "${FWD_DIR}/${SAT_TRACK_FILE}" ] || \
+    die "sat_track track file not found in forward run dir: ${FWD_DIR}/${SAT_TRACK_FILE}"
+log "sat_track track_file: ${SAT_TRACK_FILE}"
 
 # ============================================================
 #  Environment
