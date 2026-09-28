@@ -305,6 +305,34 @@ def _get_truth_xco2(semi_obs, t_gchp, lat_gchp, lon_gchp,
     return float(xco2_truth) * 1e6   # mol/mol → ppm
 
 
+# ---------------------------------------------------------------------------
+# Simplified-mode AK loader  (reads from make_semi_obs_xco2_simplified.py output)
+# ---------------------------------------------------------------------------
+
+def load_simplified_ak(path):
+    """Load mean AK variables embedded in a simplified semi-obs netCDF file.
+
+    The file is produced by make_semi_obs_xco2_simplified.py and contains
+    mean_ak, mean_prs, mean_co2_apr, mean_xco2_apr, and xco2_uncertainty as
+    embedded variables in addition to the per-obs xco2_truth.
+
+    Returns a dict with numpy arrays ready for use in the forcing calculation.
+    """
+    ds = xr.open_dataset(path)
+    ak = {
+        'mean_ak':        ds['mean_ak'].values.astype(np.float64),
+        'mean_prs':       ds['mean_prs'].values.astype(np.float64),
+        'mean_co2_apr':   ds['mean_co2_apr'].values.astype(np.float64),
+        'mean_xco2_apr':  float(ds['mean_xco2_apr'].values),
+        'mean_xco2_std':  float(ds['xco2_uncertainty'].values[0]),
+    }
+    ds.close()
+    print(f'Simplified AK loaded from {os.path.basename(path)}: '
+          f'{(ak["mean_prs"] > 0).sum()} valid pressure levels, '
+          f'mean_xco2_std={ak["mean_xco2_std"]:.3f} ppm')
+    return ak
+
+
 def _load_semi_obs_file(path):
     """Load pre-computed truth xCO2 from make_semi_obs_xco2.py output.
 
@@ -464,6 +492,163 @@ def regrid_latlon_to_cubedsphere(ds_ll, cs_res):
 # ---------------------------------------------------------------------------
 # Core computation
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Simplified-mode accumulator  (no L2# data; fixed mean AK for all obs)
+# ---------------------------------------------------------------------------
+
+def _accumulate_forcing_simplified(gchp_files, t_start, t_end, ts_chem_s,
+                                    simplified_ak, semi_obs_data,
+                                    obs_error_inflation=1.0):
+    """Compute J and adjoint forcing using a fixed mean AK (no ORCHIDEE-ECCO2).
+
+    For each GCHP sat-track profile (all are treated as observations):
+      - Apply mean AK → simulated xCO2 (ŷ_k)
+      - Look up truth xCO2 from semi_obs_data by (time, lat, lon)
+      - Observation error = mean_xco2_std (fixed for all obs)
+      - Compute forcing profile using the same mean AK
+
+    Parameters
+    ----------
+    gchp_files     : list of sat-track netCDF paths from the OSSE forward run
+    t_start/t_end  : assimilation window
+    ts_chem_s      : chemistry timestep in seconds (for checkpoint binning)
+    simplified_ak  : dict from load_simplified_ak()
+    semi_obs_data  : lookup dict from _load_semi_obs_file() (truth xCO2)
+    obs_error_inflation : inflate σ by this factor
+
+    Returns same tuple as _accumulate_forcing.
+    """
+    _check_input_files(gchp_files, t_start, t_end)
+
+    checkpoints = make_checkpoint_grid(t_start, t_end, ts_chem_s)
+    n_ckpt      = len(checkpoints)
+    obs_by_ckpt = {i: [] for i in range(n_ckpt)}
+    J_total     = 0.0
+    levs        = None
+
+    mean_ak      = simplified_ak['mean_ak']
+    mean_prs     = simplified_ak['mean_prs']
+    mean_co2_apr = simplified_ak['mean_co2_apr']
+    mean_xco2_apr = simplified_ak['mean_xco2_apr']
+    xco2_std_base = simplified_ak['mean_xco2_std'] * obs_error_inflation
+
+    valid_lev = mean_prs > 0   # levels above model top are zero-padded
+
+    TOL_TIME = pd.Timedelta(seconds=300)   # 5-min tolerance (same track file → exact match)
+    TOL_LAT  = 0.5                          # generous: same C24 cell
+    TOL_LON  = 0.5
+
+    n_matched = 0
+    n_no_truth = 0
+    n_nan = 0
+
+    for gchp_file in gchp_files:
+        print(f'=== {os.path.basename(gchp_file)} (simplified mode)')
+        ds = xr.open_dataset(gchp_file)
+        ds['time'] = pd.to_datetime(ds['time'].values).round('s')
+
+        if levs is None:
+            levs = ds['lev'].values
+
+        times_all = pd.DatetimeIndex(ds['time'].values)
+        win_mask  = (times_all >= t_start) & (times_all <= t_end)
+        ds_win    = ds.isel(time=np.where(win_mask)[0])
+        times_win = pd.DatetimeIndex(ds_win['time'].values)
+
+        if len(times_win) == 0:
+            ds.close()
+            continue
+
+        co2_all = ds_win['SpeciesConcVV_CO2'].transpose('time', 'lev').values  # (N, nlev)
+        prs_all = ds_win['Met_PMIDDRY'].transpose('time', 'lev').values         # (N, nlev)
+        if 'latitude' in ds_win:
+            lats_all = ds_win['latitude'].values
+            lons_all = ds_win['longitude'].values % 360
+        else:
+            lats_all = ds_win['lat'].values
+            lons_all = ds_win['lon'].values % 360
+        ds.close()
+
+        for j in range(len(times_win)):
+            t_j   = times_win[j]
+            lat_j = float(lats_all[j])
+            lon_j = float(lons_all[j])
+
+            # Interpolate GCHP CO2 to mean pressure levels
+            sort_idx   = np.argsort(prs_all[j])
+            co2_interp = np.interp(
+                mean_prs[valid_lev],
+                prs_all[j][sort_idx],
+                co2_all[j][sort_idx],
+            )
+
+            # Apply mean AK: xco2_hat = xco2_apr + AK^T (co2_interp - co2_apr)
+            diff_j       = co2_interp - mean_co2_apr[valid_lev]
+            xco2_hat_ppm = (mean_xco2_apr + float(np.sum(mean_ak[valid_lev] * diff_j))) * 1e6
+
+            # Look up truth xCO2 (keyed by time/lat/lon from the truth sat_track)
+            xco2_truth_ppm, _ = _get_truth_xco2_from_file(
+                semi_obs_data, t_j, lat_j, lon_j % 360)
+
+            if xco2_truth_ppm is None:
+                # Widen search window once before giving up
+                t_ns  = pd.Timestamp(t_j).round('s').value
+                key_c = (t_ns, round(lat_j, 4), round(float(lon_j % 360), 4))
+                # Try relaxed match: find closest by time among all keys
+                best_key = None
+                best_dt  = np.inf
+                for k in semi_obs_data:
+                    if (abs(k[1] - key_c[1]) <= TOL_LAT and
+                            abs(k[2] - key_c[2]) <= TOL_LON):
+                        dt = abs(k[0] - t_ns) / 1e9
+                        if dt < best_dt:
+                            best_dt  = dt
+                            best_key = k
+                if best_key is not None and best_dt <= TOL_TIME.total_seconds():
+                    xco2_truth_ppm = semi_obs_data[best_key][0]
+                else:
+                    n_no_truth += 1
+                    continue
+
+            if np.isnan(xco2_hat_ppm):
+                n_nan += 1
+                continue
+
+            # Adjoint forcing on model levels using mean AK
+            # Build a temporary prs_obs array at full length with zeros for invalid levs
+            prs_obs_full = np.zeros_like(mean_prs)
+            prs_obs_full[valid_lev] = mean_prs[valid_lev]
+
+            force_model, diff = obs_forcing_profile(
+                prs_all[j], prs_obs_full,
+                mean_ak, xco2_hat_ppm, xco2_truth_ppm, xco2_std_base,
+            )
+            J_total += 0.5 * (diff / xco2_std_base) ** 2
+
+            ckpt_idx = nearest_checkpoint(t_j, checkpoints, ts_chem_s)
+            if ckpt_idx < 0:
+                continue
+
+            lon_norm = float((lon_j + 180) % 360 - 180)
+            obs_by_ckpt[ckpt_idx].append((
+                lat_j,
+                lon_norm,
+                (force_model * PPM_TO_MMR_ADJ).astype(np.float32),
+                np.datetime64(t_j, 'ns'),
+                xco2_truth_ppm,
+                xco2_hat_ppm,
+                xco2_std_base,
+            ))
+            n_matched += 1
+
+    n_with_obs = sum(1 for v in obs_by_ckpt.values() if v)
+    print(f'Simplified mode: {n_matched} obs matched, '
+          f'{n_no_truth} no truth found, {n_nan} NaN skipped')
+    print(f'Checkpoints with obs: {n_with_obs}/{n_ckpt}')
+    print(f'Cost function J = {J_total:.6e}')
+    return checkpoints, obs_by_ckpt, levs, J_total
+
 
 def _window_months(t_start, t_end):
     """Calendar months the window [t_start, t_end] spans, as {(year, month)}.
@@ -977,8 +1162,15 @@ def write_daily_forcing(output_path, obs_by_ckpt, levs, checkpoints):
 
 def co2_adjoint_forcing(gchp_files, output_dir, ts_chem_s, t_start, t_end,
                         save_diagnostics=True, obs_error_inflation=1.0,
-                        semi_obs_dir=None, semi_obs_file=None):
+                        semi_obs_dir=None, semi_obs_file=None,
+                        simplified_ak_file=None):
+    """Compute J_obs and write per-checkpoint adjoint forcing files.
 
+    When simplified_ak_file is given (path to make_semi_obs_xco2_simplified.py
+    output), runs in simplified mode: fixed mean AK, no ORCHIDEE-ECCO2 needed.
+    semi_obs_file must also be set (truth xco2 lookup); it may be the same file
+    as simplified_ak_file since both are embedded in the simplified semi-obs netCDF.
+    """
     if isinstance(gchp_files, (str, os.PathLike)):
         gchp_files = [gchp_files]
 
@@ -987,14 +1179,26 @@ def co2_adjoint_forcing(gchp_files, output_dir, ts_chem_s, t_start, t_end,
         print(f'Observation-error inflation factor: {obs_error_inflation} '
               f'(J_obs and forcing scale by 1/{obs_error_inflation**2:g})')
 
-    semi_obs_data = None
-    if semi_obs_file:
+    # Simplified mode: fixed mean AK, no L2# reads
+    if simplified_ak_file:
+        if not semi_obs_file:
+            raise ValueError('--simplified-ak-file requires --semi-obs-file '
+                             '(truth xCO2 lookup)')
+        simplified_ak = load_simplified_ak(simplified_ak_file)
         semi_obs_data = _load_semi_obs_file(semi_obs_file)
+        checkpoints, obs_by_ckpt, levs, J = \
+            _accumulate_forcing_simplified(
+                gchp_files, t_start, t_end, ts_chem_s,
+                simplified_ak, semi_obs_data, obs_error_inflation)
+    else:
+        semi_obs_data = None
+        if semi_obs_file:
+            semi_obs_data = _load_semi_obs_file(semi_obs_file)
 
-    checkpoints, obs_by_ckpt, levs, J = \
-        _accumulate_forcing(gchp_files, t_start, t_end, ts_chem_s,
-                            obs_error_inflation, semi_obs_dir=semi_obs_dir,
-                            semi_obs_data=semi_obs_data)
+        checkpoints, obs_by_ckpt, levs, J = \
+            _accumulate_forcing(gchp_files, t_start, t_end, ts_chem_s,
+                                obs_error_inflation, semi_obs_dir=semi_obs_dir,
+                                semi_obs_data=semi_obs_data)
 
     # Remove forcing files left over from a previous simulation.  Everything
     # on the current checkpoint grid is overwritten below, but a file at a
@@ -1080,19 +1284,28 @@ if __name__ == '__main__':
                              'errors; scales J_obs and forcing by 1/f^2)')
     parser.add_argument('--semi-obs-file', default=None, dest='semi_obs_file',
                         help='Path to pre-computed truth xCO2 netCDF from '
-                             'make_semi_obs_xco2.py (contains xco2_truth with '
-                             'AK already applied). Preferred over --semi-obs-dir.')
+                             'make_semi_obs_xco2.py or make_semi_obs_xco2_simplified.py '
+                             '(contains xco2_truth). Preferred over --semi-obs-dir.')
     parser.add_argument('--semi-obs-dir', default=None, dest='semi_obs_dir',
                         help='Directory containing GEOSChem.sat_track.*.nc4 '
                              'from the default (unperturbed) forward run. '
                              'AK is applied on-the-fly each iteration. '
                              'Use --semi-obs-file instead when available.')
+    parser.add_argument('--simplified-ak-file', default=None, dest='simplified_ak_file',
+                        help='Path to simplified semi-obs netCDF from '
+                             'make_semi_obs_xco2_simplified.py. Activates simplified '
+                             'mode: fixed mean AK for all obs, no ORCHIDEE-ECCO2 reads. '
+                             'Requires --semi-obs-file (may be the same file).')
     args = parser.parse_args()
 
     if args.obs_error_inflation <= 0:
         parser.error('--obs-error-inflation must be > 0')
     if args.semi_obs_file and args.semi_obs_dir:
         parser.error('--semi-obs-file and --semi-obs-dir are mutually exclusive')
+    if args.simplified_ak_file and args.semi_obs_dir:
+        parser.error('--simplified-ak-file and --semi-obs-dir are mutually exclusive')
+    if args.simplified_ak_file and not args.semi_obs_file:
+        parser.error('--simplified-ak-file requires --semi-obs-file')
 
     co2_adjoint_forcing(
         gchp_files          = args.gchp_files,
@@ -1104,4 +1317,5 @@ if __name__ == '__main__':
         obs_error_inflation = args.obs_error_inflation,
         semi_obs_file       = args.semi_obs_file,
         semi_obs_dir        = args.semi_obs_dir,
+        simplified_ak_file  = args.simplified_ak_file,
     )

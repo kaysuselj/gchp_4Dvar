@@ -101,9 +101,12 @@ esac
 # ============================================================
 #  Configuration
 # ============================================================
-BASE_DIR="$(pwd)"                        # gchp_4Dvar/
-SCRIPT_DIR="${BASE_DIR}"                 # Python scripts live here
-SELF="${BASE_DIR}/4dvar_optimizer.osse.unified.run"
+BASE_DIR="$(pwd)"
+# SCRIPT_DIR: where Python scripts (co2_adjoint_forcing_osse.py etc.) live.
+# Defaults to BASE_DIR (running from gchp_4Dvar/).
+# Override when this script is copied to an experiment dir outside gchp_4Dvar/.
+SCRIPT_DIR="${SCRIPT_DIR:-${BASE_DIR}}"
+SELF="${SELF:-${BASE_DIR}/4dvar_optimizer.osse.unified.run}"
 PARENT_DIR="$(cd "${BASE_DIR}/.." && pwd)"
 
 # EXP_NAME isolates a run: with a name set, the whole work tree is a private
@@ -118,30 +121,38 @@ EXP_NAME=${EXP_NAME:-}
 if [ "${MODE}" = "monthly" ]; then
     GRID=${GRID:-latlon}
     BASE_WORK_NAME="4dvar_design_osse_monthly"
-    CTRL_FWD_DIR="${BASE_DIR}/control_files/forward_osse_monthly"
-    CTRL_ADJ_DIR="${BASE_DIR}/control_files/adjoint_osse_monthly"
+    _CTRL_FWD_DEFAULT="${BASE_DIR}/control_files/forward_osse_monthly"
+    _CTRL_ADJ_DEFAULT="${BASE_DIR}/control_files/adjoint_osse_monthly"
     STATE_BASENAME="4dvar_state_osse_monthly.npz"
     LOG_NAME="4dvar_optimizer_osse_monthly"
-    # No T_END default: monthly mode requires an explicit T_END (enforced below)
-    # so a multi-month window is never launched by accident (a silent full-year
-    # default previously ran a 12-month forward when a 3-month one was intended).
     T_END_DEFAULT=""
 else
     GRID=${GRID:-cs}
     BASE_WORK_NAME="4dvar_design_osse"
-    CTRL_FWD_DIR="${BASE_DIR}/control_files/forward_osse"
-    CTRL_ADJ_DIR="${BASE_DIR}/control_files/adjoint_osse"
+    _CTRL_FWD_DEFAULT="${BASE_DIR}/control_files/forward_osse"
+    _CTRL_ADJ_DEFAULT="${BASE_DIR}/control_files/adjoint_osse"
     STATE_BASENAME="4dvar_state_osse.npz"
     LOG_NAME="4dvar_optimizer_osse"
     T_END_DEFAULT="2016-02-01"
 fi
+# Allow overrides so this script can be copied to an osse_4dvar experiment dir
+# and pointed at different control files (e.g. forward_6hourlyobs).
+CTRL_FWD_DIR="${CTRL_FWD_DIR:-${_CTRL_FWD_DEFAULT}}"
+CTRL_ADJ_DIR="${CTRL_ADJ_DIR:-${_CTRL_ADJ_DEFAULT}}"
+
+# WORK_DIR override: set to experiment dir when using experiment-as-work-tree layout
+# (osse_4dvar experiments).  Leave unset to use the default gchp_4Dvar derivation.
+_WORK_DIR_OVERRIDE="${WORK_DIR:-}"
 case "${GRID}" in latlon|cs) ;; *) die "GRID must be 'latlon' or 'cs' (got '${GRID}')" ;; esac
 [ "${MODE}" = "monthly" ] && [ "${GRID}" = "cs" ] && \
     die "GRID=cs is not yet implemented for MODE=monthly (annual only)"
 
 # Canonical work tree = clone source; per-EXP work tree = private copy.
 SRC_WORK="${PARENT_DIR}/${BASE_WORK_NAME}"
-if [ -n "${EXP_NAME}" ]; then
+if [ -n "${_WORK_DIR_OVERRIDE}" ]; then
+    WORK_DIR="${_WORK_DIR_OVERRIDE}"
+    SRC_WORK="${WORK_DIR}"   # no cloning needed; experiment dir IS the work tree
+elif [ -n "${EXP_NAME}" ]; then
     WORK_DIR="${PARENT_DIR}/${BASE_WORK_NAME}_${EXP_NAME}"
 else
     WORK_DIR="${SRC_WORK}"
@@ -205,6 +216,28 @@ FTOL=${FTOL:-1e-8}
 SAVE_DIAG=${SAVE_DIAG:-true}
 RESTART=${RESTART:-false}
 
+# ============================================================
+#  Observation mode
+# ============================================================
+# OBS_MODE=real (default): ORCHIDEE-ECCO2 per-obs AK (standard OCO-2 track)
+# OBS_MODE=simplified    : fixed mean AK from SIMPLIFIED_AK_FILE (full-grid or custom track)
+#                          SEMI_OBS_FILE and SIMPLIFIED_AK_FILE required.
+#                          Both may point to the same make_semi_obs_xco2_simplified.py output.
+OBS_MODE=${OBS_MODE:-real}
+SEMI_OBS_FILE=${SEMI_OBS_FILE:-}
+SIMPLIFIED_AK_FILE=${SIMPLIFIED_AK_FILE:-}
+
+case "${OBS_MODE}" in
+    real|simplified) ;;
+    *) die "OBS_MODE must be 'real' or 'simplified' (got '${OBS_MODE}')" ;;
+esac
+if [ "${OBS_MODE}" = "simplified" ]; then
+    [ -n "${SIMPLIFIED_AK_FILE}" ] || die "OBS_MODE=simplified requires SIMPLIFIED_AK_FILE"
+    [ -f "${SIMPLIFIED_AK_FILE}" ] || die "SIMPLIFIED_AK_FILE not found: ${SIMPLIFIED_AK_FILE}"
+    [ -n "${SEMI_OBS_FILE}" ]      || die "OBS_MODE=simplified requires SEMI_OBS_FILE"
+    [ -f "${SEMI_OBS_FILE}" ]      || die "SEMI_OBS_FILE not found: ${SEMI_OBS_FILE}"
+fi
+
 # Parallelism knob: one PBS node = 24 MPI ranks, so total cores = NODES * 24,
 # mapped to a cubed-sphere layout by NXNY_AUTO in runConfig. Default 1 node
 # (24 cores) = the historic behavior. NODES>1 also needs a matching PBS
@@ -237,6 +270,14 @@ VPASS="${VPASS},SAVE_DIAG=${SAVE_DIAG},NLAT=${NLAT},NLON=${NLON},CHAIN=${CHAIN}"
 VPASS="${VPASS},MAX_CHAIN=${MAX_CHAIN},WALLTIME_S=${WALLTIME_S},WALLTIME_MARGIN_S=${WALLTIME_MARGIN_S}"
 VPASS="${VPASS},EST_MONTH_FWD_S=${EST_MONTH_FWD_S},EST_MONTH_ADJ_S=${EST_MONTH_ADJ_S}"
 VPASS="${VPASS},GRID=${GRID},EXP_NAME=${EXP_NAME},NODES=${NODES}"
+VPASS="${VPASS},OBS_MODE=${OBS_MODE}"
+[ -n "${SEMI_OBS_FILE}" ]       && VPASS="${VPASS},SEMI_OBS_FILE=${SEMI_OBS_FILE}"
+[ -n "${SIMPLIFIED_AK_FILE}" ]  && VPASS="${VPASS},SIMPLIFIED_AK_FILE=${SIMPLIFIED_AK_FILE}"
+[ -n "${CTRL_FWD_DIR}" ]        && VPASS="${VPASS},CTRL_FWD_DIR=${CTRL_FWD_DIR}"
+[ -n "${CTRL_ADJ_DIR}" ]        && VPASS="${VPASS},CTRL_ADJ_DIR=${CTRL_ADJ_DIR}"
+[ -n "${_WORK_DIR_OVERRIDE}" ]  && VPASS="${VPASS},WORK_DIR=${_WORK_DIR_OVERRIDE}"
+[ -n "${SCRIPT_DIR}" ] && [ "${SCRIPT_DIR}" != "${BASE_DIR}" ] && \
+    VPASS="${VPASS},SCRIPT_DIR=${SCRIPT_DIR}"
 
 # Queue job name: derive from EXP_NAME so runs are distinguishable in qstat
 # (e.g. EXP_NAME=1year_osse -> "gchp_1year_osse").  Falls back to the historic
@@ -596,11 +637,24 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
         _diag_flag=""
         [ "${SAVE_DIAG}" = "true" ] || _diag_flag="--no-save-diagnostics"
 
+        # Build observation-mode flags
+        _obs_flags=""
+        if [ "${OBS_MODE}" = "simplified" ]; then
+            _obs_flags="--simplified-ak-file ${SIMPLIFIED_AK_FILE} --semi-obs-file ${SEMI_OBS_FILE}"
+            log "  OBS_MODE=simplified: using fixed mean AK from $(basename "${SIMPLIFIED_AK_FILE}")"
+        elif [ -n "${SEMI_OBS_FILE}" ]; then
+            _obs_flags="--semi-obs-file ${SEMI_OBS_FILE}"
+            log "  OBS_MODE=real (semi-obs-file): $(basename "${SEMI_OBS_FILE}")"
+        else
+            log "  OBS_MODE=real (ORCHIDEE-ECCO2 L2# per-obs AK)"
+        fi
+
         python3 "${SCRIPT_DIR}/co2_adjoint_forcing_osse.py" \
             "${SAT_FILES[@]}" "${FORCING_DIR}" \
             --ts-chem "${TS_DYN}" \
             --t-start "${T_START}T00:00:00" \
             --t-end   "${T_END}T00:00:00" \
+            ${_obs_flags} \
             ${_diag_flag} \
             || die "co2_adjoint_forcing_osse.py failed (iter ${CUR_ITER})"
 
