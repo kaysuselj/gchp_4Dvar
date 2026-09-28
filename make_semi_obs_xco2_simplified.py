@@ -44,10 +44,18 @@ import xarray as xr
 # MAPL writes sat_track files with the PREVIOUS month's timestamp.
 # This map lets us find the right file for each data month.
 def _sat_track_pattern(sat_track_dir, year, month):
-    """Return glob pattern for the sat_track file containing data for year/month."""
+    """Return glob pattern for the sat_track file containing data for year/month.
+
+    MAPL writes two forms:
+      canonical:  GEOSChem.sat_track.YYYYMMDD_HHMMz.nc4  (e.g. 20160101_0030z)
+      short-form: GEOSChem.sat_track.YYYYMM_HHMMz.nc4    (e.g. 201601_0030z) -- duplicate
+
+    Include '01' after the month to anchor to the canonical YYYYMMDD form and
+    avoid matching both files, which would double-count the observations.
+    """
     prev = pd.Timestamp(year=year, month=month, day=1) - pd.DateOffset(months=1)
     return os.path.join(sat_track_dir,
-                        f'GEOSChem.sat_track.{prev.year:04d}{prev.month:02d}*.nc4')
+                        f'GEOSChem.sat_track.{prev.year:04d}{prev.month:02d}01*.nc4')
 
 
 def load_mean_ak(ak_file):

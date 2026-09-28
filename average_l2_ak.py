@@ -132,7 +132,7 @@ def average_l2_ak(t_start, t_end, base_fold, out_path):
              'units': 'mol mol-1'}),
         'mean_xco2_std': (
             [],
-            float(xco2std_all.mean()),
+            float(xco2std_all.mean()) * 1e6,  # mol/mol → ppm
             {'long_name': 'Mean XCO2 observation uncertainty',
              'units': 'ppm'}),
         'n_soundings': (
