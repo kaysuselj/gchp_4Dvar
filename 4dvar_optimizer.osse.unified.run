@@ -143,12 +143,12 @@ fi
 #   OBS_TYPE=satellite  (default) — OCO-2 orbital track + per-sounding AK
 #       SAT_TRACK_FILE : track_file_osse_2016.nc
 #       OBS_MODE       : real  (ORCHIDEE-ECCO2 per-sounding AK via semi-obs file)
-#       SEMI_OBS_FILE  : <osse_4dvar>/semi-obs/obs/semi_obs_xco2_2016Q1.nc
+#       SEMI_OBS_FILE  : <osse_4dvar>/obs/semi_obs_xco2_2016Q1.nc
 #
 #   OBS_TYPE=6hourly    — full C24 grid every 6 h + fixed mean AK
 #       SAT_TRACK_FILE : track_file_c24_6h_3months.nc
 #       OBS_MODE       : simplified  (mean AK embedded in semi-obs file)
-#       SEMI_OBS_FILE  : <osse_4dvar>/semi-obs-6hours_3months/obs/semi_obs_xco2_6h_simplified_2016Q1.nc
+#       SEMI_OBS_FILE  : <osse_4dvar>/obs/semi_obs_xco2_6h_simplified_2016Q1.nc
 #       SIMPLIFIED_AK_FILE : same file (AK is embedded)
 #
 # All derived variables remain individually overridable via -v.
@@ -168,13 +168,13 @@ _OSSE4DVAR_DIR="${PARENT_DIR}/osse_4dvar"
 if [ "${OBS_TYPE}" = "satellite" ]; then
     _OBS_SAT_TRACK="track_file_osse_2016.nc"
     _OBS_MODE="real"
-    _OBS_SEMI_OBS="${_OSSE4DVAR_DIR}/semi-obs/obs/semi_obs_xco2_2016Q1.nc"
+    _OBS_SEMI_OBS="${_OSSE4DVAR_DIR}/obs/semi_obs_xco2_2016Q1.nc"
     _OBS_SIMPL_AK=""
     _OBS_CTRL_FWD="${_OSSE4DVAR_DIR}/control_files/forward"
 else  # 6hourly
     _OBS_SAT_TRACK="track_file_c24_6h_3months.nc"
     _OBS_MODE="simplified"
-    _OBS_SEMI_OBS="${_OSSE4DVAR_DIR}/semi-obs-6hours_3months/obs/semi_obs_xco2_6h_simplified_2016Q1.nc"
+    _OBS_SEMI_OBS="${_OSSE4DVAR_DIR}/obs/semi_obs_xco2_6h_simplified_2016Q1.nc"
     _OBS_SIMPL_AK="${_OBS_SEMI_OBS}"
     _OBS_CTRL_FWD="${_OSSE4DVAR_DIR}/control_files/forward_6hourlyobs"
 fi
