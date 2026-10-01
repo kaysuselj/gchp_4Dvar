@@ -679,9 +679,16 @@ def _check_input_files(gchp_files, t_start, t_end):
     NOTE: a stale file from a previous *iteration* over the same window is
     indistinguishable by content — the run script must clear old sat_track
     files from OutputDir before each forward run.
+
+    NOTE: MAPL names monthly sat_track files one month earlier than the data
+    they contain (off-by-one-month naming).  This causes a single boundary
+    timestep (e.g. Feb 1 00:30z) to appear in both the preceding and
+    following file.  Such single-timestep cross-boundary overlap is expected
+    and is NOT treated as a duplicate.
     """
     expected_months = _window_months(t_start, t_end)
-    month_files = {}   # (year, month) -> [files with in-window profiles]
+    # (year, month) -> list of (file, count) for files with in-window profiles
+    month_file_counts = {}
     for f in gchp_files:
         with xr.open_dataset(f) as ds:
             times = pd.DatetimeIndex(pd.to_datetime(ds['time'].values).round('s'))
@@ -690,8 +697,13 @@ def _check_input_files(gchp_files, t_start, t_end):
             print(f'WARNING: no profiles inside the window in '
                   f'{os.path.basename(f)} — stale file from a previous '
                   'simulation?')
-        for ym in sorted(set(zip(in_win.year, in_win.month))):
-            month_files.setdefault(ym, []).append(f)
+        from collections import Counter
+        for ym, count in Counter(zip(in_win.year, in_win.month)).items():
+            month_file_counts.setdefault(ym, []).append((f, count))
+
+    # For coverage checks use any file that has ≥1 timestep for the month.
+    month_files = {ym: [f for f, _ in entries]
+                   for ym, entries in month_file_counts.items()}
 
     problems = []
     if len(gchp_files) != len(expected_months):
@@ -703,12 +715,15 @@ def _check_input_files(gchp_files, t_start, t_end):
     if missing:
         problems.append('no input file covers '
                         + ', '.join(f'{y}-{m:02d}' for y, m in sorted(missing)))
-    for (y, m), fs in sorted(month_files.items()):
-        if len(fs) > 1:
+    for (y, m), entries in sorted(month_file_counts.items()):
+        # Only flag as duplicate if more than one file contributes more than a
+        # single boundary timestep (single-timestep overlap is a MAPL artifact).
+        real_files = [f for f, c in entries if c > 1]
+        if len(real_files) > 1:
             problems.append(
-                f'{y}-{m:02d} appears in {len(fs)} files — stale sat_track '
+                f'{y}-{m:02d} appears in {len(real_files)} files — stale sat_track '
                 'file from a previous simulation? '
-                + ', '.join(os.path.basename(x) for x in fs))
+                + ', '.join(os.path.basename(x) for x in real_files))
     if problems:
         raise ValueError('Input sat_track check FAILED:\n  - '
                          + '\n  - '.join(problems))
