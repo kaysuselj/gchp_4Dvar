@@ -53,6 +53,8 @@
 #   qsub -l select=2:ncpus=24:mpiprocs=24:model=bro_ele -v NODES=2 4dvar_optimizer.osse.unified.run  # 48 cores (2 nodes)
 #   qsub -v RESTART=true,MODE=monthly,T_END=2016-04-01[,EXP_NAME=expA] 4dvar_optimizer.osse.unified.run
 #   qsub -v MODE=annual,MAX_ITER=10,SIGMA_B=0.3 4dvar_optimizer.osse.unified.run
+#   qsub -v OBS_TYPE=satellite 4dvar_optimizer.osse.unified.run     # OCO-2 track + per-sounding AK (default)
+#   qsub -v OBS_TYPE=6hourly 4dvar_optimizer.osse.unified.run       # full C24 grid every 6 h + mean AK
 #   # short annual run needs less walltime:
 #   qsub -l walltime=8:00:00 -v WALLTIME_S=28800 4dvar_optimizer.osse.unified.run
 # If you change the #PBS walltime, pass the matching WALLTIME_S (seconds).
@@ -135,20 +137,54 @@ else
     LOG_NAME="4dvar_optimizer_osse"
     T_END_DEFAULT="2016-02-01"
 fi
-# Allow overrides so this script can be copied to an osse_4dvar experiment dir
-# and pointed at different control files (e.g. forward_6hourlyobs).
-CTRL_FWD_DIR="${CTRL_FWD_DIR:-${_CTRL_FWD_DEFAULT}}"
-CTRL_ADJ_DIR="${CTRL_ADJ_DIR:-${_CTRL_ADJ_DEFAULT}}"
+# ============================================================
+#  Observation type  (top-level switch; drives all obs-related defaults)
+#
+#   OBS_TYPE=satellite  (default) — OCO-2 orbital track + per-sounding AK
+#       SAT_TRACK_FILE : track_file_osse_2016.nc
+#       OBS_MODE       : real  (ORCHIDEE-ECCO2 per-sounding AK via semi-obs file)
+#       SEMI_OBS_FILE  : <osse_4dvar>/semi-obs/obs/semi_obs_xco2_2016Q1.nc
+#
+#   OBS_TYPE=6hourly    — full C24 grid every 6 h + fixed mean AK
+#       SAT_TRACK_FILE : track_file_c24_6h_3months.nc
+#       OBS_MODE       : simplified  (mean AK embedded in semi-obs file)
+#       SEMI_OBS_FILE  : <osse_4dvar>/semi-obs-6hours_3months/obs/semi_obs_xco2_6h_simplified_2016Q1.nc
+#       SIMPLIFIED_AK_FILE : same file (AK is embedded)
+#
+# All derived variables remain individually overridable via -v.
+# ============================================================
+OBS_TYPE=${OBS_TYPE:-satellite}
+case "${OBS_TYPE}" in
+    satellite|6hourly) ;;
+    *) die "OBS_TYPE must be 'satellite' or '6hourly' (got '${OBS_TYPE}')" ;;
+esac
 
-# Satellite track file referenced in HISTORY.rc / sat_track.rcx.
-# Patched into both files after the control-files rsync so they always agree,
-# regardless of what the template HISTORY.rc says.
-# Defaults:
-#   track_file_osse_2016.nc        — OCO-2 orbital track, Jan–Dec 2016 (standard OSSE)
-#   track_file_c24_6h_3months.nc   — full C24 grid every 6 h, Jan–Mar 2016 (6-hourly OSSE)
-#   track_file_daily_c24_3months.nc — full C24 grid daily, Jan–Mar 2016
-# setup_osse_exp.sh auto-detects the default from the control_files sat_track.rcx.
-SAT_TRACK_FILE="${SAT_TRACK_FILE:-track_file_osse_2016.nc}"
+# Locate the osse_4dvar semi-obs / control tree.
+# Running from inside an osse_4dvar experiment: PARENT_DIR is osse_4dvar/ itself.
+# Running from gchp_4Dvar/: osse_4dvar is a sibling at PARENT_DIR/osse_4dvar/.
+_OSSE4DVAR_DIR="${PARENT_DIR}/osse_4dvar"
+[ -d "${_OSSE4DVAR_DIR}" ] || _OSSE4DVAR_DIR="${PARENT_DIR}"
+
+if [ "${OBS_TYPE}" = "satellite" ]; then
+    _OBS_SAT_TRACK="track_file_osse_2016.nc"
+    _OBS_MODE="real"
+    _OBS_SEMI_OBS="${_OSSE4DVAR_DIR}/semi-obs/obs/semi_obs_xco2_2016Q1.nc"
+    _OBS_SIMPL_AK=""
+    _OBS_CTRL_FWD="${_OSSE4DVAR_DIR}/control_files/forward"
+else  # 6hourly
+    _OBS_SAT_TRACK="track_file_c24_6h_3months.nc"
+    _OBS_MODE="simplified"
+    _OBS_SEMI_OBS="${_OSSE4DVAR_DIR}/semi-obs-6hours_3months/obs/semi_obs_xco2_6h_simplified_2016Q1.nc"
+    _OBS_SIMPL_AK="${_OBS_SEMI_OBS}"
+    _OBS_CTRL_FWD="${_OSSE4DVAR_DIR}/control_files/forward_6hourlyobs"
+fi
+
+# Satellite track file (patched into HISTORY.rc + sat_track.rcx after control-files rsync)
+SAT_TRACK_FILE="${SAT_TRACK_FILE:-${_OBS_SAT_TRACK}}"
+
+# Control file dirs: user override > OBS_TYPE path > MODE-based default
+CTRL_FWD_DIR="${CTRL_FWD_DIR:-${_OBS_CTRL_FWD:-${_CTRL_FWD_DEFAULT}}}"
+CTRL_ADJ_DIR="${CTRL_ADJ_DIR:-${_CTRL_ADJ_DEFAULT}}"
 
 # WORK_DIR override: set to experiment dir when using experiment-as-work-tree layout
 # (osse_4dvar experiments).  Leave unset to use the default gchp_4Dvar derivation.
@@ -227,15 +263,17 @@ SAVE_DIAG=${SAVE_DIAG:-true}
 RESTART=${RESTART:-false}
 
 # ============================================================
-#  Observation mode
+#  Observation mode  (derived from OBS_TYPE; all individually overridable)
 # ============================================================
-# OBS_MODE=real (default): ORCHIDEE-ECCO2 per-obs AK (standard OCO-2 track)
-# OBS_MODE=simplified    : fixed mean AK from SIMPLIFIED_AK_FILE (full-grid or custom track)
-#                          SEMI_OBS_FILE and SIMPLIFIED_AK_FILE required.
-#                          Both may point to the same make_semi_obs_xco2_simplified.py output.
-OBS_MODE=${OBS_MODE:-real}
-SEMI_OBS_FILE=${SEMI_OBS_FILE:-}
-SIMPLIFIED_AK_FILE=${SIMPLIFIED_AK_FILE:-}
+# OBS_MODE=real (default for OBS_TYPE=satellite):
+#   Uses ORCHIDEE-ECCO2 per-sounding AK.  SEMI_OBS_FILE must contain pre-computed
+#   truth xCO2 (from make_semi_obs_xco2.py with per-sounding AK applied).
+# OBS_MODE=simplified (default for OBS_TYPE=6hourly):
+#   Uses a fixed mean AK embedded in SEMI_OBS_FILE (make_semi_obs_xco2_simplified.py).
+#   Both SEMI_OBS_FILE and SIMPLIFIED_AK_FILE are required (may be the same file).
+OBS_MODE="${OBS_MODE:-${_OBS_MODE}}"
+SEMI_OBS_FILE="${SEMI_OBS_FILE:-${_OBS_SEMI_OBS}}"
+SIMPLIFIED_AK_FILE="${SIMPLIFIED_AK_FILE:-${_OBS_SIMPL_AK}}"
 
 case "${OBS_MODE}" in
     real|simplified) ;;
@@ -247,6 +285,8 @@ if [ "${OBS_MODE}" = "simplified" ]; then
     [ -n "${SEMI_OBS_FILE}" ]      || die "OBS_MODE=simplified requires SEMI_OBS_FILE"
     [ -f "${SEMI_OBS_FILE}" ]      || die "SEMI_OBS_FILE not found: ${SEMI_OBS_FILE}"
 fi
+[ "${OBS_MODE}" = "real" ] && [ -n "${SEMI_OBS_FILE}" ] && \
+    { [ -f "${SEMI_OBS_FILE}" ] || die "SEMI_OBS_FILE not found: ${SEMI_OBS_FILE}"; }
 
 # Parallelism knob: one PBS node = 24 MPI ranks, so total cores = NODES * 24,
 # mapped to a cubed-sphere layout by NXNY_AUTO in runConfig. Default 1 node
@@ -281,7 +321,7 @@ VPASS="${VPASS},MAX_CHAIN=${MAX_CHAIN},WALLTIME_S=${WALLTIME_S},WALLTIME_MARGIN_
 VPASS="${VPASS},EST_MONTH_FWD_S=${EST_MONTH_FWD_S},EST_MONTH_ADJ_S=${EST_MONTH_ADJ_S}"
 VPASS="${VPASS},GRID=${GRID},EXP_NAME=${EXP_NAME},NODES=${NODES}"
 VPASS="${VPASS},SAT_TRACK_FILE=${SAT_TRACK_FILE}"
-VPASS="${VPASS},OBS_MODE=${OBS_MODE}"
+VPASS="${VPASS},OBS_TYPE=${OBS_TYPE},OBS_MODE=${OBS_MODE}"
 [ -n "${SEMI_OBS_FILE}" ]       && VPASS="${VPASS},SEMI_OBS_FILE=${SEMI_OBS_FILE}"
 [ -n "${SIMPLIFIED_AK_FILE}" ]  && VPASS="${VPASS},SIMPLIFIED_AK_FILE=${SIMPLIFIED_AK_FILE}"
 [ -n "${CTRL_FWD_DIR}" ]        && VPASS="${VPASS},CTRL_FWD_DIR=${CTRL_FWD_DIR}"
@@ -562,7 +602,7 @@ log "========================================================"
 #  experiment accidentally launched full-year) is obvious at a glance.
 # ------------------------------------------------------------
 # single-string -v list (no embedded spaces) so the reproduce line is copy-pasteable
-_repro_v="MODE=${MODE},GRID=${GRID},T_START=${T_START},T_END=${T_END},MAX_ITER=${MAX_ITER},EXP_NAME=${EXP_NAME},SIGMA_B=${SIGMA_B}"
+_repro_v="MODE=${MODE},GRID=${GRID},OBS_TYPE=${OBS_TYPE},T_START=${T_START},T_END=${T_END},MAX_ITER=${MAX_ITER},EXP_NAME=${EXP_NAME},SIGMA_B=${SIGMA_B}"
 _submit_log="${WORK_DIR}/submit.log"
 # Fresh launch (RESTART!=true) resets the record — consistent with the fresh
 # start above that clears state/progress; a brand-new EXP begins a clean log.
