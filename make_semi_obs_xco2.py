@@ -88,7 +88,7 @@ def load_l2_day(l2_dir, year, month, day):
 
 
 def apply_ak(co2_gchp_vv, prs_gchp_hpa,
-             prs_obs, ak, co2_apr_ppm, xco2_apr_ppm):
+             prs_obs, ak, co2_apr, xco2_apr):
     """
     Interpolate GCHP CO2 profile to L2# pressure levels and apply AK.
 
@@ -96,18 +96,20 @@ def apply_ak(co2_gchp_vv, prs_gchp_hpa,
     prs_gchp_hpa : (nlev,)  hPa (can be surface-first or top-first)
     prs_obs      : (20,)    hPa (L2# levels, may contain zeros)
     ak           : (20,)    dimensionless averaging kernel
-    co2_apr_ppm  : (20,)    ppm
-    xco2_apr_ppm : float    ppm
+    co2_apr      : (20,)    mol/mol  (L2# CO2-apriori, stored in mol/mol)
+    xco2_apr     : float    mol/mol  (L2# xCO2-apriori, stored in mol/mol)
 
     Returns truth xCO2 in ppm, or NaN on failure.
     """
-    co2_ppm = co2_gchp_vv * 1e6          # mol/mol -> ppm
+    # Keep model CO2 in mol/mol — same units as the L2# prior fields.
+    # The mol/mol → ppm conversion is applied once at the return.
+    co2 = co2_gchp_vv                    # mol/mol
 
     # Ensure pressure is monotonically increasing (surface last is fine
     # for interp1d as long as we sort)
     order = np.argsort(prs_gchp_hpa)
     prs_sorted = prs_gchp_hpa[order]
-    co2_sorted = co2_ppm[order]
+    co2_sorted = co2[order]
 
     valid = prs_obs > 0
     if valid.sum() < 2:
@@ -121,9 +123,9 @@ def apply_ak(co2_gchp_vv, prs_gchp_hpa,
     except Exception:
         return np.nan
 
-    diff = co2_interp - co2_apr_ppm
+    diff = co2_interp - co2_apr          # mol/mol - mol/mol
     diff[~valid] = 0.0
-    return float(xco2_apr_ppm) + float(np.sum(ak * diff))
+    return (float(xco2_apr) + float(np.sum(ak * diff))) * 1e6  # mol/mol → ppm
 
 
 def process_month(year, month, sat_track_dir, l2_dir):
@@ -164,8 +166,8 @@ def process_month(year, month, sat_track_dir, l2_dir):
 
             prs_obs  = l2['pressure'].values[j]               # (20,) hPa
             ak       = l2['xCO2-averagingKernel'].values[j]   # (20,)
-            co2_apr  = l2['CO2-apriori'].values[j]            # (20,) ppm
-            xco2_apr = float(l2['xCO2-apriori'].values[j])    # ppm
+            co2_apr  = l2['CO2-apriori'].values[j]            # (20,) mol/mol
+            xco2_apr = float(l2['xCO2-apriori'].values[j])    # mol/mol
 
             xco2_truth = apply_ak(
                 st['co2'][:, k], st['prs'][:, k],

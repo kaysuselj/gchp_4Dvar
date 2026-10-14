@@ -162,7 +162,7 @@ esac
 # Locate the osse_4dvar semi-obs / control tree.
 # Running from inside an osse_4dvar experiment: PARENT_DIR is osse_4dvar/ itself.
 # Running from gchp_4Dvar/: osse_4dvar is a sibling at PARENT_DIR/osse_4dvar/.
-_OSSE4DVAR_DIR="${PARENT_DIR}/osse_4dvar"
+_OSSE4DVAR_DIR="${OSSE_ROOT:-${PARENT_DIR}/osse_4dvar}"    # OSSE_ROOT: set by the setup script
 [ -d "${_OSSE4DVAR_DIR}" ] || _OSSE4DVAR_DIR="${PARENT_DIR}"
 
 if [ "${OBS_TYPE}" = "satellite" ]; then
@@ -419,6 +419,21 @@ if [ -f "${SCRIPT_DIR}/set_adjoint_met_offsets.py" ]; then
         || die "adjoint ExtData.rc met offsets differ from the forward ones (fix: set_adjoint_met_offsets.py on ${CTRL_ADJ_DIR}/ExtData.rc)"
 else
     log "WARNING: ${SCRIPT_DIR}/set_adjoint_met_offsets.py not found, adjoint met offsets not checked"
+fi
+
+# The adjoint flux must be the forward flux without sigma (factor 750): any other factor
+# (e.g. the OSSE prior error E, factor 752) missing in the adjoint scales the gradient
+# wrongly without any error message.
+if [ -f "${SCRIPT_DIR}/check_adjoint_flux_config.py" ]; then
+    python3 "${SCRIPT_DIR}/check_adjoint_flux_config.py" "${FWD_DIR}/HEMCO_Config.rc" "${ADJ_DIR}/HEMCO_Config.rc" \
+        || die "adjoint HEMCO flux is not the forward flux without sigma (see above)"
+else
+    log "WARNING: ${SCRIPT_DIR}/check_adjoint_flux_config.py not found, adjoint flux config not checked"
+fi
+# OSSE prior error E (read as ../prior_err_co2.nc4 from the run dirs = the work tree)
+if grep -q '^[^#]*prior_err_co2\.nc4' "${FWD_DIR}/HEMCO_Config.rc"; then
+    [ -f "${WORK_DIR}/prior_err_co2.nc4" ] || die "HEMCO uses the prior error E but ${WORK_DIR}/prior_err_co2.nc4 is missing (make_prior_err.py)"
+    log "prior error E: ${WORK_DIR}/prior_err_co2.nc4"
 fi
 
 # Patch the sat_track track_file into both HISTORY.rc and sat_track.rcx so they
@@ -900,6 +915,15 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
         [ -f "${STATE_FILE}" ] && cp "${STATE_FILE}" \
             "${OUTPUT_DIR}/4dvar_state_iter$(printf '%03d' "${CUR_ITER}").npz"
 
+        # Record the step as done BEFORE the (slow, optional) archiving and plots:
+        # the state file has already advanced, so a job killed after this point must
+        # resume at the next iteration. Re-running the optimizer step on a resume
+        # would pair the old J and gradient with the new sigma.
+        if [ "${rc}" -eq 0 ]; then
+            CUR_PHASE=step_done
+            save_progress
+        fi
+
         # Archive the per-iteration adjoint gradient output (monthly only — the
         # monthly gradient is reconstructed by differencing these files).
         if [ "${MODE}" = "monthly" ]; then
@@ -943,7 +967,10 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
             die "L-BFGS-B step returned error code ${rc}"
         fi
         log "[iter ${CUR_ITER}] Iteration complete — state saved"
+    fi
 
+    # Optimizer step done (also the resume point after it): next iteration
+    if [ "${CUR_PHASE}" = "step_done" ]; then
         CUR_ITER=$((CUR_ITER + 1))
         CUR_PHASE=start
         save_progress

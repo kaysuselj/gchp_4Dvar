@@ -312,7 +312,7 @@ def append_history(csv_path, row):
 # — identical to lbfgsb_step.py
 # ---------------------------------------------------------------------------
 
-def lbfgsb_direction(g, s_hist, y_hist, m_used):
+def lbfgsb_direction(g, s_hist, y_hist, m_used, first_step=1.0):
     """
     Compute L-BFGS-B search direction d = -H_k g  via the two-loop recursion.
     s_hist, y_hist: arrays of shape (m, n); first m_used rows are valid
@@ -336,8 +336,9 @@ def lbfgsb_direction(g, s_hist, y_hist, m_used):
     if m_used > 0:
         gamma = np.dot(s[-1], y[-1]) / np.dot(y[-1], y[-1])
     else:
-        # First iteration: scale so max per-element change ≈ 1
-        gamma = 1.0 / max(np.abs(g).max(), 1e-8)
+        # No curvature information yet (first step or memory reset): steepest
+        # descent scaled so the largest per-element change is first_step
+        gamma = first_step / max(np.abs(g).max(), 1e-8)
 
     r = gamma * q
 
@@ -348,12 +349,12 @@ def lbfgsb_direction(g, s_hist, y_hist, m_used):
     return -r   # descent direction
 
 
-def _gamma_scale(g, s_hist, y_hist, m_used):
+def _gamma_scale(g, s_hist, y_hist, m_used, first_step=1.0):
     """Initial-Hessian scaling gamma used by lbfgsb_direction (for logging)."""
     if m_used > 0:
         return float(np.dot(s_hist[m_used - 1], y_hist[m_used - 1])
                      / np.dot(y_hist[m_used - 1], y_hist[m_used - 1]))
-    return float(1.0 / max(np.abs(g).max(), 1e-8))
+    return float(first_step / max(np.abs(g).max(), 1e-8))
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +362,7 @@ def _gamma_scale(g, s_hist, y_hist, m_used):
 # ---------------------------------------------------------------------------
 
 def lbfgs_backtrack_step(x_cur, g_cur, J_cur, st, m, c1, max_bt,
-                         sigma_min=0.0, sigma_max=3.0):
+                         sigma_min=0.0, sigma_max=3.0, first_step=1.0):
     """One projected L-BFGS step with a line search deferred across outer
     iterations.  PURE (no I/O) so it can be unit-tested on a toy quadratic.
 
@@ -438,13 +439,13 @@ def lbfgs_backtrack_step(x_cur, g_cur, J_cur, st, m, c1, max_bt,
         # advance the anchor to the accepted iterate
         st['x_anchor'], st['g_anchor'], st['J_anchor'] = x_cur.copy(), g_cur.copy(), float(J_cur)
         # fresh L-BFGS direction from the new anchor
-        d = lbfgsb_direction(g_cur, st['s_hist'], st['y_hist'], st['m_used'])
+        d = lbfgsb_direction(g_cur, st['s_hist'], st['y_hist'], st['m_used'], first_step)
         gTd = float(np.dot(g_cur, d))
         if gTd >= 0.0:      # non-descent safeguard: drop memory -> scaled steepest descent
             st['m_used'] = 0
             st['s_hist'][:] = 0.0
             st['y_hist'][:] = 0.0
-            d = lbfgsb_direction(g_cur, st['s_hist'], st['y_hist'], 0)
+            d = lbfgsb_direction(g_cur, st['s_hist'], st['y_hist'], 0, first_step)
             gTd = float(np.dot(g_cur, d))
             info['reset_memory'] = True
         st['d'], st['alpha'], st['n_bt'] = d, 1.0, 0
@@ -474,10 +475,10 @@ def lbfgs_backtrack_step(x_cur, g_cur, J_cur, st, m, c1, max_bt,
     info['gTd']        = gTd
     info['alpha']      = st['alpha']
     info['n_backtrack'] = st['n_bt']
-    info['n_clipped']  = int((x_raw < 0.0).sum())
-    info['n_at_bound'] = int((x_next <= 0.0).sum())
+    info['n_clipped']  = int(((x_raw < sigma_min) | (x_raw > sigma_max)).sum())
+    info['n_at_bound'] = int(((x_next <= sigma_min) | (x_next >= sigma_max)).sum())
     info['max_dx']     = float(np.abs(x_next - x_cur).max())
-    info['gamma']      = _gamma_scale(anchor_g, st['s_hist'], st['y_hist'], st['m_used'])
+    info['gamma']      = _gamma_scale(anchor_g, st['s_hist'], st['y_hist'], st['m_used'], first_step)
     return x_next, st, info
 
 
@@ -516,6 +517,9 @@ def main():
     parser.add_argument('--c1',      type=float, default=1e-4,
                         help='Armijo sufficient-decrease constant for the '
                              'backtracking line search')
+    parser.add_argument('--first-step-max', type=float, default=None,
+                        help='Largest per-element sigma change of a steepest-descent '
+                             'step (first step, memory reset); default: --sigma-b')
     parser.add_argument('--max-backtrack', type=int, default=6,
                         help='Max step halvings along one direction before '
                              'declaring a line-search stall (0 = old unit-step '
@@ -527,6 +531,7 @@ def main():
                         help='If set, write adj_boundaries_iter{N}.nc4 (boundary '
                              'accumulators + monthly obs gradients) here each iteration')
     args = parser.parse_args()
+    first_step = args.first_step_max if args.first_step_max is not None else args.sigma_b
 
     nmon = args.n_months
     n = nmon * args.nlat * args.nlon
@@ -643,7 +648,8 @@ def main():
               n_reject_total=n_reject_total)
     x_next, st, info = lbfgs_backtrack_step(x_cur, g_cur, J_cur, st,
                                             m, args.c1, args.max_backtrack,
-                                            args.sigma_min, args.sigma_max)
+                                            args.sigma_min, args.sigma_max,
+                                            first_step)
 
     # console step report
     if info.get('action') in ('accept', 'init'):

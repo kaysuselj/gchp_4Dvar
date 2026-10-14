@@ -620,15 +620,17 @@ def _accumulate_forcing_simplified(gchp_files, t_start, t_end, ts_chem_s,
             prs_obs_full = np.zeros_like(mean_prs)
             prs_obs_full[valid_lev] = mean_prs[valid_lev]
 
+            # Same order as the real-obs path: an obs that falls on no checkpoint
+            # gets no forcing, so it must not enter J either.
+            ckpt_idx = nearest_checkpoint(t_j, checkpoints, ts_chem_s)
+            if ckpt_idx < 0:
+                continue
+
             force_model, diff = obs_forcing_profile(
                 prs_all[j], prs_obs_full,
                 mean_ak, xco2_hat_ppm, xco2_truth_ppm, xco2_std_base,
             )
             J_total += 0.5 * (diff / xco2_std_base) ** 2
-
-            ckpt_idx = nearest_checkpoint(t_j, checkpoints, ts_chem_s)
-            if ckpt_idx < 0:
-                continue
 
             lon_norm = float((lon_j + 180) % 360 - 180)
             obs_by_ckpt[ckpt_idx].append((
@@ -786,6 +788,14 @@ def _accumulate_forcing(gchp_files, t_start, t_end, ts_chem_s,
           f'({n_with_obs}/{n_ckpt} checkpoints have at least one obs)')
     print(f"Rejected by time tolerance: {stats['time_rejected']}")
     print(f"Rejected by spatial tolerance: {stats['spatial_rejected']}")
+    n_no_truth = stats.get('no_truth', 0)
+    if semi_obs_dir or semi_obs_data is not None:
+        print(f'Skipped, no truth xCO2 found: {n_no_truth}')
+        if n_no_truth > 0.01 * max(stats['matched'] + n_no_truth, 1):
+            raise RuntimeError(
+                f'{n_no_truth} of {stats["matched"] + n_no_truth} observations have no '
+                'truth xCO2 in the semi-obs data (> 1%): wrong or incomplete semi-obs '
+                'file for this window?')
     print(f'Cost function J = {J_total:.6e}')
 
     return checkpoints, obs_by_ckpt, levs, J_total
@@ -861,8 +871,9 @@ def _accumulate_forcing_one_file(gchp_file, checkpoints, obs_by_ckpt, stats,
         if semi_obs_dir:
             semi_obs_month = _load_semi_obs_month(semi_obs_dir, year, month)
             if semi_obs_month is None:
-                print(f'  WARNING: no semi-obs files for {year}-{month:02d}; '
-                      'falling back to ORCHIDEE-ECCO2 xCO2 for this month')
+                raise RuntimeError(
+                    f'no semi-obs files for {year}-{month:02d} in {semi_obs_dir}: '
+                    'refusing to fall back to the ORCHIDEE-ECCO2 xCO2 (different truth)')
 
         obs_times    = pd.DatetimeIndex(ds_obs['time'].values)
         obs_lats     = ds_obs['latitude'].values
@@ -949,19 +960,26 @@ def _accumulate_forcing_one_file(gchp_file, checkpoints, obs_by_ckpt, stats,
             #      so ŷ_k and y_k are guaranteed to use the same AK record.
             #   2. sat_track dir (--semi-obs-dir): apply AK on-the-fly
             #   3. L2# ORCHIDEE-ECCO2 xco2_obs (default)
+            # With a truth source given, an obs without truth is SKIPPED (and
+            # counted), never filled with the ORCHIDEE-ECCO2 xCO2: that is a
+            # different truth and would bias the OSSE.
             if semi_obs_data is not None:
                 xco2_truth, _ = _get_truth_xco2_from_file(
                     semi_obs_data,
                     obs_times[idx_obs], obs_lats[idx_obs], obs_lons[idx_obs])
-                if xco2_truth is not None:
-                    xco2_obs_ppm = xco2_truth
+                if xco2_truth is None:
+                    stats['no_truth'] = stats.get('no_truth', 0) + 1
+                    continue
+                xco2_obs_ppm = xco2_truth
             elif semi_obs_month is not None:
                 xco2_truth = _get_truth_xco2(
                     semi_obs_month, t_gchp, lat_gchp, lon_gchp,
                     prs_obs_j, xAK_all[idx_obs],
                     co2_apr_all[idx_obs], xco2_apr_all[idx_obs])
-                if xco2_truth is not None:
-                    xco2_obs_ppm = xco2_truth
+                if xco2_truth is None:
+                    stats['no_truth'] = stats.get('no_truth', 0) + 1
+                    continue
+                xco2_obs_ppm = xco2_truth
 
             ckpt_idx = nearest_checkpoint(t_gchp, checkpoints, ts_chem_s)
             if ckpt_idx < 0:
