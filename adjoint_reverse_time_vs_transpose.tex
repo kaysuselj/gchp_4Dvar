@@ -1,0 +1,180 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\lstset{basicstyle=\ttfamily\small,breaklines=true,frame=single,
+        backgroundcolor=\color{gray!8},columns=fullflexible}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{Is the reversed-wind adjoint problem caused by integrating\\
+       backward in time? Transpose versus inverse}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\noindent\emph{This note answers a specific conceptual question that arises when
+reading the two reversed-wind advection-adjoint variants
+(\code{ADV\_ADJ\_METHOD = reverse\_wind\_pure} vs.\ \code{reverse\_wind}): are the
+cube-seam ``corrections'' needed because the adjoint integrates in reverse time,
+or would negating the input wind and running an ordinary forward simulation be
+enough? The short answer is that backward-in-time integration is necessary and
+correct and is \emph{not} the source of the corrections; the corrections exist
+because the adjoint requires the \emph{transpose} of the transport operator,
+which is a different object from the \emph{inverse} that a reversed-wind forward
+run produces. They coincide in the smooth interior and differ at the asymmetric
+grid seams, and the corrections are exactly that difference.}
+
+%======================================================================
+\section{Two operations both march ``backward''}
+
+The adjoint method inherently marches backward in time: computing
+$\partial J/\partial(\text{state})$ by the chain rule assembles the sensitivity
+from the last time step to the first, so the saved trajectory is always visited
+in reverse order. There is no forward-in-time gradient adjoint. Hence reverse-time
+integration is not optional, and it is not something we could remove.
+
+But ``march backward'' can mean two mathematically distinct things, and this is
+the crux:
+\begin{itemize}
+  \item \textbf{Time-reversal / inverse.} Run the dynamics backward to
+  \emph{undo} the transport. This is what ``negate the wind and integrate
+  forward'' produces: an approximate $A^{-1}$.
+  \item \textbf{Transpose (the adjoint).} Apply $A^\top$ of each step, in reverse
+  order. This propagates sensitivities and satisfies the dot-product identity
+  $\langle A x, y\rangle = \langle x, A^\top y\rangle$.
+\end{itemize}
+Both visit the steps in reverse order. The transpose additionally \emph{flips the
+operator}, not merely the calendar. For a single forward step represented by a
+matrix $A$, integrating backward as an inverse applies $A^{-1}$, whereas the
+adjoint applies $A^\top$, and in general
+\begin{equation}
+  A^{-1} \neq A^\top .
+\end{equation}
+The reversed-wind trick substitutes an inverse-like forward pass for the
+transpose. That substitution is exact only where $A$ is self-adjoint
+(symmetric); elsewhere it is merely an approximation, and the corrections repair
+the rows where it fails.
+
+%======================================================================
+\section{Where inverse and transpose agree, and where they split}
+
+\subsection{Interior: reversed-wind forward \emph{equals} the transpose}
+
+Consider one-dimensional linear advection with constant velocity and first-order
+upwind. Forward ($u>0$, Courant number $c=u\,\Delta t/\Delta x$, $0<c<1$):
+\begin{equation}
+  q_i^{\text{new}} = (1-c)\,q_i + c\,q_{i-1},
+\end{equation}
+i.e.\ the matrix row $A_{i,i}=1-c$, $A_{i,i-1}=c$. Its transpose is
+\begin{equation}
+  (A^\top q)_i = (1-c)\,q_i + c\,q_{i+1}.
+\end{equation}
+Negating the wind ($u<0$, upwind now from the right) and running the same forward
+scheme gives
+\begin{equation}
+  q_i^{\text{new}} = (1-c)\,q_i + c\,q_{i+1},
+\end{equation}
+which is \emph{identical} to $(A^\top q)_i$. So in the constant-coefficient
+interior, reversed-wind-forward already \emph{is} the transpose, for free and
+with no corrections. This is the sense in which ``just reverse the wind'' is
+correct, and why \code{reverse\_wind\_pure} is not nonsense in cell interiors.
+
+\subsection{Seam/boundary: they differ by the cross-seam term}
+
+Put this on a bounded domain, cells $1..N$, and inspect the last row.
+\begin{itemize}
+  \item \textbf{Transpose row $N$:} $(A^\top q)_N = (1-c)\,q_N + c\,q_{N+1}$, but
+  cell $N+1$ lies \emph{outside} the domain; the forward operator never had an
+  interior entry $A_{N+1,N}$, so that term does not exist. The transpose row is
+  simply $(1-c)\,q_N$.
+  \item \textbf{Reversed-wind forward at $N$:} a valid forward run reconstructs
+  using a ghost cell, computing $(1-c)\,q_N + c\,q_{N+1}^{\text{ghost}}$, where on
+  the cubed sphere $q_{N+1}^{\text{ghost}}$ is filled from the neighbouring face
+  by \code{copy\_corners}.
+\end{itemize}
+The two differ \emph{by exactly the ghost term}. The reversed-wind forward run
+includes a cross-seam contribution the transpose does not have---and it must
+include it, because pulling that ghost is what makes it a well-posed forward
+integration. This is why negating the input wind cannot avoid the problem: no
+matter which way the wind points, a correct forward run at a boundary
+reconstructs from the off-face ghost. \emph{The property that makes it a good
+forward simulation is precisely the property that makes it a wrong transpose at
+the seam.}
+
+The two \code{reverse\_wind} corrections are exactly this repair:
+\begin{itemize}
+  \item the \textbf{interior-only edge reconstruction} deletes the spurious ghost
+  term ($c\,q_{N+1}^{\text{ghost}}$) so the row matches the transpose;
+  \item \code{copy\_corners\_ad} re-routes the corner sensitivity to where the
+  transpose sends it (accumulated back onto the source real cells) instead of
+  scattering it outward to a ghost.
+\end{itemize}
+
+%======================================================================
+\section{The causal chain}
+
+The role of reverse-time is upstream of the corrections, not identical to them:
+\begin{quote}
+adjoint method $\Rightarrow$ \textbf{must march backward in time} $\Rightarrow$
+sensitivity propagates \emph{opposite} to mass $\Rightarrow$ so we flip the wind
+to mimic the transpose $\Rightarrow$ flipping the wind reproduces the transpose
+\emph{only where the operator is symmetric} $\Rightarrow$ the seams are
+asymmetric $\Rightarrow$ corrections are needed.
+\end{quote}
+Reverse-time is the \emph{reason we flip the wind}, but the \emph{bug} is one step
+further down: flipping the wind is only an approximate transpose, and it
+over-reaches at the asymmetric boundary rows.
+
+%======================================================================
+\section{The decisive test: \code{exact\_linear} also runs backward in time}
+
+The cleanest way to isolate the variable is to compare against the exact adjoint.
+\code{exact\_linear} \emph{also} integrates in reverse time: it steps through the
+saved trajectory backward and even reverses the sub-step order---the forward does
+horizontal advection then vertical remap, while the exact adjoint does the
+vertical-remap transpose first, then the horizontal transpose. Same reverse-time
+direction as \code{reverse\_wind}.
+
+Yet \code{exact\_linear} requires \emph{none} of the \code{copy\_corners\_ad} or
+interior-only edge-stencil corrections, because it transposes each operator
+\emph{exactly}: the corner handling and boundary stencils are transposed
+faithfully inside its own adjoint routines rather than being approximated by a
+reversed-wind forward pass. Same time direction, exact spatial transpose, no seam
+corrections.
+
+Holding reverse-time fixed, the corrections appear only for the \emph{approximate}
+(reversed-wind) transpose and never for the \emph{exact} one. Therefore the
+corrections are about how faithfully the \emph{spatial} operator is transposed,
+not about integrating backward in time.
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+variant & reverse time? & spatial transpose & seam corrections? \\
+\midrule
+\code{reverse\_wind\_pure} & yes & reversed-wind (approx.) & none (hence sign error) \\
+\code{reverse\_wind}       & yes & reversed-wind $+$ seam fixes & yes \\
+\code{exact\_linear}       & yes & exact transpose & not needed \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%======================================================================
+\section{One-line answer}
+
+Integrating in reverse time is \emph{why} the wind gets flipped, but it is not the
+problem. The problem is that a reversed-wind forward run is the operator's
+\emph{inverse}-like partner, whereas the adjoint needs its \emph{transpose}. The
+two agree in the self-adjoint interior and disagree at the asymmetric grid seams,
+and the corrections are exactly that disagreement. Run the exact transpose
+(\code{exact\_linear}) and the same reverse-time integration needs no corrections
+at all.
+
+\end{document}

@@ -1,0 +1,88 @@
+#!/bin/bash
+#PBS -S /bin/bash
+#PBS -N test_monthly_sigma
+#PBS -l select=1:ncpus=24:mpiprocs=24:model=bro_ele
+#PBS -l walltime=4:00:00
+#PBS -j oe
+#PBS -W group_list=s1055
+#PBS -m bea
+#PBS -M kay.suselj@jpl.nasa.gov
+
+# Forward-only plumbing test for the monthly-sigma 4D-Var setup.
+#
+# Verifies two things before any production job is launched:
+#   (1) CARDAMOM NBE (EmisCO2_BalBiosph) is read with its full time resolution,
+#       across a month boundary.
+#   (2) Monthly sigma is selected by ExtData for the correct month.  The test
+#       sigma is Jan=1, Feb=0, Mar-Dec=9, so EmisCO2_NetTerrExch (the only
+#       diagnostic sigma scales -- HEMCO scale factor 750 on TER_CLASS_CTEM)
+#       must be nonzero in January, exactly zero from 2016-02-01T00:00 onward,
+#       and never 9x anything.
+#
+# Runs 2016-01-01 -> 2016-02-03 so it exercises both the initial month
+# selection and the Jan->Feb transition.
+#
+# Writes into 4dvar_design_osse_monthly/ only; the live 4dvar_design_osse/
+# optimization is untouched.
+#
+#   qsub test_monthly_sigma.run
+
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+
+BASE_DIR="$(pwd)"
+WORK_DIR="$(cd "${BASE_DIR}/../4dvar_design_osse_monthly" && pwd)"
+FWD_DIR="${WORK_DIR}/forward_run"
+CTRL_DIR="${BASE_DIR}/control_files/forward_osse_monthly_test"
+SIGMA_DIR="${WORK_DIR}/sigma_monthly"
+
+T_START="2016-01-01"
+T_END="2016-02-03"
+
+GCHP_ENV="${FWD_DIR}/gchp.env"
+[ -f "${GCHP_ENV}" ] || die "${GCHP_ENV} not found"
+set +e; source "${GCHP_ENV}"; set -e
+command -v mpiexec &>/dev/null || die "mpiexec not found after sourcing gchp.env"
+
+[ -d "${CTRL_DIR}" ] || die "Control files not found: ${CTRL_DIR}"
+rsync -a "${CTRL_DIR}/" "${FWD_DIR}/"
+log "Control files synced -> ${FWD_DIR}"
+
+# Sigma files must already exist (written by write_sigma_monthly.py --const-per-month)
+for m in 01 02; do
+    [ -f "${SIGMA_DIR}/2016/${m}.nc4" ] || die "Missing ${SIGMA_DIR}/2016/${m}.nc4"
+done
+log "Monthly sigma files present"
+
+NCORES=$(awk -F'[[:space:]:]+' '/^NX[[:space:]:]/ {nx=$2} /^NY[[:space:]:]/ {ny=$2} \
+         END {print nx*ny}' "${FWD_DIR}/GCHP.rc")
+log "Core count from GCHP.rc: ${NCORES}"
+[ -f "${FWD_DIR}/gchp" ] || die "GCHP executable missing: ${FWD_DIR}/gchp"
+
+START_FMT="$(echo "${T_START}" | tr -d '-') 000000"
+END_FMT="$(echo "${T_END}"   | tr -d '-') 000000"
+DURATION_DAYS=$(( ($(date -d "${T_END}" +%s) - $(date -d "${T_START}" +%s)) / 86400 ))
+DURATION_FMT="$(printf '%08d' "${DURATION_DAYS}") 000000"
+
+_cfg="${FWD_DIR}/runConfig_forward.sh"
+sed -i "s/^Start_Time=.*/Start_Time=\"${START_FMT}\"/" "${_cfg}"
+sed -i "s/^End_Time=.*/End_Time=\"${END_FMT}\"/"       "${_cfg}"
+sed -i "s/^Duration=.*/Duration=\"${DURATION_FMT}\"/"  "${_cfg}"
+log "runConfig patched: Start=${START_FMT} End=${END_FMT} Duration=${DURATION_FMT}"
+
+cd "${FWD_DIR}"
+rm -f gcadj_internal_checkpoint* gcadj_import_checkpoint*
+[ -d OutputDir ] && rm -f OutputDir/*
+rm -f Restarts/gcchem_internal_checkpoint* cap_restart
+
+./runConfig_forward.sh > gchp.log 2>&1 || die "runConfig_forward.sh failed"
+log "Forward GCHP starting (${DURATION_DAYS} days)"
+mpiexec -n "${NCORES}" ./gchp >> gchp.log 2>&1 \
+    || die "Forward GCHP failed. See ${FWD_DIR}/gchp.log"
+log "Forward GCHP done"
+
+log "Emissions files written: $(ls OutputDir/GEOSChem.Emissions.*.nc4 2>/dev/null | wc -l)"
+log "Now run: python3 ${BASE_DIR}/check_monthly_sigma.py ${FWD_DIR}/OutputDir"

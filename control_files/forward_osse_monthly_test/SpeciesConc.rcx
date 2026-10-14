@@ -1,0 +1,16 @@
+  SpeciesConc.template:       '%y4%m2%d2_%h2%n2z.nc4',
+  SpeciesConc.format:         'CFIO',
+  SpeciesConc.timestampStart: .true.
+  SpeciesConc.monthly:        0
+  SpeciesConc.frequency:      001000
+  SpeciesConc.duration:       240000
+  SpeciesConc.mode:           'time-averaged'
+  SpeciesConc.fields:        'SpeciesConcVV_CO2    ', 'GCHPchem',
+#                               'SpeciesConcVV_CH4    ', 'GCHPchem',
+#                              'SpeciesConcVV_CO     ', 'GCHPchem',
+#                              'SpeciesConcVV_OCS    ', 'GCHPchem',
+                              ##'SpeciesConcMND_CH4 ', 'GCHPchem',
+                              ##'SpeciesConcMND_CO  ', 'GCHPchem',
+                              ##'SpeciesConcMND_CO2 ', 'GCHPchem',
+                              ##'SpeciesConcMND_OCS ', 'GCHPchem',
+::

@@ -1,0 +1,255 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\lstset{basicstyle=\ttfamily\small,breaklines=true,frame=single,
+        backgroundcolor=\color{gray!8},columns=fullflexible}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{The reversed-wind advection adjoint in GCHP:\\
+       \code{reverse\_wind\_pure} versus \code{reverse\_wind}}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\noindent\emph{This note documents the difference between the two reversed-wind
+advection-adjoint variants selected at run time by the \code{ADV\_ADJ\_METHOD}
+key in \code{GCHP.rc}. Section~\ref{sec:detailed} is a detailed technical
+description written to be self-contained for a reader who is not an expert in
+finite-volume advection. Section~\ref{sec:manuscript} is a condensed,
+manuscript-ready paragraph. All source references are to the
+\code{GCHP\_fix\_adv} tree (module
+\code{FVdycoreCubed\_GridComp/fvdycore/model/tp\_core.F90} and
+\code{fv\_tracer2d.F90}).}
+
+%======================================================================
+\section{Detailed technical description}
+\label{sec:detailed}
+
+\subsection{The run-time switch}
+
+The advection adjoint is selected by a single key in \code{GCHP.rc},
+\begin{lstlisting}
+ADV_ADJ_METHOD: reverse_wind
+\end{lstlisting}
+which admits three values: \code{reverse\_wind\_pure}, \code{reverse\_wind}, and
+\code{exact\_linear}. The first two are the subject of this note; the third is a
+true discrete transpose available only for the limiter-free \code{hord=2}/
+\code{kord=17} path and is not discussed further here.
+
+\subsection{A minimal primer on the forward transport scheme}
+
+Tracer mass (here CO$_2$) is transported by the wind with GEOS-Chem/FV3's
+finite-volume, flux-form advection on the cubed-sphere grid. On each dynamics
+step the scheme performs, for every grid cell, three operations:
+\begin{enumerate}
+  \item \textbf{Sub-grid reconstruction.} The tracer field is represented inside
+  each cell not by a single flat value but by a piecewise-parabolic profile
+  (the Piecewise Parabolic Method, PPM), built from a cell and its neighbours in
+  the routines \code{xppm} (east--west) and \code{yppm} (north--south).
+  \item \textbf{Face fluxes.} The mass crossing each cell face is obtained by
+  integrating that reconstructed profile over the region swept by the flow in
+  one time step. The flow enters through the \emph{Courant number}
+  $c=u\,\Delta t/\Delta x$, and the scheme is \emph{upwind-biased}: the tracer
+  that crosses a face is taken from the cell on the side the wind is blowing
+  \emph{from}.
+  \item \textbf{Cell update.} Each cell's mass is updated as (flux in)
+  $-$ (flux out).
+\end{enumerate}
+
+Two additional features matter for the adjoint, and both live at the
+\emph{seams} of the cube --- the edges and corners where the six faces meet and
+the coordinate lines are discontinuous:
+\begin{itemize}
+  \item \code{copy\_corners} copies tracer values from a neighbouring face into
+  the ``ghost'' halo cells surrounding each of the eight cube corners, so that
+  the reconstruction stencil has data to work with there;
+  \item at each face \emph{edge}, \code{xppm}/\code{yppm} use special one-sided
+  boundary stencils that blend an off-face ghost value with interior values to
+  build the edge parabola.
+\end{itemize}
+
+\subsection{The reversed-wind approximation}
+
+The adjoint model must apply the mathematical \emph{transpose} of the entire
+forward transport operator, propagating sensitivities ($\partial J/\partial$
+state) backward in time. Forming that transpose exactly is expensive and, for
+the flux/slope limiters used in production (\code{hord\_tr=12}, \code{kord\_tr=8}),
+has not been implemented; that exact path exists only for the limiter-free case
+(\code{exact\_linear}).
+
+Both \code{reverse\_wind\_pure} and \code{reverse\_wind} instead use a cheap
+approximation: \textbf{they re-run the ordinary forward transport code with the
+mass fluxes (winds) negated}. Reversing the wind approximates the transpose
+because advection is close to a simple upwind operator; the approximation is
+\emph{exact} when the flow is spatially uniform and degrades as the flow
+develops shear and curvature. Crucially, both variants execute the identical
+call chain
+\code{tracer\_2d}~$\rightarrow$~\code{fv\_tp\_2d}~$\rightarrow$~
+\code{xppm}/\code{yppm} with negated fluxes; \emph{neither} forms the exact
+transpose.
+
+\subsection{The single distinguishing flag}
+
+The only thing that differs between the two variants is one module-level logical,
+set in \code{fv\_tracer2d.F90}:
+\begin{lstlisting}
+tp_core_is_adjoint = l_isAdjoint .and. (trim(adv_adj_method) == 'reverse_wind')
+\end{lstlisting}
+Thus
+\begin{itemize}
+  \item \code{reverse\_wind\_pure} $\Rightarrow$
+        \code{tp\_core\_is\_adjoint = .false.}: the winds are negated and the
+        forward operator is run verbatim, with \emph{no} further modification;
+  \item \code{reverse\_wind} $\Rightarrow$
+        \code{tp\_core\_is\_adjoint = .true.}: three direction-aware corrections
+        are switched on at the cube seams.
+\end{itemize}
+
+\subsection{Why corrections are needed, and what they are}
+
+When the wind is negated, the \emph{upwind direction flips}, but the forward
+code's corner-copy and edge stencils were written for the \emph{forward} upwind
+direction. Consequently, at every face edge and corner they reach for the wrong
+neighbouring cells. The three corrections repair exactly those locations.
+
+\paragraph{Correction 1 --- the corner copy becomes its transpose.}
+(\code{tp\_core.F90}, in \code{fv\_tp\_2d}.) Where the pure variant calls
+\code{copy\_corners} (which \emph{scatters} a corner tracer value \emph{out} to
+the ghost halo), the corrected variant calls \code{copy\_corners\_ad}, the
+adjoint of that copy. Instead of scattering, it \emph{accumulates} the ghost-cell
+sensitivities \emph{back into} the source real cells and then zeroes the ghosts:
+\begin{lstlisting}
+! Adjoint of copy_corners: accumulate ghost corner sensitivities back to
+! the source real cells and zero the ghost corners.
+q(j,1-i) = q(j,1-i) + q(i,j)
+q(i,j)   = 0.
+\end{lstlisting}
+This is the correct way to carry sensitivity across a cube corner when the
+integration runs backward.
+
+\paragraph{Correction 2 --- edge reconstruction stencils switch to interior-only
+upwind.} (\code{xppm} and \code{yppm}.) At a face edge the forward PPM builds the
+edge parabola from a \emph{centred} blend of an off-face ghost value and interior
+values. The correction detects, from the sign of the (reversed) Courant number,
+when the adjoint flow points \emph{outward} across that edge --- $c<0$ at the low
+edge, $c>0$ at the high edge --- and in that case replaces the centred blend with
+an \emph{interior-only} reconstruction:
+\begin{lstlisting}
+! Outward adjoint flow (c<0): upwind is interior -- use interior-only reconstruction.
+if (tp_core_is_adjoint .and. c(is,j) < 0.) &
+   al(1) = ((2.*dxa(1,j)+dxa(2,j))*q1(1)-dxa(1,j)*q1(2))/(dxa(1,j)+dxa(2,j))
+\end{lstlisting}
+Because the flow is reversed, the physically upwind cells are now the interior
+ones rather than the ghosts, so the stencil stops reaching across the seam. The
+same test is applied at all four face edges (\code{is==1} and
+\code{(ie+1)==npx} in $x$; \code{js} and \code{(je+1)==npy} in $y$).
+
+\paragraph{Correction 3 --- the same treatment for the parabola-edge slopes.}
+(The \code{bl}/\code{br} boundary blocks of \code{yppm}, and the corresponding
+$x$ blocks.) The one-sided parabola end-slopes at the face edges are likewise
+rebuilt with an interior-only upwind stencil (with the monotonicity bounds
+re-applied to the interior triplet) wherever the reversed flow is outward. This
+is the slope-limited counterpart of Correction~2.
+
+\subsection{What the corrections do \emph{not} fix}
+
+The three corrections act only at the cube \emph{seams}. They do not alter the
+\emph{interior} PPM operator, for which the reversed-wind sweep is still not the
+exact transpose: the cross-derivative (inner, cross-swept) step of
+\code{fv\_tp\_2d} divides the intermediate half-updated tracer by the swept-area
+factors \code{ra\_x}/\code{ra\_y} in a way that a faithful transpose would not.
+This residual, wind-gradient--dependent term is common to both reversed-wind
+variants and is removed only by the exact transpose (\code{exact\_linear}).
+
+\subsection{Empirical consequence}
+
+We validated both variants against finite-difference (FD) gradients on the
+native C24 cubed-sphere grid in a one-month, advection-only experiment
+(\code{exp3\_adv\_only}: transport-only physics, control $=$ a per-cell
+multiplicative flux scale $\sigma$, cost $J$ a quadratic XCO$_2$ misfit). The FD
+reference uses central differences $\big(J(\sigma{+}\varepsilon)-J(\sigma{-}
+\varepsilon)\big)/2\varepsilon$ at $\varepsilon=0.05$; the forward model is
+bit-identical across the adjoint-only variants, so a single set of FD runs
+serves both. Results at the sampled cells, including three large-signal
+``hotspots'' (Ethiopia, Colombia, Brazil):
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+variant & correlation with FD & through-origin slope & hotspot $g_{\rm adj}/g_{\rm FD}$ \\
+\midrule
+\code{reverse\_wind\_pure} & $-0.886$ & $-6.49$ & $-4.4,\ -8.2,\ -2.9$ \\
+\code{reverse\_wind}       & $+0.988$ & $+4.10$ & $+4.0,\ +4.4,\ +3.5$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The uncorrected variant is \emph{anti-correlated} with the truth: with the cube
+seams untreated, the corner copies and outward-edge stencils point the wrong way
+and the recovered gradient has the wrong sign at essentially every cell. Enabling
+the three corrections restores the correct sign and a strong correlation
+($+0.99$), leaving a near-constant amplitude bias of roughly a factor of four
+that is attributable to the un-transposed interior cross-derivative term and is
+removed only by the exact transpose.
+
+%======================================================================
+\section{Manuscript paragraph}
+\label{sec:manuscript}
+
+\noindent\emph{Condensed version for the paper. Numbers correspond to the
+\code{exp3\_adv\_only}, one-month, native-C24 validation; adjust the
+configuration clause to match the manuscript's notation.}
+
+\bigskip
+
+The advection adjoint is evaluated with a reversed-wind approximation: rather
+than forming the exact discrete transpose of the piecewise-parabolic (PPM)
+cubed-sphere transport operator---which, for the flux-limited scheme used here,
+is not tractable---the ordinary forward advection is re-integrated with the mass
+fluxes negated. This approximation is exact for spatially uniform flow and
+degrades with flow shear and curvature. We compare two variants. In the
+uncorrected variant the winds are simply negated and the forward operator is
+applied verbatim; because reversing the flow inverts the upwind direction while
+the operator's cube-seam bookkeeping (the corner halo copy and the one-sided
+face-edge reconstruction stencils) remains coded for the forward direction, the
+recovered sensitivities are \emph{anti-correlated} with a finite-difference
+reference (correlation $-0.89$) and carry the wrong sign at essentially every
+grid cell. In the corrected variant three direction-aware modifications are
+applied at the cube seams: (i) the inter-face corner copy is replaced by its
+adjoint, which accumulates ghost-cell sensitivities back onto the source cells
+rather than scattering them outward; and (ii,iii) at each face edge, wherever the
+reversed flow is outward (diagnosed from the sign of the Courant number), the
+centred ghost-plus-interior PPM edge reconstruction and its limited end-slopes
+are replaced by an interior-only upwind reconstruction, so the stencil no longer
+reaches across the seam in the wrong direction. With these corrections the
+adjoint sensitivities are strongly and correctly correlated with finite
+differences (correlation $+0.99$, correct sign at all validated cells). A
+residual, near-constant amplitude bias of approximately a factor of four remains;
+it originates in the interior cross-derivative step of the two-dimensional PPM
+operator, which the reversed-wind construction does not transpose exactly, and is
+eliminated only by the exact discrete adjoint (available for the limiter-free
+scheme). For the gradient-based optimisation used here the corrected reversed-
+wind adjoint provides correctly signed, spatially faithful sensitivities at
+low cost, with the residual amplitude bias absorbed into the step-length control
+of the minimiser.
+
+\medskip
+
+\noindent\textbf{One-sentence summary.}
+Negating the winds alone yields sign-reversed advection sensitivities
+($r=-0.89$); additionally replacing the cube-corner halo copy with its adjoint
+and switching the face-edge PPM stencils to interior-only upwind wherever the
+reversed flow is outward makes the reversed-wind adjoint correctly signed and
+strongly correlated with finite differences ($r=+0.99$), leaving only a
+$\sim$4$\times$ amplitude bias from the un-transposed interior cross-derivative
+term.
+
+\end{document}

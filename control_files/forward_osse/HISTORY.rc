@@ -110,12 +110,12 @@ COLLECTIONS: 'sat_track',
 #
 #==============================================================================
 # Emissions (see HEMCO_Diagn.rc for additional config settings)
-  Emissions.template:         '%y4%m2%d2_%h2%n2z.nc4',
+  Emissions.template:         '%y4%m2z.nc4',
   Emissions.format:           'CFIO',
   Emissions.timestampStart:   .true.
-  Emissions.monthly:          0
-  Emissions.frequency:        001000
-  Emissions.duration:         240000
+  Emissions.monthly:          1
+  Emissions.frequency:        00000100 000000
+  Emissions.duration:         00000100 000000
   Emissions.mode:             'time-averaged'
   Emissions.fields:            'EmisCO2_Total        ', 'GCHPchem',
                              # 'EmisCH4_Total        ', 'GCHPchem',

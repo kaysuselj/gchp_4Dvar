@@ -135,7 +135,7 @@ else
     _CTRL_ADJ_DEFAULT="${BASE_DIR}/control_files/adjoint_osse"
     STATE_BASENAME="4dvar_state_osse.npz"
     LOG_NAME="4dvar_optimizer_osse"
-    T_END_DEFAULT="2016-02-01"
+    T_END_DEFAULT="2016-04-01"
 fi
 # ============================================================
 #  Observation type  (top-level switch; drives all obs-related defaults)
@@ -155,8 +155,8 @@ fi
 # ============================================================
 OBS_TYPE=${OBS_TYPE:-satellite}
 case "${OBS_TYPE}" in
-    satellite|6hourly) ;;
-    *) die "OBS_TYPE must be 'satellite' or '6hourly' (got '${OBS_TYPE}')" ;;
+    satellite|6hourly|24hourly) ;;
+    *) die "OBS_TYPE must be 'satellite', '6hourly', or '24hourly' (got '${OBS_TYPE}')" ;;
 esac
 
 # Locate the osse_4dvar semi-obs / control tree.
@@ -171,12 +171,25 @@ if [ "${OBS_TYPE}" = "satellite" ]; then
     _OBS_SEMI_OBS="${_OSSE4DVAR_DIR}/obs/semi_obs_xco2_2016Q1.nc"
     _OBS_SIMPL_AK=""
     _OBS_CTRL_FWD="${_OSSE4DVAR_DIR}/control_files/forward"
-else  # 6hourly
+elif [ "${OBS_TYPE}" = "6hourly" ]; then
     _OBS_SAT_TRACK="track_file_c24_6h_3months.nc"
     _OBS_MODE="simplified"
     _OBS_SEMI_OBS="${_OSSE4DVAR_DIR}/obs/semi_obs_xco2_6h_simplified_2016Q1.nc"
     _OBS_SIMPL_AK="${_OBS_SEMI_OBS}"
-    _OBS_CTRL_FWD="${_OSSE4DVAR_DIR}/control_files/forward_6hourlyobs"
+    _OBS_CTRL_FWD="${_OSSE4DVAR_DIR}/control_files/forward"
+else  # 24hourly
+    _OBS_SAT_TRACK="track_file_c24_24h_3months.nc"
+    _OBS_MODE="simplified"
+    _OBS_SEMI_OBS="${_OSSE4DVAR_DIR}/obs/semi_obs_xco2_24h_simplified_2016Q1.nc"
+    _OBS_SIMPL_AK="${_OBS_SEMI_OBS}"
+    _OBS_CTRL_FWD="${_OSSE4DVAR_DIR}/control_files/forward"
+fi
+
+# 6hourly/24hourly track files span Q1 (Jan–Mar); override the 1-month default.
+# Only applies in annual mode — monthly mode requires explicit T_END anyway.
+if [ "${MODE}" = "annual" ] && \
+   { [ "${OBS_TYPE}" = "6hourly" ] || [ "${OBS_TYPE}" = "24hourly" ]; }; then
+    T_END_DEFAULT="2016-04-01"
 fi
 
 # Satellite track file (patched into HISTORY.rc + sat_track.rcx after control-files rsync)
@@ -582,6 +595,82 @@ make_plots() {
         || log "WARNING: plot_4dvar.py failed (plots not generated)"
 }
 
+# Archive monthly-mean EmisCO2_Total from a completed forward run (one .nc4 per iteration).
+# Soft failure: a failed archive never aborts the optimization.
+archive_emissions() {
+    local iter_label out fwd_outdir rc=0
+    iter_label=$(printf '%03d' "${CUR_ITER}")
+    out="${OUTPUT_DIR}/emissions_monthly_iter${iter_label}.nc4"
+    fwd_outdir="${FWD_DIR}/OutputDir"
+    python3 - "${fwd_outdir}" "${out}" <<'PYEOF' || rc=$?
+import sys, glob, xarray as xr
+src_dir, out_path = sys.argv[1], sys.argv[2]
+files = sorted(glob.glob(f"{src_dir}/GEOSChem.Emissions.*.nc4"))
+if not files:
+    raise SystemExit(f"No Emissions files in {src_dir} — skipping")
+ds0 = xr.open_dataset(files[0])
+# Skip topology variables (contacts, anchor, corner_*) that have no time dim
+time_vars = [v for v in ds0.data_vars if 'time' in ds0[v].dims]
+ds = xr.concat([xr.open_dataset(f)[time_vars] for f in files], dim='time')
+monthly = ds.resample(time='MS').mean()
+monthly.to_netcdf(out_path)
+print(f"  {len(monthly.time)} monthly mean(s), {len(files)} daily files -> {out_path}")
+PYEOF
+    [ "${rc}" -eq 0 ] \
+        && log "[iter ${CUR_ITER}] Monthly-mean EmisCO2_Total archived -> ${out}" \
+        || log "WARNING: monthly-mean emissions archive failed rc=${rc} (non-fatal)"
+}
+
+# Plot truth vs optimized EmisCO2_Total maps and global-mean bar chart.
+# Soft failure: a missing truth file or coord issue never aborts the optimization.
+plot_emissions_comparison() {
+    local iter_label opt_file truth_file coord_file rc=0
+    iter_label=$(printf '%03d' "${CUR_ITER}")
+    opt_file="${OUTPUT_DIR}/emissions_monthly_iter${iter_label}.nc4"
+    truth_file="${_OSSE4DVAR_DIR}/obs/truth_emissions_monthly_2016Q1.nc"
+
+    # Find a coord file that carries CS lats/lons: prefer archived adjoint output
+    # from previous iterations (guaranteed to have lats/lons); fall through to
+    # the current forward OutputDir (Emissions files may also carry them).
+    coord_file=$(ls -1S "${OUTPUT_DIR}"/adjoint_iter*/GEOSChem.Adjoint.*.nc4 \
+                        "${ADJ_DIR}/OutputDir"/GEOSChem.Adjoint.*.nc4 \
+                        2>/dev/null | tail -1 || true)
+
+    python3 "${SCRIPT_DIR}/plot_emissions.py" \
+        --truth      "${truth_file}" \
+        --opt        "${opt_file}" \
+        --plot-dir   "${PLOT_DIR}" \
+        --iter-label "${iter_label}" \
+        --cs-res     "${CS_RES}" \
+        ${coord_file:+--coord-file "${coord_file}"} \
+        --search-dir "${FWD_DIR}/OutputDir" \
+        --search-dir "${OUTPUT_DIR}" \
+        || rc=$?
+    [ "${rc}" -eq 0 ] \
+        && log "[iter ${CUR_ITER}] Emissions comparison plots saved -> ${PLOT_DIR}" \
+        || log "WARNING: emissions comparison plots failed rc=${rc} (non-fatal)"
+}
+
+# Plot TER flux comparison: truth / prior / optimized averaged over the window.
+# Soft failure: never aborts the optimization.
+plot_ter_comparison() {
+    local iter_label out rc=0
+    iter_label=$(printf '%03d' "${CUR_ITER}")
+    out="${PLOT_DIR}/ter_comparison_iter${iter_label}.png"
+
+    python3 "${SCRIPT_DIR}/plot_ter_comparison.py" \
+        --truth      "${_OSSE4DVAR_DIR}/obs/truth_emissions_monthly_2016Q1.nc" \
+        --state      "${STATE_FILE}" \
+        --out        "${out}" \
+        --t-start    "${T_START}" \
+        --t-end      "${T_END}" \
+        --iter-label "${iter_label}" \
+        || rc=$?
+    [ "${rc}" -eq 0 ] \
+        && log "[iter ${CUR_ITER}] TER comparison plot saved -> ${out}" \
+        || log "WARNING: TER comparison plot failed rc=${rc} (non-fatal)"
+}
+
 # ============================================================
 #  Outer loop  (phase machine; each phase marks itself done)
 # ============================================================
@@ -654,6 +743,9 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
             || die "Forward GCHP failed (iter ${CUR_ITER}). See ${FWD_DIR}/gchp.log"
         assert_gchp_ok "${FWD_DIR}/gchp.log" "Forward GCHP (iter ${CUR_ITER})"
         log "[iter ${CUR_ITER}] Forward GCHP — done"
+
+        archive_emissions
+        plot_emissions_comparison
 
         # Move gcadj checkpoints forward -> adjoint (mv = rename, no copy).
         # find -exec avoids ARG_MAX on tens of thousands of checkpoint files.
@@ -827,6 +919,9 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
         log "  Restart command saved → ${_restart_cmd}"
 
         make_plots
+        # After the optimizer step so the state file exists (iter 1) and
+        # x_best includes this iteration's evaluation.
+        plot_ter_comparison
 
         if [ "${rc}" -eq 1 ]; then
             log "========================================================"
