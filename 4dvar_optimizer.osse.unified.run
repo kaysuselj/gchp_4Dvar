@@ -411,6 +411,16 @@ rsync -a "${CTRL_FWD_DIR}/" "${FWD_DIR}/"
 rsync -a "${CTRL_ADJ_DIR}/" "${ADJ_DIR}/"
 log "Control files synced to run directories"
 
+# Since the MAPL step_reverse fix (binary gchp.ref_20261014 and later) the adjoint must
+# read met with the FORWARD time offsets; the old one-step-shifted adjoint ExtData.rc
+# would put the adjoint met one step off without any error.
+if [ -f "${SCRIPT_DIR}/set_adjoint_met_offsets.py" ]; then
+    python3 "${SCRIPT_DIR}/set_adjoint_met_offsets.py" "${FWD_DIR}/ExtData.rc" "${ADJ_DIR}/ExtData.rc" --check \
+        || die "adjoint ExtData.rc met offsets differ from the forward ones (fix: set_adjoint_met_offsets.py on ${CTRL_ADJ_DIR}/ExtData.rc)"
+else
+    log "WARNING: ${SCRIPT_DIR}/set_adjoint_met_offsets.py not found, adjoint met offsets not checked"
+fi
+
 # Patch the sat_track track_file into both HISTORY.rc and sat_track.rcx so they
 # always agree, regardless of what the template control files contain.
 for _stcfg in "${FWD_DIR}/HISTORY.rc" "${FWD_DIR}/sat_track.rcx"; do

@@ -153,6 +153,9 @@ EXCLUDE_ADVECTION_TRACERS: NO
 #
 # MODEL_PHASE indicates forward model (FORWARD) or adjoint model (ADJOINT)
 MODEL_PHASE: ADJOINT
+ADV_ADJ_METHOD: reverse_wind_pure
+ADV_ADJ_WEIGHT: dpadv
+ADV_ADJ_MASSFLUX: forward
 ADJOINT_FROM_FILE: 1 
 OCO2_FORCING_DIR: /home5/ksuselj1/nobackup/gchp_14.5.3_adjoint_surfaceF/4dvar_design_osse_monthly/forcing_files_osse/
 
