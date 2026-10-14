@@ -434,7 +434,9 @@ fi
 if grep -q '^[^#]*prior_err_co2\.nc4' "${FWD_DIR}/HEMCO_Config.rc"; then
     [ -f "${WORK_DIR}/prior_err_co2.nc4" ] || die "HEMCO uses the prior error E but ${WORK_DIR}/prior_err_co2.nc4 is missing (make_prior_err.py)"
     log "prior error E: ${WORK_DIR}/prior_err_co2.nc4"
+    PRIOR_ERR_ARG="--prior-err-file ${WORK_DIR}/prior_err_co2.nc4"
 fi
+PRIOR_ERR_ARG="${PRIOR_ERR_ARG:-}"
 
 # Patch the sat_track track_file into both HISTORY.rc and sat_track.rcx so they
 # always agree, regardless of what the template control files contain.
@@ -690,6 +692,7 @@ plot_ter_comparison() {
         --t-start    "${T_START}" \
         --t-end      "${T_END}" \
         --iter-label "${iter_label}" \
+        ${PRIOR_ERR_ARG} \
         || rc=$?
     [ "${rc}" -eq 0 ] \
         && log "[iter ${CUR_ITER}] TER comparison plot saved -> ${out}" \

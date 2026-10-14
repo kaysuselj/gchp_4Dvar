@@ -47,6 +47,22 @@ MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
 
+def cell_areas(coord_file, im):
+    """Cell areas (unit sphere) of a C{im} grid from its corner lat/lon."""
+    d = nc.Dataset(coord_file)
+    clat = np.radians(np.array(d['corner_lats'][:], dtype=np.float64)).reshape(NF, im + 1, im + 1)
+    clon = np.radians(np.array(d['corner_lons'][:], dtype=np.float64)).reshape(NF, im + 1, im + 1)
+    d.close()
+    v = np.stack([np.cos(clat) * np.cos(clon), np.cos(clat) * np.sin(clon), np.sin(clat)], -1)
+
+    def tri(a, b, c):   # spherical triangle area (Van Oosterom & Strackee)
+        num = np.abs(np.einsum('...i,...i', a, np.cross(b, c)))
+        den = 1 + np.einsum('...i,...i', a, b) + np.einsum('...i,...i', b, c) + np.einsum('...i,...i', c, a)
+        return 2 * np.arctan2(num, den)
+    p00, p10, p11, p01 = v[:, :-1, :-1], v[:, 1:, :-1], v[:, 1:, 1:], v[:, :-1, 1:]
+    return tri(p00, p10, p11) + tri(p00, p11, p01)
+
+
 def _window_month_indices(truth_file, t_start, t_end):
     """Return indices of months in truth_file that fall within [t_start, t_end)."""
     ds = nc.Dataset(truth_file)
@@ -111,7 +127,14 @@ def main():
                     help='Assimilation window end date    YYYY-MM-DD (exclusive)')
     ap.add_argument('--iter-label',  default=None,
                     help='Zero-padded iteration number for display (e.g. 001)')
-    ap.add_argument('--prior-scale', type=float, default=1.3)
+    ap.add_argument('--prior-scale', type=float, default=1.3,
+                    help='constant prior error E (used if no --prior-err-file)')
+    ap.add_argument('--prior-err-file', default=None,
+                    help='prior error field E (make_prior_err.py, CS stacked): '
+                         'prior TER = truth TER * E, target sigma = 1/E')
+    ap.add_argument('--coord-file', default=('/nobackupp27/ksuselj1/gchp_14.5.3_adjoint_surfaceF/'
+                    'tests_final/P2_advection/P2a_edge_corner_8ms/results/coord.nc4'),
+                    help='C-grid file with corner_lats/corner_lons (cell areas for the metric)')
     ap.add_argument('--res',         type=float, default=1.0,
                     help='Output grid resolution in degrees')
     args = ap.parse_args()
@@ -146,9 +169,29 @@ def main():
     it_best  = int(st['it_best'])
     iter_tag = args.iter_label if args.iter_label else str(it_best)
 
+    # ---- prior error E (constant or field) ----
+    if args.prior_err_file:
+        de = nc.Dataset(args.prior_err_file)
+        e_cs = np.array(de['Prior_Err'][0]).reshape(NF, cs_res, cs_res)
+        e_label = getattr(de, 'recipe', os.path.basename(args.prior_err_file))
+        de.close()
+    else:
+        e_cs = np.full((NF, cs_res, cs_res), args.prior_scale)
+        e_label = f'constant {args.prior_scale:g}'
+
     # ---- derive flux fields ----
-    ter_prior_cs = ter_truth_cs * args.prior_scale
-    ter_opt_cs   = ter_truth_cs * args.prior_scale * sigma_cs
+    ter_prior_cs = ter_truth_cs * e_cs
+    ter_opt_cs   = ter_truth_cs * e_cs * sigma_cs
+
+    # ---- metric: TER x area weighted error of the flux ratio to truth (sigma*E - 1) ----
+    w = np.abs(ter_truth_cs) * cell_areas(args.coord_file, cs_res)
+    w = w / w.sum()
+    def _werr(r):
+        return float((w * (r - 1.0)).sum()), float(np.sqrt((w * (r - 1.0) ** 2).sum()))
+    prior_bias, prior_rms = _werr(e_cs)
+    opt_bias, opt_rms = _werr(e_cs * sigma_cs)
+    print(f'TER x area weighted flux ratio error: prior bias {prior_bias:+.4f} rms {prior_rms:.4f}  |  '
+          f'optimized (iter {it_best}) bias {opt_bias:+.4f} rms {opt_rms:.4f}')
 
     # ---- interpolate to regular grid ----
     lat, lon, truth_ll = cs_to_latlon(ter_truth_cs, lats_cs, lons_cs, args.res)
@@ -162,7 +205,6 @@ def main():
     abs_max = np.ceil(np.nanmax([truth_ll, prior_ll, opt_ll]) * 10) / 10
     dif_max = np.ceil(np.nanmax(np.abs([diff_prior_ll, diff_opt_ll])) * 10) / 10
 
-    target_sigma = 1.0 / args.prior_scale
 
     # ---- layout: 2 rows × 3 data cols + 1 narrow cbar col ----
     fig = plt.figure(figsize=(18, 9))
@@ -185,7 +227,7 @@ def main():
                       0, abs_max, 'YlOrRd', f'Truth TER — {month_str}')
     _draw_panel(ax_prior, lat, lon, prior_ll,
                 0, abs_max, 'YlOrRd',
-                f'Prior TER (×{args.prior_scale:.1f}) — {month_str}')
+                f'Prior TER (truth × E) — {month_str}')
     _draw_panel(ax_opt, lat, lon, opt_ll,
                 0, abs_max, 'YlOrRd',
                 f'Optimized TER (iter {iter_tag}) — {month_str}')
@@ -203,7 +245,10 @@ def main():
         f'{"Prior":10s}{np.nanmin(prior_ll):>8.3f}  {np.nanmean(prior_ll):>8.3f}  {np.nanmax(prior_ll):>8.3f}\n'
         f'{"Optimized":10s}{np.nanmin(opt_ll):>8.3f}  {np.nanmean(opt_ll):>8.3f}  {np.nanmax(opt_ll):>8.3f}\n'
         f'\n'
-        f'Units: gC m⁻² day⁻¹'
+        f'Units: gC m⁻² day⁻¹\n\n'
+        f'TER×area weighted (σE − 1):\n'
+        f'{"Prior":10s} bias {prior_bias:+.3f}  rms {prior_rms:.3f}\n'
+        f'{"Optimized":10s} bias {opt_bias:+.3f}  rms {opt_rms:.3f}'
     )
     ax_box.text(0.5, 0.5, stats_text,
                 transform=ax_box.transAxes,
@@ -224,7 +269,7 @@ def main():
     cb2.ax.tick_params(labelsize=8)
 
     fig.suptitle(
-        f'TER Flux Comparison — prior scale ×{args.prior_scale:.1f}'
+        f'TER Flux Comparison — prior error E: {e_label}'
         f'  |  {month_str}',
         fontsize=13, fontweight='bold', y=0.96)
 
