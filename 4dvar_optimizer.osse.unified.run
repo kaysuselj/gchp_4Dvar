@@ -84,6 +84,20 @@ assert_gchp_ok() {
     local logf="$1" label="$2"
     [ -f "${logf}" ] || die "${label}: ${logf} not found (GCHP produced no log)"
     local hit
+    if [ "${GCHP_VERSION}" = "14.8" ]; then
+        # GCHP 14.8.0 (MAPL 2.69): (a) every run ends with a "double free" abort in finalize
+        # AFTER the final checkpoint is written -> only the log up to that write is checked, and
+        # the write must be there; (b) the first adjoint step reports one "Missing adjoint
+        # checkpoint file ...<window end>" + FAIL (status=-1) per rank (also in 14.5.3, benign).
+        local nw
+        nw=$(grep -a -n -m1 "write file: Restarts/gcchem_internal_checkpoint" "${logf}" | cut -d: -f1)
+        [ -n "${nw}" ] || die "${label}: no final checkpoint written (see ${logf})"
+        hit=$(head -n "${nw}" "${logf}" | grep -a -E \
+            'MPT ERROR|FAIL at line=|terminated without calling MPI_Finalize|MPI_ABORT was invoked|aborting with error code|Abnormal termination|forrtl: severe|SIGSEGV|SIGBUS' \
+            | grep -v -E 'Chem_GridCompMod.F90 +<status=-1>' | head -1 || true)
+        [ -n "${hit}" ] && die "${label}: GCHP aborted — matched '${hit}' in ${logf}"
+        return 0
+    fi
     hit=$(grep -m1 -E \
         'MPT ERROR|FAIL at line=|terminated without calling MPI_Finalize|MPI_ABORT was invoked|aborting with error code|Abnormal termination|forrtl: severe|SIGSEGV|SIGBUS' \
         "${logf}" || true)
@@ -91,10 +105,39 @@ assert_gchp_ok() {
     return 0
 }
 
+# run_gchp_148: GCHP 14.8.0 run in the current run dir. Every 14.8.0 run aborts in finalize
+# ("double free") after the final checkpoint is written; on several nodes MPT can then hang
+# instead of exiting. Watchdog: once Restarts/gcchem_internal_checkpoint has been written and
+# gchp.log has not changed for GCHP_HANG_S seconds (default 300), mpiexec is killed. Whether the
+# run itself was fine is decided afterwards by assert_gchp_ok (log up to the final write).
+run_gchp_148() {
+    local pid idle now last
+    mpiexec -n "${NCORES}" ./gchp >> gchp.log 2>&1 &
+    pid=$!
+    while kill -0 "${pid}" 2>/dev/null; do
+        sleep 30
+        if grep -a -q "write file: Restarts/gcchem_internal_checkpoint" gchp.log 2>/dev/null; then
+            now=$(date +%s); last=$(stat -c %Y gchp.log)
+            idle=$(( now - last ))
+            if [ "${idle}" -ge "${GCHP_HANG_S:-300}" ]; then
+                log "  GCHP wrote its final checkpoint but has been idle ${idle} s (finalize hang): stopping mpiexec"
+                kill "${pid}" 2>/dev/null; sleep 20; kill -9 "${pid}" 2>/dev/null || true
+                break
+            fi
+        fi
+    done
+    wait "${pid}" 2>/dev/null || true
+    return 0
+}
+
 # ============================================================
 #  Mode
 # ============================================================
 MODE=${MODE:-annual}
+# GCHP_VERSION: 14.5.3 (default; runConfig_*.sh run dirs, MAPL track_file sampler) or 14.8
+# (setCommonRunSettings run dirs with runConfig_*.sh shims, offline satellite sampler in
+# post_forward.sh, finalize-abort tolerance in assert_gchp_ok).
+GCHP_VERSION=${GCHP_VERSION:-14.5.3}
 case "${MODE}" in
     annual|monthly) ;;
     *) die "MODE must be 'annual' or 'monthly' (got '${MODE}')" ;;
@@ -272,6 +315,10 @@ SIGMA_MAX=${SIGMA_MAX:-3.0}              # upper bound for sigma (sanity cap)
 MAX_ITER=${MAX_ITER:-20}                 # GLOBAL iteration cap across all chained jobs
 GTOL=${GTOL:-1e-5}
 FTOL=${FTOL:-1e-8}
+# PLOT_EVERY: per-iteration plots (pipeline, emissions, TER) only every N iterations, plus
+# iteration 1, convergence and the end (default 1 = every iteration). Data archives are unaffected.
+PLOT_EVERY=${PLOT_EVERY:-1}
+plot_now() { [ "${CUR_ITER}" -eq 1 ] || [ $(( CUR_ITER % PLOT_EVERY )) -eq 0 ]; }
 SAVE_DIAG=${SAVE_DIAG:-true}
 RESTART=${RESTART:-false}
 
@@ -333,7 +380,7 @@ VPASS="${VPASS},SAVE_DIAG=${SAVE_DIAG},NLAT=${NLAT},NLON=${NLON},CHAIN=${CHAIN}"
 VPASS="${VPASS},MAX_CHAIN=${MAX_CHAIN},WALLTIME_S=${WALLTIME_S},WALLTIME_MARGIN_S=${WALLTIME_MARGIN_S}"
 VPASS="${VPASS},EST_MONTH_FWD_S=${EST_MONTH_FWD_S},EST_MONTH_ADJ_S=${EST_MONTH_ADJ_S}"
 VPASS="${VPASS},GRID=${GRID},EXP_NAME=${EXP_NAME},NODES=${NODES}"
-VPASS="${VPASS},SAT_TRACK_FILE=${SAT_TRACK_FILE}"
+VPASS="${VPASS},SAT_TRACK_FILE=${SAT_TRACK_FILE},GCHP_VERSION=${GCHP_VERSION},PLOT_EVERY=${PLOT_EVERY}"
 VPASS="${VPASS},OBS_TYPE=${OBS_TYPE},OBS_MODE=${OBS_MODE}"
 [ -n "${SEMI_OBS_FILE}" ]       && VPASS="${VPASS},SEMI_OBS_FILE=${SEMI_OBS_FILE}"
 [ -n "${SIMPLIFIED_AK_FILE}" ]  && VPASS="${VPASS},SIMPLIFIED_AK_FILE=${SIMPLIFIED_AK_FILE}"
@@ -767,13 +814,20 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
 
         ./runConfig_forward.sh > gchp.log 2>&1 \
             || die "runConfig_forward.sh failed (iter ${CUR_ITER})"
-        mpiexec -n "${NCORES}" ./gchp >> gchp.log 2>&1 \
-            || die "Forward GCHP failed (iter ${CUR_ITER}). See ${FWD_DIR}/gchp.log"
+        if [ "${GCHP_VERSION}" = "14.8" ]; then
+            run_gchp_148                                            # finalize abort/hang handled; checked below
+        else
+            mpiexec -n "${NCORES}" ./gchp >> gchp.log 2>&1 \
+                || die "Forward GCHP failed (iter ${CUR_ITER}). See ${FWD_DIR}/gchp.log"
+        fi
         assert_gchp_ok "${FWD_DIR}/gchp.log" "Forward GCHP (iter ${CUR_ITER})"
+        if [ -x ./post_forward.sh ]; then       # 14.8: offline satellite sampling -> sat_track files
+            ./post_forward.sh >> gchp.log 2>&1 || die "post_forward.sh failed (iter ${CUR_ITER})"
+        fi
         log "[iter ${CUR_ITER}] Forward GCHP — done"
 
         archive_emissions
-        plot_emissions_comparison
+        if plot_now; then plot_emissions_comparison; fi
 
         # Move gcadj checkpoints forward -> adjoint (mv = rename, no copy).
         # find -exec avoids ARG_MAX on tens of thousands of checkpoint files.
@@ -863,8 +917,12 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
 
         ./runConfig_adjoint.sh > gchp.log 2>&1 \
             || die "runConfig_adjoint.sh failed (iter ${CUR_ITER})"
-        mpiexec -n "${NCORES}" ./gchp >> gchp.log 2>&1 \
-            || die "Adjoint GCHP failed (iter ${CUR_ITER}). See ${ADJ_DIR}/gchp.log"
+        if [ "${GCHP_VERSION}" = "14.8" ]; then
+            run_gchp_148                                            # finalize abort/hang handled; checked below
+        else
+            mpiexec -n "${NCORES}" ./gchp >> gchp.log 2>&1 \
+                || die "Adjoint GCHP failed (iter ${CUR_ITER}). See ${ADJ_DIR}/gchp.log"
+        fi
         assert_gchp_ok "${ADJ_DIR}/gchp.log" "Adjoint GCHP (iter ${CUR_ITER})"
         log "[iter ${CUR_ITER}] Adjoint GCHP — done"
 
@@ -955,10 +1013,12 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
         cp "${_restart_cmd}" "${OUTPUT_DIR}/restart_latest.sh"
         log "  Restart command saved → ${_restart_cmd}"
 
-        make_plots
-        # After the optimizer step so the state file exists (iter 1) and
-        # x_best includes this iteration's evaluation.
-        plot_ter_comparison
+        if plot_now || [ "${rc}" -eq 1 ]; then
+            make_plots
+            # After the optimizer step so the state file exists (iter 1) and
+            # x_best includes this iteration's evaluation.
+            plot_ter_comparison
+        fi
 
         if [ "${rc}" -eq 1 ]; then
             log "========================================================"
@@ -988,3 +1048,4 @@ log " Per-iteration snapshots: ${OUTPUT_DIR}/"
 log " Log:                     ${LOG_FILE}"
 log "========================================================"
 make_plots
+plot_ter_comparison
