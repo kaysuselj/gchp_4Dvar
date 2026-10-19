@@ -172,8 +172,46 @@ def load_cs_coords(im, coord_file=None, search_dirs=()):
         'Pass --coord-file <a GEOSChem.*.nc4 on the C-grid>.')
 
 
+try:                                                    # global maps: Robinson projection (user, 2026-10-19)
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+    _PROJ, _PC = ccrs.Robinson(), ccrs.PlateCarree()
+except Exception:                                       # no cartopy: plain lat-lon axes as before
+    _PROJ = _PC = None
+
+
+def _map_kw():
+    """subplot_kw for a global map axis."""
+    return {'projection': _PROJ} if _PROJ is not None else {}
+
+
+def _tr():
+    """transform kwarg for data given in lon/lat."""
+    return {'transform': _PC} if _PC is not None else {}
+
+
+def _is_geo(ax):
+    return hasattr(ax, 'projection')
+
+
+def _set_extent(ax):
+    if _is_geo(ax):
+        ax.set_global()
+    else:
+        ax.set_xlim(-180, 180); ax.set_ylim(-90, 90)
+
+
+def _map_grid(ax):
+    if not _is_geo(ax):
+        ax.grid(True, alpha=0.3, linewidth=0.5)
+
+
 def _add_land(ax):
-    """Add land fill and coastlines using cached Natural Earth shapefiles."""
+    """Add land fill and coastlines (cartopy features on map axes, cached Natural Earth shapefiles otherwise)."""
+    if _is_geo(ax):
+        ax.add_feature(cfeature.LAND, facecolor='0.88', edgecolor='none', zorder=0)
+        ax.coastlines(resolution='110m', linewidth=0.5, color='0.3', zorder=3)
+        return
     import copy
     _load_land()
     if _LAND_PATCHES:
@@ -187,6 +225,13 @@ def _add_land(ax):
 
 
 def _set_ticks(ax):
+    if _is_geo(ax):
+        ax.set_global()
+        gl = ax.gridlines(draw_labels=True, linewidth=0.5, color='0.5', alpha=0.3,
+                          xlocs=range(-180, 181, 60), ylocs=range(-90, 91, 30))
+        gl.top_labels = gl.right_labels = False
+        gl.xlabel_style = gl.ylabel_style = {'size': 8}
+        return
     ax.set_xticks(range(-180, 181, 60))
     ax.set_yticks(range(-90,   91, 30))
     ax.set_xticklabels([f'{x}°{"W" if x < 0 else ("E" if x > 0 else "")}' for x in range(-180, 181, 60)], fontsize=8)
@@ -202,14 +247,13 @@ def plot_map(data, lats, lons, title, path,
 
     lon2d, lat2d = np.meshgrid(lons, lats)
 
-    _, ax = plt.subplots(figsize=(12, 5))
+    _, ax = plt.subplots(figsize=(12, 5), subplot_kw=_map_kw())
     _add_land(ax)
     im = ax.pcolormesh(lon2d, lat2d, data,
-                       cmap=cmap, vmin=vmin, vmax=vmax, shading='auto', zorder=1)
-    ax.set_xlim(-180, 180)
-    ax.set_ylim(-90, 90)
+                       cmap=cmap, vmin=vmin, vmax=vmax, shading='auto', zorder=1, **_tr())
+    _set_extent(ax)
     _set_ticks(ax)
-    ax.grid(True, alpha=0.3, linewidth=0.5)
+    _map_grid(ax)
     plt.colorbar(im, ax=ax, label=cbar_label, fraction=0.046, pad=0.04)
     ax.set_title(title, fontsize=12)
 
@@ -237,7 +281,7 @@ def plot_map_cs(data, lats, lons, title, path,
         amax = max(np.abs(data).max(), 1e-12)
         vmin, vmax = -amax, amax
 
-    _, ax = plt.subplots(figsize=(12, 5))
+    _, ax = plt.subplots(figsize=(12, 5), subplot_kw=_map_kw())
     _add_land(ax)
     # Fill a fine lat-lon raster with the value of the nearest cube-sphere cell centre (great-circle nearest
     # neighbour): gap-free at any resolution (fixed-size markers left gaps at C48 near the poles) and each native
@@ -252,12 +296,11 @@ def plot_map_cs(data, lats, lons, title, path,
     glon, glat = np.meshgrid(rlon, rlat)
     _, idx = cKDTree(_xyz(lats.ravel(), lons.ravel())).query(_xyz(glat.ravel(), glon.ravel()))
     raster = data.ravel()[idx].reshape(glat.shape)
-    im = ax.imshow(raster, origin='lower', extent=(-180, 180, -90, 90), cmap=cmap, vmin=vmin, vmax=vmax,
-                   interpolation='nearest', aspect='auto', zorder=1)
-    ax.set_xlim(-180, 180)
-    ax.set_ylim(-90, 90)
+    im = ax.pcolormesh(np.arange(-180, 180 + step / 2, step), np.arange(-90, 90 + step / 2, step), raster,
+                       cmap=cmap, vmin=vmin, vmax=vmax, shading='flat', zorder=1, **_tr())
+    _set_extent(ax)
     _set_ticks(ax)
-    ax.grid(True, alpha=0.3, linewidth=0.5)
+    _map_grid(ax)
     plt.colorbar(im, ax=ax, label=cbar_label, fraction=0.046, pad=0.04)
     ax.set_title(title, fontsize=12)
 
@@ -295,7 +338,7 @@ def plot_map_months(data3d, lats, lons, title, path,
     ncols = 4
     nrows = int(np.ceil(nmon / ncols))
     fig, axes = plt.subplots(nrows, ncols,
-                             figsize=(4.2 * ncols, 2.2 * nrows + 0.8))
+                             figsize=(4.2 * ncols, 2.2 * nrows + 0.8), subplot_kw=_map_kw())
     axes = np.atleast_1d(axes).ravel()
 
     im = None
@@ -304,8 +347,8 @@ def plot_map_months(data3d, lats, lons, title, path,
         data = data3d[m]
         _add_land(ax)
         im = ax.pcolormesh(lon2d, lat2d, data, cmap=cmap,
-                           vmin=vmin, vmax=vmax, shading='auto', zorder=1)
-        ax.set_xlim(-180, 180); ax.set_ylim(-90, 90)
+                           vmin=vmin, vmax=vmax, shading='auto', zorder=1, **_tr())
+        _set_extent(ax)
         name = MONTH_NAMES[(start_month - 1 + m) % 12]
         ax.set_title(f'{name}   min={data.min():.2f} max={data.max():.2f}',
                      fontsize=8)
@@ -439,12 +482,12 @@ def plot_obs_locations(lat, lon, n_iter, plot_dir):
     path  = os.path.join(plot_dir, 'obs_locations.png')
     c     = np.arange(len(lat))
 
-    fig, ax = plt.subplots(figsize=(12, 5))
+    fig, ax = plt.subplots(figsize=(12, 5), subplot_kw=_map_kw())
     _add_land(ax)
-    sc = ax.scatter(lon, lat, c=c, s=3, cmap='rainbow', alpha=0.7, zorder=3)
-    ax.set_xlim(-180, 180); ax.set_ylim(-90, 90)
+    sc = ax.scatter(lon, lat, c=c, s=3, cmap='rainbow', alpha=0.7, zorder=3, **_tr())
+    _set_extent(ax)
     _set_ticks(ax)
-    ax.grid(True, alpha=0.3, linewidth=0.5)
+    _map_grid(ax)
 
     plt.colorbar(sc, ax=ax, label='Observation index (proxy for time in window)',
                  fraction=0.046, pad=0.04)
@@ -561,7 +604,7 @@ def plot_forcing_latlon(data_first, data_last, iter_first, iter_last,
 
     lon2d, lat2d = np.meshgrid(lons, lats)
 
-    fig, axes = plt.subplots(1, 3, figsize=(19, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(19, 5), subplot_kw=_map_kw())
     fig.suptitle(
         'Column-integrated adjoint forcing  Σ(∂J/∂CO₂ · Δm_dry)  [m²/kg CO₂]',
         fontsize=11)
@@ -572,11 +615,10 @@ def plot_forcing_latlon(data_first, data_last, iter_first, iter_last,
             return
         _add_land(ax)
         im = ax.pcolormesh(lon2d, lat2d, grid, cmap=cmap,
-                           vmin=vmin, vmax=vmax, shading='auto', zorder=1)
-        ax.set_xlim(-180, 180)
-        ax.set_ylim(-90, 90)
+                           vmin=vmin, vmax=vmax, shading='auto', zorder=1, **_tr())
+        _set_extent(ax)
         _set_ticks(ax)
-        ax.grid(True, alpha=0.3, linewidth=0.5)
+        _map_grid(ax)
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         lbl = f'{title}  (N={n_obs:,})' if n_obs else title
         ax.set_title(lbl, fontsize=10)
@@ -744,7 +786,7 @@ def plot_omf(d_first, d_last, iter_first, iter_last, lats, lons, plot_dir):
     amax  = max(amax, 1e-30)
 
     lon2d, lat2d = np.meshgrid(lons, lats)
-    fig, axes = plt.subplots(1, 2, figsize=(15, 4.5))
+    fig, axes = plt.subplots(1, 2, figsize=(15, 4.5), subplot_kw=_map_kw())
     fig.suptitle('Time-averaged innovation  y − H(x)  [ppm]', fontsize=12)
 
     for ax, grid, n_obs, itr in [(axes[0], grid1, n1, iter_first),
@@ -754,11 +796,10 @@ def plot_omf(d_first, d_last, iter_first, iter_last, lats, lons, plot_dir):
             continue
         _add_land(ax)
         im = ax.pcolormesh(lon2d, lat2d, grid, cmap='RdBu_r',
-                           vmin=-amax, vmax=amax, shading='auto', zorder=1)
-        ax.set_xlim(-180, 180)
-        ax.set_ylim(-90, 90)
+                           vmin=-amax, vmax=amax, shading='auto', zorder=1, **_tr())
+        _set_extent(ax)
         _set_ticks(ax)
-        ax.grid(True, alpha=0.3, linewidth=0.5)
+        _map_grid(ax)
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label='ppm')
         ax.set_title(f'Iteration {itr}  (N={n_obs:,})', fontsize=10)
 
@@ -769,7 +810,7 @@ def plot_omf(d_first, d_last, iter_first, iter_last, lats, lons, plot_dir):
     print(f'  Saved: {path}')
 
     # ---- 2. Daily-mean time series ------------------------------------
-    fig, ax = plt.subplots(figsize=(12, 5))
+    fig, ax = plt.subplots(figsize=(12, 5), subplot_kw=_map_kw())
     for d, itr, color in styles:
         if d is None:
             continue
@@ -1205,25 +1246,30 @@ def main():
             if not _cs:
                 lon2d, lat2d = np.meshgrid(lons, lats)
 
-            def _anim_artist(ax, proj=None):
-                # scatter of native-CS cell centres for cs; lat-lon mesh otherwise
-                kw = {'transform': proj} if proj is not None else {}
+            if _cs:
+                # nearest-cell raster (as plot_map_cs); one index map for all frames
+                from scipy.spatial import cKDTree
+                def _xyz(la, lo):
+                    la, lo = np.radians(la), np.radians(lo)
+                    return np.stack([np.cos(la) * np.cos(lo), np.cos(la) * np.sin(lo), np.sin(la)], -1)
+                _step = min(0.5, 90.0 / cs_im / 4)
+                _rlat = np.arange(-90 + _step / 2, 90, _step); _rlon = np.arange(-180 + _step / 2, 180, _step)
+                _glon, _glat = np.meshgrid(_rlon, _rlat)
+                _, _idx = cKDTree(_xyz(map_lats.ravel(), map_lons.ravel())).query(_xyz(_glat.ravel(), _glon.ravel()))
+                frames = [f.ravel()[_idx].reshape(_glat.shape) for f in frames]
+
+            def _anim_artist(ax):
                 if _cs:
-                    return ax.scatter(map_lons.ravel(), map_lats.ravel(),
-                                      c=frames[0].ravel(), s=16, marker='s',
-                                      cmap='RdBu_r', vmin=0.0, vmax=2.0,
-                                      zorder=1, **kw)
+                    return ax.pcolormesh(np.arange(-180, 180 + _step / 2, _step), np.arange(-90, 90 + _step / 2, _step),
+                                         frames[0], cmap='RdBu_r', vmin=0.0, vmax=2.0, shading='flat', zorder=1, **_tr())
                 return ax.pcolormesh(lon2d, lat2d, frames[0],
                                      cmap='RdBu_r', vmin=0.0, vmax=2.0,
-                                     shading='auto', zorder=1, **kw)
+                                     shading='auto', zorder=1, **_tr())
 
-            fig, ax = plt.subplots(figsize=(12, 5))
+            fig, ax = plt.subplots(figsize=(12, 5), subplot_kw=_map_kw())
             _add_land(ax)
             im = _anim_artist(ax)
-            ax.set_xlim(-180, 180)
-            ax.set_ylim(-90, 90)
             _set_ticks(ax)
-            ax.grid(True, alpha=0.3, linewidth=0.5)
 
             plt.colorbar(im, ax=ax, label='σ  [ ]',
                          fraction=0.046, pad=0.04)

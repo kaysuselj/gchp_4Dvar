@@ -99,16 +99,24 @@ def _draw_panel(ax, lat, lon, field, vmin, vmax, cmap, title):
     lon2d, lat2d = np.meshgrid(lon, lat)
     pm = ax.pcolormesh(lon2d, lat2d, field,
                        cmap=cmap, vmin=vmin, vmax=vmax,
-                       shading='auto', rasterized=True)
-    _p4d._load_coast()
-    for pts in _p4d._COAST_LINES:
-        ax.plot(pts[:, 0], pts[:, 1], color='0.25', linewidth=0.4, zorder=2)
-    ax.set_xlim(-180, 180)
-    ax.set_ylim(-90, 90)
-    ax.set_xticks(range(-180, 181, 60))
-    ax.set_yticks(range(-90,   91, 30))
-    ax.tick_params(labelsize=7)
-    ax.grid(True, alpha=0.25, linewidth=0.4)
+                       shading='auto', rasterized=True, **_p4d._tr())
+    if _p4d._is_geo(ax):                                   # Robinson (plot_4dvar._PROJ)
+        ax.coastlines(resolution='110m', linewidth=0.4, color='0.25', zorder=2)
+        ax.set_global()
+        gl = ax.gridlines(draw_labels=True, linewidth=0.4, color='0.5', alpha=0.3,
+                          xlocs=range(-180, 181, 60), ylocs=range(-90, 91, 30))
+        gl.top_labels = gl.right_labels = False
+        gl.xlabel_style = gl.ylabel_style = {'size': 7}
+    else:
+        _p4d._load_coast()
+        for pts in _p4d._COAST_LINES:
+            ax.plot(pts[:, 0], pts[:, 1], color='0.25', linewidth=0.4, zorder=2)
+        ax.set_xlim(-180, 180)
+        ax.set_ylim(-90, 90)
+        ax.set_xticks(range(-180, 181, 60))
+        ax.set_yticks(range(-90,   91, 30))
+        ax.tick_params(labelsize=7)
+        ax.grid(True, alpha=0.25, linewidth=0.4)
     ax.set_title(title, fontsize=10, pad=4)
     return pm
 
@@ -174,6 +182,15 @@ def main():
         de = nc.Dataset(args.prior_err_file)
         e_cs = np.array(de['Prior_Err'][0]).reshape(NF, cs_res, cs_res)
         e_label = getattr(de, 'recipe', os.path.basename(args.prior_err_file))
+        # keep only the field definition (drop --out / --coord-file / --cs-res paths of the recipe)
+        _toks, _keep, _skip = e_label.split(), [], False
+        for _t in _toks:
+            if _skip:
+                _skip = False; continue
+            if _t in ('--out', '--coord-file', '--cs-res'):
+                _skip = True; continue
+            _keep.append(_t)
+        e_label = ' '.join(_keep).replace('--type ', '').replace('--', '') or e_label
         de.close()
     else:
         e_cs = np.full((NF, cs_res, cs_res), args.prior_scale)
@@ -213,13 +230,13 @@ def main():
                           hspace=0.32, wspace=0.08,
                           left=0.04, right=0.96, top=0.90, bottom=0.05)
 
-    ax_truth      = fig.add_subplot(gs[0, 0])
-    ax_prior      = fig.add_subplot(gs[0, 1])
-    ax_opt        = fig.add_subplot(gs[0, 2])
+    ax_truth      = fig.add_subplot(gs[0, 0], **_p4d._map_kw())
+    ax_prior      = fig.add_subplot(gs[0, 1], **_p4d._map_kw())
+    ax_opt        = fig.add_subplot(gs[0, 2], **_p4d._map_kw())
     cax1          = fig.add_subplot(gs[0, 3])
     ax_box        = fig.add_subplot(gs[1, 0])
-    ax_diff_prior = fig.add_subplot(gs[1, 1])
-    ax_diff_opt   = fig.add_subplot(gs[1, 2])
+    ax_diff_prior = fig.add_subplot(gs[1, 1], **_p4d._map_kw())
+    ax_diff_opt   = fig.add_subplot(gs[1, 2], **_p4d._map_kw())
     cax2          = fig.add_subplot(gs[1, 3])
 
     # ---- row 1: absolute fluxes ----
