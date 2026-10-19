@@ -239,9 +239,21 @@ def plot_map_cs(data, lats, lons, title, path,
 
     _, ax = plt.subplots(figsize=(12, 5))
     _add_land(ax)
-    im = ax.scatter(lons.ravel(), lats.ravel(), c=data.ravel(),
-                    s=16, marker='s', cmap=cmap, vmin=vmin, vmax=vmax,
-                    zorder=1)
+    # Fill a fine lat-lon raster with the value of the nearest cube-sphere cell centre (great-circle nearest
+    # neighbour): gap-free at any resolution (fixed-size markers left gaps at C48 near the poles) and each native
+    # cell still shows as one patch.
+    from scipy.spatial import cKDTree
+    def _xyz(la, lo):
+        la, lo = np.radians(la), np.radians(lo)
+        return np.stack([np.cos(la) * np.cos(lo), np.cos(la) * np.sin(lo), np.sin(la)], -1)
+    im_res = lats.shape[-1]
+    step = min(0.5, 90.0 / im_res / 4)                       # >= 4 raster points per cell width
+    rlat = np.arange(-90 + step / 2, 90, step); rlon = np.arange(-180 + step / 2, 180, step)
+    glon, glat = np.meshgrid(rlon, rlat)
+    _, idx = cKDTree(_xyz(lats.ravel(), lons.ravel())).query(_xyz(glat.ravel(), glon.ravel()))
+    raster = data.ravel()[idx].reshape(glat.shape)
+    im = ax.imshow(raster, origin='lower', extent=(-180, 180, -90, 90), cmap=cmap, vmin=vmin, vmax=vmax,
+                   interpolation='nearest', aspect='auto', zorder=1)
     ax.set_xlim(-180, 180)
     ax.set_ylim(-90, 90)
     _set_ticks(ax)
