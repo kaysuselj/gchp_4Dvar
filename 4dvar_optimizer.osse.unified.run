@@ -731,6 +731,9 @@ plot_ter_comparison() {
     local iter_label out rc=0
     iter_label=$(printf '%03d' "${CUR_ITER}")
     out="${PLOT_DIR}/ter_comparison_iter${iter_label}.png"
+    # grid coordinates of the model resolution (the script's default is a C24 file)
+    local TER_COORD_FILE="${_OSSE4DVAR_DIR}/../inputs/osse_base/coords/coord_c${CS_RES}.nc4"
+    [ -f "${TER_COORD_FILE}" ] || TER_COORD_FILE=""
 
     python3 "${SCRIPT_DIR}/plot_ter_comparison.py" \
         --truth      "${_OSSE4DVAR_DIR}/obs/truth_emissions_monthly_2016Q1.nc" \
@@ -740,6 +743,7 @@ plot_ter_comparison() {
         --t-end      "${T_END}" \
         --iter-label "${iter_label}" \
         ${PRIOR_ERR_ARG} \
+        ${TER_COORD_FILE:+--coord-file "${TER_COORD_FILE}"} \
         || rc=$?
     [ "${rc}" -eq 0 ] \
         && log "[iter ${CUR_ITER}] TER comparison plot saved -> ${out}" \
