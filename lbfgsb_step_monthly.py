@@ -101,6 +101,9 @@ def month_boundaries(t_start, t_end, nmon=NMON):
 # Gradient reading
 # ---------------------------------------------------------------------------
 
+CS_IM = None      # set by --grid cs: SurfaceFluxAdj is read on the native C{im} grid (6, im, im) -> (6*im, im)
+
+
 def read_boundary_accumulators(adj_output_dir, boundaries, nlat, nlon):
     """
     Read SurfaceFluxAdj_CO2 at each boundary time, exactly.
@@ -125,13 +128,22 @@ def read_boundary_accumulators(adj_output_dir, boundaries, nlat, nlon):
     src     = [None] * len(targets)
 
     for f in files:
-        with xr.open_dataset(f) as ds:
+        with xr.open_dataset(f, drop_variables=['anchor']) as ds:   # 'anchor' (CS files): duplicate dim names
             times = pd.DatetimeIndex(ds['time'].values).round('s')
             for k, t in enumerate(targets):
                 hits = np.where(times == t)[0]
                 if hits.size == 0:
                     continue
                 da = ds['SurfaceFluxAdj_CO2'].isel(time=int(hits[0]))
+                if CS_IM is not None:     # native cubed sphere, stacked like write_sigma_cs: (6, im, im) -> (6*im, im)
+                    v = np.squeeze(da.values)
+                    if v.shape not in ((6, CS_IM, CS_IM), (6 * CS_IM, CS_IM)):
+                        raise ValueError(f'SurfaceFluxAdj_CO2 shape {v.shape} is not C{CS_IM} in {os.path.basename(f)} '
+                                         '(adjoint HISTORY must have no grid_label for --grid cs)')
+                    if src[k] is None:
+                        A[k] = v.reshape(6 * CS_IM, CS_IM).astype(np.float64)
+                        src[k] = os.path.basename(f)
+                    continue
                 if da.values.shape != (nlat, nlon):
                     raise ValueError(
                         f'SurfaceFluxAdj_CO2 shape {da.values.shape} != '
@@ -493,6 +505,9 @@ def main():
     parser.add_argument('--forcing-dir', required=True)
     parser.add_argument('--adj-output',  required=True,
                         help='Adjoint OutputDir containing GEOSChem.Adjoint.*.nc4')
+    parser.add_argument('--grid', choices=['latlon', 'cs'], default='latlon',
+                        help='cs: native cubed-sphere control (6*im x im per month), as write_sigma_monthly.py --grid cs')
+    parser.add_argument('--cs-res', type=int, default=24)
     parser.add_argument('--nlat',    type=int,   default=46)
     parser.add_argument('--nlon',    type=int,   default=72)
     parser.add_argument('--n-months', type=int,  default=NMON,
@@ -532,6 +547,11 @@ def main():
                              'accumulators + monthly obs gradients) here each iteration')
     args = parser.parse_args()
     first_step = args.first_step_max if args.first_step_max is not None else args.sigma_b
+    if args.grid == 'cs':
+        global CS_IM
+        CS_IM = args.cs_res
+        args.nlat, args.nlon = 6 * args.cs_res, args.cs_res
+        print(f'  grid cs: native C{CS_IM}, control (n-months, 6*{CS_IM}, {CS_IM})')
 
     nmon = args.n_months
     n = nmon * args.nlat * args.nlon

@@ -40,6 +40,10 @@ Usage:
                                  [--nlat 46] [--nlon 72] \
                                  [--year 2016] [--n-months 12] [--start-month 1]
 
+--grid cs (2026-10-20): the fields live on the native C{im} cubed sphere, written in the GMAO stacked
+layout by write_sigma.write_sigma_cs (as the annual --grid cs control). The monthly control vector is then
+(nmon, 6*im, im) = (nmon, 6, im, im) flattened C-order; --nlat/--nlon are replaced by 6*im, im.
+
 Test override (bypasses the state file entirely):
     --const-per-month 1.0,0.0,9.0,9.0,9.0,9.0,9.0,9.0,9.0,9.0,9.0,9.0
 """
@@ -88,6 +92,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--sigma-dir',  required=True)
     parser.add_argument('--state-file', default=None)
+    parser.add_argument('--grid', choices=['latlon', 'cs'], default='latlon')
+    parser.add_argument('--cs-res', type=int, default=24, help='C{im} for --grid cs')
     parser.add_argument('--nlat',       type=int, default=46)
     parser.add_argument('--nlon',       type=int, default=72)
     parser.add_argument('--year',       type=int, default=2016)
@@ -102,6 +108,15 @@ def main():
     args = parser.parse_args()
 
     nlat, nlon = args.nlat, args.nlon
+    if args.grid == 'cs':
+        import sys
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from write_sigma import write_sigma_cs
+        nlat, nlon = 6 * args.cs_res, args.cs_res
+        im = args.cs_res
+        writer = lambda s, path, ts: write_sigma_cs(s, im, path, ts)
+    else:
+        writer = None
     nmon = args.n_months
     n = nmon * nlat * nlon
     lats, lons = make_latlon_grid(nlat, nlon)
@@ -135,7 +150,10 @@ def main():
         yy, mm = tot // 12, tot % 12 + 1
         t_stamp = pd.Timestamp(f'{yy}-{mm:02d}-01')
         path = os.path.join(args.sigma_dir, f'{yy}', f'{mm:02d}.nc4')
-        write_month(sigma[m], lats, lons, path, t_stamp)
+        if writer:
+            writer(sigma[m], path, t_stamp)
+        else:
+            write_month(sigma[m], lats, lons, path, t_stamp)
         print(f'[iter {it}] {yy}-{mm:02d}: min={sigma[m].min():.4f} '
               f'max={sigma[m].max():.4f} mean={sigma[m].mean():.4f} -> {path}')
 
@@ -148,7 +166,10 @@ def main():
     yy, mm = tot // 12, tot % 12 + 1
     t_stamp = pd.Timestamp(f'{yy}-{mm:02d}-01')
     path = os.path.join(args.sigma_dir, f'{yy}', f'{mm:02d}.nc4')
-    write_month(sigma[nmon - 1], lats, lons, path, t_stamp)
+    if writer:
+        writer(sigma[nmon - 1], path, t_stamp)
+    else:
+        write_month(sigma[nmon - 1], lats, lons, path, t_stamp)
     print(f'[iter {it}] {yy}-{mm:02d}: boundary (=last control month) -> {path}')
 
 

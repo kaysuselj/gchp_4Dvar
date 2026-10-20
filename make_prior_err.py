@@ -80,13 +80,13 @@ def random_field(lats, lons, mean, amp, length_km, seed):
     return (mean + amp * f).reshape(lats.shape)
 
 
-def write_cs(field, im, path, attrs):
+def write_cs(field, im, path, attrs, t_stamp='2016-01-01T00:00:00'):
     stacked = np.asarray(field, dtype=np.float64).reshape(NF * im, im)
     ds = xr.Dataset(
         {'Prior_Err': (['time', 'lat', 'lon'], stacked[None, :, :],
                        {'long_name': 'OSSE prior error factor E (prior TER = truth TER * E)',
                         'units': '1'})},
-        coords={'time': ('time', [np.datetime64('2016-01-01T00:00:00', 'ns')], {'long_name': 'time'}),
+        coords={'time': ('time', [np.datetime64(t_stamp, 'ns')], {'long_name': 'time'}),
                 'lat': ('lat', np.arange(NF * im, dtype=np.float64),
                         {'long_name': 'Latitude', 'units': 'degrees_north'}),
                 'lon': ('lon', np.arange(im, dtype=np.float64),
@@ -101,7 +101,16 @@ def write_cs(field, im, path, attrs):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--out', required=True)
+    p.add_argument('--out', default=None, help='single (annual) E file')
+    p.add_argument('--out-dir', default=None,
+                   help='monthly E: <out-dir>/<YYYY>/<MM>.nc4 for each month of the window (+1 boundary month, '
+                        'a copy of the last, for the ExtData right bracket), E_m = field x month factor m')
+    p.add_argument('--month-factors', default='',
+                   help='with --out-dir: comma-separated factor per month (e.g. "1.3,1.0,0.8" with --type constant '
+                        '--value 1); default 1 for every month of --n-months')
+    p.add_argument('--year', type=int, default=2016)
+    p.add_argument('--start-month', type=int, default=1)
+    p.add_argument('--n-months', type=int, default=0)
     p.add_argument('--type', required=True, choices=['constant', 'zonal', 'regional', 'random'])
     p.add_argument('--value', type=float, default=1.0, help='constant value / mean of random')
     p.add_argument('--background', type=float, default=1.0, help='value outside bands/boxes')
@@ -137,6 +146,22 @@ def main():
 
     attrs = {'recipe': ' '.join(sys.argv[1:]), 'type': a.type,
              'target_sigma': 'sigma_true = 1/E', 'coord_file': a.coord_file}
+    if a.out_dir:                                  # monthly E (MODE=monthly), same layout as write_sigma_monthly.py
+        fac = [float(x) for x in a.month_factors.split(',')] if a.month_factors else [1.0] * a.n_months
+        if a.n_months and len(fac) != a.n_months:
+            sys.exit(f'--month-factors has {len(fac)} values, --n-months is {a.n_months}')
+        base = a.year * 12 + (a.start_month - 1)
+        for m in range(len(fac) + 1):              # + boundary month (copy of the last)
+            tot = base + m; yy, mm = tot // 12, tot % 12 + 1
+            em = np.clip(e * fac[min(m, len(fac) - 1)], a.min, a.max)
+            path = os.path.join(a.out_dir, f'{yy}', f'{mm:02d}.nc4')
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            write_cs(em, a.cs_res, path, dict(attrs, month_factor=fac[min(m, len(fac) - 1)]), f'{yy}-{mm:02d}-01T00:00:00')
+            print(f'{path}: E min={em.min():.4f} max={em.max():.4f} mean={em.mean():.4f}'
+                  + ('   (boundary month = copy of the last)' if m == len(fac) else ''))
+        return
+    if not a.out:
+        sys.exit('give --out or --out-dir')
     write_cs(e, a.cs_res, a.out, attrs)
     print(f'{a.out}: E type={a.type}  min={e.min():.4f} max={e.max():.4f} mean={e.mean():.4f}  '
           f'(target sigma = 1/E: {1/e.max():.4f} .. {1/e.min():.4f})')

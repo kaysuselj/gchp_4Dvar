@@ -246,8 +246,9 @@ CTRL_ADJ_DIR="${CTRL_ADJ_DIR:-${_CTRL_ADJ_DEFAULT}}"
 # (osse_4dvar experiments).  Leave unset to use the default gchp_4Dvar derivation.
 _WORK_DIR_OVERRIDE="${WORK_DIR:-}"
 case "${GRID}" in latlon|cs) ;; *) die "GRID must be 'latlon' or 'cs' (got '${GRID}')" ;; esac
-[ "${MODE}" = "monthly" ] && [ "${GRID}" = "cs" ] && \
-    die "GRID=cs is not yet implemented for MODE=monthly (annual only)"
+# MODE=monthly + GRID=cs (2026-10-20): native-CS monthly control (write_sigma_monthly.py / lbfgsb_step_monthly.py
+# --grid cs); needs monthly control files (ExtData/HEMCO sigma + prior error from ../sigma_monthly/%y4/%m2.nc4 and
+# ../prior_err_monthly/%y4/%m2.nc4, made by setup_exp.sh --mode monthly).
 
 # Canonical work tree = clone source; per-EXP work tree = private copy.
 SRC_WORK="${PARENT_DIR}/${BASE_WORK_NAME}"
@@ -477,8 +478,11 @@ if [ -f "${SCRIPT_DIR}/check_adjoint_flux_config.py" ]; then
 else
     log "WARNING: ${SCRIPT_DIR}/check_adjoint_flux_config.py not found, adjoint flux config not checked"
 fi
-# OSSE prior error E (read as ../prior_err_co2.nc4 from the run dirs = the work tree)
-if grep -q '^[^#]*prior_err_co2\.nc4' "${FWD_DIR}/HEMCO_Config.rc"; then
+# OSSE prior error E (read as ../prior_err_co2.nc4 from the run dirs = the work tree; monthly: ../prior_err_monthly/)
+if grep -q '^[^#]*prior_err_monthly/' "${FWD_DIR}/HEMCO_Config.rc"; then
+    [ -d "${WORK_DIR}/prior_err_monthly" ] || die "HEMCO uses the monthly prior error E but ${WORK_DIR}/prior_err_monthly is missing (make_prior_err.py --out-dir)"
+    log "prior error E (monthly): ${WORK_DIR}/prior_err_monthly"
+elif grep -q '^[^#]*prior_err_co2\.nc4' "${FWD_DIR}/HEMCO_Config.rc"; then
     [ -f "${WORK_DIR}/prior_err_co2.nc4" ] || die "HEMCO uses the prior error E but ${WORK_DIR}/prior_err_co2.nc4 is missing (make_prior_err.py)"
     log "prior error E: ${WORK_DIR}/prior_err_co2.nc4"
     PRIOR_ERR_ARG="--prior-err-file ${WORK_DIR}/prior_err_co2.nc4"
@@ -796,6 +800,7 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
                 --sigma-dir  "${SIGMA_DIR}" \
                 --state-file "${STATE_FILE}" \
                 --nlat "${NLAT}" --nlon "${NLON}" \
+                --grid "${GRID}" --cs-res "${CS_RES}" \
                 --year "${T_START:0:4}" \
                 --n-months "${NMON}" --start-month "${START_MONTH}" \
                 || die "write_sigma_monthly.py failed"
@@ -957,6 +962,8 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
                 --forcing-dir "${FORCING_DIR}" \
                 --adj-output  "${ADJ_DIR}/OutputDir" \
                 --nlat "${NLAT}" --nlon "${NLON}" \
+                --grid "${GRID}" --cs-res "${CS_RES}" \
+                --archive-dir "${OUTPUT_DIR}" \
                 --n-months "${NMON}" \
                 --sigma-b "${SIGMA_B}" \
                 --sigma-min "${SIGMA_MIN}" --sigma-max "${SIGMA_MAX}" \
@@ -991,7 +998,9 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
 
         # Archive the per-iteration adjoint gradient output (monthly only — the
         # monthly gradient is reconstructed by differencing these files).
-        if [ "${MODE}" = "monthly" ]; then
+        # GRID=cs: the 30-min native adjoint output is ~1.5 GB per month; the boundary accumulators
+        # and monthly gradients are archived by lbfgsb_step_monthly.py --archive-dir instead.
+        if [ "${MODE}" = "monthly" ] && [ "${GRID}" != "cs" ]; then
             _adj_iter_dir="${OUTPUT_DIR}/adjoint_iter$(printf '%03d' "${CUR_ITER}")"
             mkdir -p "${_adj_iter_dir}"
             _nadj=$(find "${ADJ_DIR}/OutputDir" -maxdepth 1 \
