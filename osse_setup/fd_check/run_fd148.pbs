@@ -1,0 +1,86 @@
+#!/bin/bash
+#PBS -S /bin/bash
+#PBS -N osse_fd148
+#PBS -l select=1:ncpus=24:mpiprocs=24:model=bro_ele
+#PBS -l walltime=08:00:00
+#PBS -q long
+#PBS -j oe
+#PBS -W group_list=s1055
+# ============================================================================
+# GCHP 14.8.0 version (control_files_148, runConfig shim, offline satellite sampler).
+# Finite-difference check of the 4D-Var gradient of an experiment in exps/.
+#
+# For each cell of slice PART/NPART of CELLS (lines: tag f j i, C24 indices of the
+# control vector (6,24,24)), two 3-month forward runs with sigma = 1 +- EPS in that
+# cell (1 elsewhere), each with the experiment's own control files, E file, track
+# and observations; J_obs from co2_adjoint_forcing_osse.py exactly as in the 4D-Var.
+# J is quadratic in sigma (CO2 only, linear transport), so the central difference
+# (J+ - J-)/(2 EPS) is the exact gradient; compare with the adjoint gradient of
+# iteration 1 (sigma = 1): compare_fd.py.
+#
+#   qsub -v EXP=E1.3_const_sat,CELLS=<file>,PART=0,NPART=4 run_fd.pbs
+# Results: fd_check/<EXP>/results/J_<tag>_{p,m}.txt
+# ============================================================================
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+ROOT="$(cd "$(dirname "$(readlink -f run_fd.pbs)")/.." && pwd)"
+G4D="$(cd "${ROOT}/../gchp_4Dvar" && pwd)"
+EXPD="${ROOT}/exps/${EXP:?set EXP}"
+CELLS="${CELLS:?set CELLS}"; PART="${PART:-0}"; NPART="${NPART:-1}"; EPS="${EPS:-0.05}"
+OUT="${ROOT}/fd_check/${EXP}"; RES="${OUT}/results"; W="${OUT}/w${PART}"
+log() { echo "[$(date '+%F %T')] $*"; }
+die() { echo "ERROR: $*" >&2; exit 1; }
+mkdir -p "${RES}" "${W}"
+
+RUN="$(ls "${EXPD}"/4dvar_optimizer.osse.*.run | head -1)"
+SEMI="$(sed -n 's|^SEMI_OBS_FILE="\${SEMI_OBS_FILE:-\(.*\)}"$|\1|p' "${RUN}")"
+TRACK="$(sed -n 's|^SAT_TRACK_FILE="\${SAT_TRACK_FILE:-\(.*\)}"$|\1|p' "${RUN}")"
+[ -f "${SEMI}" ] || die "observations not found (${SEMI})"
+[ -f "${EXPD}/prior_err_co2.nc4" ] || die "no E file in ${EXPD}"
+cp -p "${EXPD}/prior_err_co2.nc4" "${W}/prior_err_co2.nc4"
+
+rsync -a "${ROOT}/control_files_148/forward/" "${W}/forward_run/"
+cd "${W}/forward_run"
+sed -i -e 's/^Start_Time=.*/Start_Time="20160101 000000"/' -e 's/^End_Time=.*/End_Time="20160401 000000"/' \
+       -e 's/^Duration=.*/Duration="00000300 000000"/' \
+       -e 's/^TOTAL_CORES=.*/TOTAL_CORES=24/' -e 's/^NUM_NODES=.*/NUM_NODES=1/' runConfig_forward.sh
+[ -f "${TRACK}" ] || die "no track file ${TRACK} in the 14.8.0 forward dir"
+set +eu; source gchp.env; set -eu
+source /nobackup/ksuselj1/envs/gchp_4dvar/bin/activate
+
+k=0
+while read -r TAG F J I REST; do
+    [[ "${TAG}" =~ ^#|^$ ]] && continue
+    k=$((k + 1)); [ $(( (k - 1) % NPART )) -eq "${PART}" ] || continue
+    for S in p m; do
+        [ -f "${RES}/J_${TAG}_${S}.txt" ] && continue
+        sig=$(python3 -c "print(1 + (${EPS} if '${S}' == 'p' else -${EPS}))")
+        python3 - "${W}/sigma_co2_osse.nc4" "${F}" "${J}" "${I}" "${sig}" <<'PYEOF'
+import sys, numpy as np
+sys.path.insert(0, '/nobackupp27/ksuselj1/gchp_14.8.0_adj/gchp_4Dvar')
+from write_sigma import write_sigma_cs
+import pandas as pd
+path, f, j, i, s = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), float(sys.argv[5])
+x = np.ones((6, 24, 24)); x[f, j, i] = s
+write_sigma_cs(x, 24, path, pd.Timestamp('2016-01-01'))
+PYEOF
+        log "${TAG} (f=${F} j=${J} i=${I}) sigma=${sig}: forward"
+        find OutputDir -maxdepth 1 -type f -delete 2>/dev/null || true
+        rm -f Restarts/gcchem_internal_checkpoint* cap_restart gcadj_*checkpoint*
+        ./runConfig_forward.sh > gchp.log 2>&1
+        mpiexec -n 24 ./gchp >> gchp.log 2>&1 || true      # 14.8.0 aborts in finalize after the last write
+        nw=$(grep -a -n -m1 "write file: Restarts/gcchem_internal_checkpoint" gchp.log | cut -d: -f1)
+        [ -n "${nw}" ] || die "forward did not finish (${TAG} ${S})"
+        head -n "${nw}" gchp.log | grep -a -qE 'MPT ERROR|MPI_ABORT|aborting with error code|forrtl: severe|SIGSEGV|FAIL at line=' && die "GCHP crashed (${TAG} ${S})"
+        ./post_forward.sh >> gchp.log 2>&1 || die "offline sampler failed (${TAG} ${S})"
+        find . -maxdepth 1 -name 'gcadj_*checkpoint*' -delete
+        rm -rf "${W}/forcing"; mkdir -p "${W}/forcing"
+        python3 "${G4D}/co2_adjoint_forcing_osse.py" OutputDir/GEOSChem.sat_track.*.nc4 "${W}/forcing" \
+            --ts-chem 1800 --t-start 2016-01-01T00:00:00 --t-end 2016-04-01T00:00:00 \
+            --semi-obs-file "${SEMI}" --no-save-diagnostics > "${W}/forcing.log" 2>&1 || die "J failed (${TAG} ${S})"
+        cp "${W}/forcing/J_value.txt" "${RES}/J_${TAG}_${S}.txt"
+        log "${TAG} ${S}: J_obs = $(cat "${RES}/J_${TAG}_${S}.txt")"
+    done
+done < "${CELLS}"
+rm -rf "${W}/forcing"
+log "DONE part ${PART}/${NPART}"

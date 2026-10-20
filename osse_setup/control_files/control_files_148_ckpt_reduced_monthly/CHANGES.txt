@@ -1,0 +1,1 @@
+2026-10-20 09:30:09 copy of control_files_148_ckpt_reduced for MODE=monthly GRID=cs: Sigma_CO2 and TER_PRIOR_ERR read per month from ../sigma_monthly/%y4/%m2.nc4, ../prior_err_monthly/%y4/%m2.nc4 (F refresh)

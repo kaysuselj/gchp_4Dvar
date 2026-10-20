@@ -1,0 +1,16 @@
+./adjoint/ChemDir -> /nobackup/ksuselj1/geos_chem_new/ExtData//CHEM_INPUTS
+./adjoint/CodeDir -> /nobackupp27/ksuselj1/gchp_14.8.0_adj/code
+./adjoint/HcoDir -> /nobackup/ksuselj1/geos_chem_new/ExtData//HEMCO
+./adjoint/MetDir -> /nobackupp17/lwu5/GCHP/ExtData/GEOS_4x5/MERRA2
+./adjoint/Restarts/GEOSChem.Restart.20160101_0000z.c24.nc4 -> /home5/ksuselj1/nobackup/gchp_14.5.3_adjoint_surfaceF/4dvar_final/control_files_148/common/GEOSChem.Restart.20160101_0000z.c24.noDELP.nc4
+./adjoint/gchp -> /nobackupp27/ksuselj1/gchp_14.8.0_adj/code/build_disc/bin/gchp.disc_20261020
+./adjoint/gchp_restart.nc4 -> ./Restarts/GEOSChem.Restart.20160101_0000z.c24.nc4
+./adjoint/runScriptSamples -> /nobackupp27/ksuselj1/gchp_14.8.0_adj/code/run/runScriptSamples
+./forward/ChemDir -> /nobackup/ksuselj1/geos_chem_new/ExtData//CHEM_INPUTS
+./forward/CodeDir -> /nobackupp27/ksuselj1/gchp_14.8.0_adj/code
+./forward/HcoDir -> /nobackup/ksuselj1/geos_chem_new/ExtData//HEMCO
+./forward/MetDir -> /nobackupp17/lwu5/GCHP/ExtData/GEOS_4x5/MERRA2
+./forward/Restarts/GEOSChem.Restart.20160101_0000z.c24.nc4 -> /home5/ksuselj1/nobackup/gchp_14.5.3_adjoint_surfaceF/4dvar_final/control_files_148/common/GEOSChem.Restart.20160101_0000z.c24.noDELP.nc4
+./forward/gchp -> /nobackupp27/ksuselj1/gchp_14.8.0_adj/code/build_disc/bin/gchp.disc_20261020
+./forward/gchp_restart.nc4 -> ./Restarts/GEOSChem.Restart.20160101_0000z.c24.nc4
+./forward/runScriptSamples -> /nobackupp27/ksuselj1/gchp_14.8.0_adj/code/run/runScriptSamples

@@ -1,0 +1,191 @@
+# Atmospheric Model Configuration Parameters
+# ------------------------------------------
+NX: 2
+NY: 12
+
+GCHP.GRID_TYPE: Cubed-Sphere
+GCHP.GRIDNAME: PE24x144-CF
+GCHP.NF: 6
+GCHP.IM_WORLD: 24
+GCHP.IM: 24
+GCHP.JM: 144
+GCHP.LM: 72
+
+# For stretched grid
+#GCHP.STRETCH_FACTOR: 2.0
+#GCHP.TARGET_LON: 242.0
+#GCHP.TARGET_LAT: 37.0
+
+# For FV advection do not use grid comp name prefix
+IM: 24
+JM: 144
+LM: 72
+
+GEOSChem_CTM: 1
+
+# Settings for vertical direction of imported met-fields
+# (false for processed files, true for raw GMAO files)
+#-----------------------------------------------------------------------
+MET_WIND_IS_TOP_DOWN: .false.
+MET_HUMIDITY_IS_TOP_DOWN: .false.
+MET_NONADVECTION_IS_TOP_DOWN: .false.
+
+# Settings for using mass flux in advection
+# Note: mass flux top down setting not used if not using mass fluxes
+#-----------------------------------------------------------------------
+IMPORT_MASS_FLUX_FROM_EXTDATA: .false.
+MET_MASS_FLUX_IS_TOP_DOWN: .false.
+
+# Toggle to use total pressure (1) or dry pressure (0) in advection
+#-----------------------------------------------------------------------
+USE_TOTAL_AIR_PRESSURE_IN_ADVECTION: 0
+
+# Use native mass fluxes (0) or convert to dry air mass flux (1)
+# This switch is ignored if computing mass fluxes from winds.
+#-----------------------------------------------------------------------
+CORRECT_MASS_FLUX_FOR_HUMIDITY: 1
+
+# Print mass time series in advection (0=false, 1=true)
+#-----------------------------------------------------------------------
+PRINT_MASS_IN_ADVECTION: 0
+
+# Use ExtData2G? (.true. or .false.)
+#-----------------------------------------------------------------------
+USE_EXTDATA2G: .false.
+
+# Use when running a perturbation
+# scenario with RRTMG's FDH or SEFDH
+# options. Set to 0 to CALCULATE dynamical
+# heating rates, set to 1 to READ rates
+# calculated from the reference scenario
+IMPORT_DYN_HEATING: 0
+
+AdvCore_Advection: 1
+	DYCORE: OFF
+  HEARTBEAT_DT: 1800
+
+SOLAR_DT:    1800
+IRRAD_DT:    1800
+RUN_DT:      1800
+GCHPchem_DT: 1800
+RRTMG_DT:    10800
+DYNAMICS_DT: 1800
+
+SOLARAvrg: 0
+IRRADAvrg: 0
+
+GCHPchem_REFERENCE_TIME: 003000
+
+# Print Resource Parameters (0: Non-Default values, 1: ALL values)
+#-----------------------------------------------------------------
+PRINTRC: 0
+
+PARALLEL_READFORCING: 0
+
+# Set the number of parallel I/O processes to use when reading restarts.
+# Try something from 6 to 24 if reading a large restart file and have
+# poor performance
+#---------------------------------------------------------------
+NUM_READERS: 1
+
+# Set the number of parallel I/O processes to use when writing restarts.
+# Try something from 6 to 24 if writing a large restart file and have
+# poor performance
+#---------------------------------------------------------------
+NUM_WRITERS: 1
+
+# Active observer when desired
+# ----------------------------
+BKG_FREQUENCY: 0
+
+# Enable bootstrapping restart file fields missing from restart
+#-----------------------------------------------------------------
+MAPL_ENABLE_BOOTSTRAP: YES
+
+# Require all species in initial restart file (1 = yes; else no)
+#-----------------------------------------------------------------
+INITIAL_RESTART_SPECIES_REQUIRED: 0
+
+# Settings for production of restart files
+#---------------------------------------------------------------
+# Record frequency (HHMMSS, or monthly) : Frequency of restart file write
+#                                         Can exceed 24 hours (e.g. 1680000 for 7 days)
+# Record ref date (YYYYMMDD): Reference date; set to before sim start date
+# Record ref time (HHMMSS)  : Reference time 
+#RECORD_FREQUENCY: 240000
+#RECORD_REF_DATE: 20000101
+#RECORD_REF_TIME: 000000
+
+# Chemistry/AEROSOL Model Restart Files
+# -------------------------------------
+GCHPchem_INTERNAL_RESTART_FILE:     gchp_restart.nc4
+GCHPchem_INTERNAL_RESTART_TYPE:     pnc4
+GCHPchem_INTERNAL_CHECKPOINT_FILE:  Restarts/gcchem_internal_checkpoint
+GCHPchem_INTERNAL_CHECKPOINT_TYPE:  pnc4
+
+# GCHP dynamics (FV3) does not use a restart file because its internal state is empty
+#DYN_INTERNAL_RESTART_FILE:    fvcore_internal_rst
+#DYN_INTERNAL_RESTART_TYPE:    pbinary
+#DYN_INTERNAL_CHECKPOINT_FILE: Restarts/fvcore_internal_checkpoint
+#DYN_INTERNAL_CHECKPOINT_TYPE: pbinary
+#DYN_INTERNAL_HEADER:          1
+
+RUN_PHASES:           1
+
+#
+# %%% HEMCO configuration file %%%
+#
+HEMCO_CONFIG:         HEMCO_Config.rc
+
+#
+# %%% Log file names for redirecting stdout %%%
+#
+STDOUT_LOGFILE:       PET%%%%%.GEOSCHEMchem.log
+STDOUT_LOGLUN:        700
+
+#
+# %%% Memory debug print level (integer 0 to 3; 0=none, 3=highest)
+#
+MEMORY_DEBUG_LEVEL:   0
+
+#
+# %%% Option to write restart files via o-server
+# %%% This should only be necessary with certain MPI stacks. Try changing
+# %%% this to true if writing checkpoints causes the run to hang.
+#
+WRITE_RESTART_BY_OSERVER: NO
+
+#
+# %%% Advection settings
+#
+EXCLUDE_ADVECTION_TRACERS: NO
+
+#
+# %%% Adjoint variables
+#
+# MODEL_PHASE indicates forward model (FORWARD) or adjoint model (ADJOINT)
+MODEL_PHASE: ADJOINT
+ADJ_HEMCO_SFLUX_DIAGN: EmisCO2_NetTerrExch
+ADJ_HEMCO_SFLUX_SELECTOR: DIAGN
+FD_SPEC: CO2
+LFD: 1
+FD_TYPE: LAYER
+OCO2_FORCING_DIR: /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/control_files_148/forcing_placeholder/
+ADJOINT_FROM_FILE: 1
+ADV_ADJ_MASSFLUX: forward
+ADV_ADJ_WEIGHT: airmass
+ADV_ADJ_METHOD: reverse_wind_pure
+# FD_STEP:             0
+# #FD_LAT:              44.65
+# #FD_LON:              -63.58
+# IFD:                 3
+# JFD:                56
+
+# CF_IMIN:             2
+# CF_IMAX:             5
+# CF_JMIN:            55
+# CF_JMAX:            58
+# CF_LMIN:             1
+# CF_LMAX:             4
+
+

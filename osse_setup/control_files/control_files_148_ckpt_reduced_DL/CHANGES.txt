@@ -1,0 +1,1 @@
+2026-10-20 09:00:00 binary -> gchp.disc_20261020 (own halo adjoint: DL correct on any layout); ADV_ADJ_HALO_AD own

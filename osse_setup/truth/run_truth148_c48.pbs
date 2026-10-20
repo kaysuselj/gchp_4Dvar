@@ -1,0 +1,67 @@
+#!/bin/bash
+#PBS -S /bin/bash
+#PBS -N osse_truth148_c48
+#PBS -l select=2:ncpus=24:mpiprocs=24:model=bro_ele
+#PBS -l walltime=12:00:00
+#PBS -q long
+#PBS -j oe
+#PBS -W group_list=s1055
+# ============================================================================
+# C48 OSSE truth (copy of truth148/run_truth148.pbs, 2026-10-19: C48 control files, obs148_c48, 12 h)
+# OSSE truth with GCHP 14.8.0 (same design as truth/run_truth.pbs for 14.5.3): unmodified
+# fluxes (TER x unit conversion, no sigma, no prior error E), 2016-01-01 -> 2016-04-02,
+# control_files_148_c48/truth (restart with DELP_DRY = 0). OCO-2 track only (E1.3 uses
+# satellite obs): offline sampling (post_forward.sh) -> GEOSChem.sat_track.* ->
+#   ../obs148_c48/semi_obs_xco2_2016Q1.nc           per-sounding L2# AK
+#   ../obs148_c48/truth_emissions_monthly_2016Q1.nc monthly-mean truth fluxes
+# Submit from 4dvar_osse/truth148_c48/:  qsub run_truth148_c48.pbs   (STAGE=obs redoes the obs only)
+# ============================================================================
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+TRUTH_DIR="$(pwd)"; ROOT="$(cd .. && pwd)"
+CTRL="${ROOT}/control_files_148_c48/truth"; FWD="${TRUTH_DIR}/forward_run"; OBS="${ROOT}/obs148_c48"
+G4D="$(cd "${ROOT}/../gchp_4Dvar" && pwd)"
+L2_DIR='/nobackupp17/jliu7/OCO2/L2#/OCO2-B10/PSEUDO/TRENDY/ORCHIDEE-ECCO2/'
+STAGE="${STAGE:-all}"
+log() { echo "[$(date '+%F %T')] $*"; }
+die() { echo "ERROR: $*" >&2; exit 1; }
+mkdir -p "${FWD}" "${OBS}"
+if [ "${STAGE}" = all ]; then
+    rsync -a "${CTRL}/" "${FWD}/"
+    cd "${FWD}"
+    ln -sfn "${ROOT}/control_files_148_c48/common/GEOSChem.Restart.20160101_0000z.c48.noDELP.nc4" Restarts/GEOSChem.Restart.20160101_0000z.c48.nc4
+    sed -i -e 's/^Start_Time=.*/Start_Time="20160101 000000"/' -e 's/^End_Time=.*/End_Time="20160402 000000"/' \
+           -e 's/^Duration=.*/Duration="00000301 000000"/' \
+           -e 's/^TOTAL_CORES=.*/TOTAL_CORES=48/' -e 's/^NUM_NODES=.*/NUM_NODES=2/' runConfig_forward.sh
+    set +eu; source /home5/ksuselj1/nobackup/gchp_14.8.0_adj/gchp_14.8.0_env.sh >/dev/null 2>&1; set -eu
+    find OutputDir -maxdepth 1 -type f -delete 2>/dev/null || true
+    rm -f Restarts/gcchem_internal_checkpoint* cap_restart gcadj_*checkpoint*
+    log "truth forward 2016-01-01 -> 2016-04-02, binary $(readlink -f gchp)"
+    ./runConfig_forward.sh > gchp.log 2>&1 || die "shim failed"
+    mpiexec -n 48 ./gchp >> gchp.log 2>&1 || true      # 14.8.0 aborts in finalize after the last write
+    nw=$(grep -a -n -m1 "write file: Restarts/gcchem_internal_checkpoint" gchp.log | cut -d: -f1)
+    [ -n "${nw}" ] || die "no final checkpoint, see ${FWD}/gchp.log"
+    head -n "${nw}" gchp.log | grep -a -q -E 'MPT ERROR|MPI_ABORT|aborting with error code|forrtl: severe|SIGSEGV|FAIL at line=' && die "GCHP crashed, see ${FWD}/gchp.log"
+    find . -maxdepth 1 -name 'gcadj_*checkpoint*' -delete      # forward of an ADJOINT build writes these
+    ./post_forward.sh >> gchp.log 2>&1 || die "offline sampler failed"
+    log "truth forward done: $(ls OutputDir | wc -l) output files"
+    cd "${TRUTH_DIR}"
+fi
+source /nobackup/ksuselj1/envs/gchp_4dvar/bin/activate
+n=$(ls ${FWD}/OutputDir/GEOSChem.sat_track.*.nc4 2>/dev/null | wc -l); log "sat_track: ${n} files"; [ "${n}" -gt 0 ] || die "no sat_track output"
+python3 "${G4D}/make_semi_obs_xco2.py" --sat-track-dir "${FWD}/OutputDir/" --l2-dir "${L2_DIR}" \
+    --t-start 2016-01-01 --t-end 2016-04-01 --out "${OBS}/semi_obs_xco2_2016Q1.nc" || die "make_semi_obs_xco2 failed"
+python3 - "${FWD}/OutputDir" "${OBS}/truth_emissions_monthly_2016Q1.nc" <<'PYEOF'
+import sys, glob, xarray as xr, pandas as pd
+src, out = sys.argv[1], sys.argv[2]
+files = sorted(glob.glob(f'{src}/GEOSChem.Emissions.*.nc4'))
+ds = xr.concat([xr.open_dataset(f, drop_variables=['anchor']) for f in files], dim='time',
+               data_vars='minimal', coords='minimal', compat='override')
+ds = ds.sortby('time')
+t = pd.DatetimeIndex(ds['time'].values)
+ds = ds.isel(time=[i for i, x in enumerate(t) if x < pd.Timestamp('2016-04-01')])
+ds.load().to_netcdf(out)
+print(f'truth emissions: {len(files)} files -> {out}, times {list(pd.DatetimeIndex(ds.time.values).strftime("%Y-%m-%d"))}')
+PYEOF
+ls -l "${OBS}"
+log "ALL DONE"

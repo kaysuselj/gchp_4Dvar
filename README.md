@@ -3,6 +3,10 @@
 Batch-queue 4D-Var system for optimizing gridded CO2 surface flux scaling
 factors using GCHP forward and adjoint simulations and OCO-2 observations.
 
+> **GCHP 14.8.0 OSSEs (current):** the setup — `setup_exp.sh`, the control-file sets, truth and
+> gradient-check scripts, and how to run an experiment — is in [`osse_setup/`](osse_setup/README.md).
+> Model: `kaysuselj/GCHP` tag `v1.0-rc1`. Parts of this README describe the older 14.5.3 layout.
+
 ## Overview
 
 The optimizer runs an outer loop of up to `MAX_ITER` iterations entirely
