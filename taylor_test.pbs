@@ -42,6 +42,9 @@ for E in $(echo "${EPSLIST}" | tr ':' ' '); do
     W="${EXP}/taylor/${DIRN//:/}_${E}"
     [ -f "${W}/J_value.txt" ] && { log "eps ${E}: done ($(cat ${W}/J_value.txt))"; continue; }
     log "eps ${E}"
+    if [ "$(ls "${W}"/forward_run/OutputDir/GEOSChem.sat_track.*.nc4 2>/dev/null | wc -l)" -gt 0 ] && [ -f "${W}/state_x.npz" ]; then
+        log "  forward output of an earlier attempt present: J only"
+    else
     rm -rf "${W}"; mkdir -p "${W}/forcing"
     rsync -a --exclude='OutputDir/*' --exclude='gcadj_*' --exclude='Restarts/gcchem_internal_checkpoint*' \
           --exclude='gchp.log' "${EXP}/forward_run/" "${W}/forward_run/"
@@ -73,7 +76,9 @@ for E in $(echo "${EPSLIST}" | tr ':' ' '); do
     grep -a -q "write file: Restarts/gcchem_internal_checkpoint" gchp.log || { tail -20 gchp.log; die "forward eps ${E} did not finish"; }
     ./post_forward.sh >> gchp.log 2>&1 || die "post_forward.sh"
     rm -f gcadj_*
-    ${PY} -I "${G}/co2_adjoint_forcing_osse.py" OutputDir/GEOSChem.sat_track.*.nc4 "${W}/forcing" --ts-chem 1800 \
+    fi
+    cd "${W}/forward_run"; mkdir -p "${W}/forcing"
+    ${PY} "${G}/co2_adjoint_forcing_osse.py" OutputDir/GEOSChem.sat_track.*.nc4 "${W}/forcing" --ts-chem 1800 \
         --t-start "${T_START}T00:00:00" --t-end "${T_END}T00:00:00" --semi-obs-file "${SEMI}" --no-save-diagnostics \
         > "${W}/forcing.log" 2>&1 || { tail "${W}/forcing.log"; die "J computation"; }
     cp "${W}/forcing/J_value.txt" "${W}/J_value.txt"

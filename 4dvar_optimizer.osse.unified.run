@@ -110,24 +110,55 @@ assert_gchp_ok() {
 # instead of exiting. Watchdog: once Restarts/gcchem_internal_checkpoint has been written and
 # gchp.log has not changed for GCHP_HANG_S seconds (default 300), mpiexec is killed. Whether the
 # run itself was fine is decided afterwards by assert_gchp_ok (log up to the final write).
+# Mid-run stall (2026-10-20, O5_rand_s1_C24_DL: log idle for 45 min at a History write, 2 months in): if
+# gchp.log has not changed for GCHP_STALL_S seconds (default 1800) BEFORE the final checkpoint, mpiexec is
+# killed and run_gchp_148 returns 2; run_phase_148 then restarts the phase once (stall_retry).
 run_gchp_148() {
-    local pid idle now last
+    local pid idle now last rc=0
     mpiexec -n "${NCORES}" ./gchp >> gchp.log 2>&1 &
     pid=$!
     while kill -0 "${pid}" 2>/dev/null; do
         sleep 30
+        now=$(date +%s); last=$(stat -c %Y gchp.log)
+        idle=$(( now - last ))
         if grep -a -q "write file: Restarts/gcchem_internal_checkpoint" gchp.log 2>/dev/null; then
-            now=$(date +%s); last=$(stat -c %Y gchp.log)
-            idle=$(( now - last ))
             if [ "${idle}" -ge "${GCHP_HANG_S:-300}" ]; then
                 log "  GCHP wrote its final checkpoint but has been idle ${idle} s (finalize hang): stopping mpiexec"
                 kill "${pid}" 2>/dev/null; sleep 20; kill -9 "${pid}" 2>/dev/null || true
                 break
             fi
+        elif [ "${idle}" -ge "${GCHP_STALL_S:-1800}" ]; then
+            log "  GCHP STALLED: gchp.log idle ${idle} s before the final checkpoint (last: $(grep -a 'AGCM Date' gchp.log | tail -1 | sed 's/^ *//')): stopping mpiexec"
+            kill "${pid}" 2>/dev/null; sleep 20; kill -9 "${pid}" 2>/dev/null || true
+            rc=2
+            break
         fi
     done
     wait "${pid}" 2>/dev/null || true
-    return 0
+    return ${rc}
+}
+
+# run_phase_148 <forward|adjoint>: runConfig shim + run_gchp_148 in the current run dir; after a mid-run stall
+# the phase is cleaned and started once more (the stalled log is kept as gchp.log.stall1). The adjoint keeps
+# its gcadj checkpoints (they are only deleted after a successful adjoint), the forward rewrites them.
+run_phase_148() {
+    local ph="$1" try
+    for try in 1 2; do
+        if [ "${try}" -eq 2 ]; then
+            mv -f gchp.log gchp.log.stall1
+            if [ "${ph}" = forward ]; then
+                rm -f gcadj_internal_checkpoint* gcadj_import_checkpoint*
+                [ -d OutputDir ] && find OutputDir -maxdepth 1 -type f -delete
+            else
+                [ -d OutputDir ] && rm -f OutputDir/GEOSChem*
+            fi
+            rm -f Restarts/gcchem_internal_checkpoint* cap_restart
+            log "  restarting the ${ph} run after the stall (attempt 2)"
+            "./runConfig_${ph}.sh" > gchp.log 2>&1 || die "runConfig_${ph}.sh failed (iter ${CUR_ITER}, restart)"
+        fi
+        run_gchp_148 && return 0
+    done
+    die "${ph} GCHP stalled twice (iter ${CUR_ITER}); logs gchp.log.stall1 and gchp.log in $(pwd)"
 }
 
 # ============================================================
@@ -825,7 +856,7 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
         ./runConfig_forward.sh > gchp.log 2>&1 \
             || die "runConfig_forward.sh failed (iter ${CUR_ITER})"
         if [ "${GCHP_VERSION}" = "14.8" ]; then
-            run_gchp_148                                            # finalize abort/hang handled; checked below
+            run_phase_148 forward                                   # finalize hang + mid-run stall handled; checked below
         else
             mpiexec -n "${NCORES}" ./gchp >> gchp.log 2>&1 \
                 || die "Forward GCHP failed (iter ${CUR_ITER}). See ${FWD_DIR}/gchp.log"
@@ -928,7 +959,7 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
         ./runConfig_adjoint.sh > gchp.log 2>&1 \
             || die "runConfig_adjoint.sh failed (iter ${CUR_ITER})"
         if [ "${GCHP_VERSION}" = "14.8" ]; then
-            run_gchp_148                                            # finalize abort/hang handled; checked below
+            run_phase_148 adjoint                                   # finalize hang + mid-run stall handled; checked below
         else
             mpiexec -n "${NCORES}" ./gchp >> gchp.log 2>&1 \
                 || die "Adjoint GCHP failed (iter ${CUR_ITER}). See ${ADJ_DIR}/gchp.log"
