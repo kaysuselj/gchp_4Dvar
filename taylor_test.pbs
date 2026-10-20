@@ -1,0 +1,85 @@
+#!/bin/bash
+#PBS -S /bin/bash
+#PBS -N taylor
+#PBS -l select=2:ncpus=24:mpiprocs=24:model=bro_ele
+#PBS -l walltime=16:00:00
+#PBS -q long
+#PBS -j oe
+#PBS -W group_list=s1055
+# ============================================================================
+# Taylor test of the 4D-Var gradient (EXPERIMENT_MATRIX G1, 2026-10-20).
+# Uses an OSSE experiment after its FIRST iteration (sigma = 1, J_b = 0, so the stored gradient is g_obs):
+#   J_obs(x0 + eps d) - J_obs(x0)  vs  eps g^T d       for every eps in EPSLIST.
+# With a correct adjoint ratio(eps) -> 1 as eps -> 0, and the residual / eps^2 is constant (J_obs is
+# nearly quadratic in sigma). Each eps = one forward of the experiment's own run directory (same binary,
+# control files, sampling and J computation as the optimizer), in <EXP>/taylor/<DIR>_<eps>/.
+#   EXP=<experiment dir>  [DIRN=grad | month:<k> (monthly control, gradient of month k only) | rand:<seed>]
+#   [EPSLIST=1e-1:3e-2:1e-2:3e-3]  [STATE=<EXP>/4dvar_output_osse/4dvar_state_iter001.npz]
+#   qsub -v EXP=...,DIRN=grad taylor_test.pbs   (nodes: as the experiment; select must match its runConfig)
+#   then: python3 taylor_test.py analyze --exp <EXP>   (also run at the end of the job)
+# ============================================================================
+set -euo pipefail
+die() { echo "ERROR: $*" >&2; exit 1; }
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+G=/nobackupp27/ksuselj1/gchp_14.8.0_adj/gchp_4Dvar
+EXP="${EXP:?EXP=<experiment dir>}"; DIRN="${DIRN:-grad}"; EPSLIST="${EPSLIST:-1e-1:3e-2:1e-2:3e-3}"
+STATE="${STATE:-${EXP}/4dvar_output_osse/4dvar_state_iter001.npz}"
+[ -f "${STATE}" ] || die "no state ${STATE} (run one iteration first)"
+set +eu; source /home5/ksuselj1/nobackup/gchp_14.8.0_adj/gchp_14.8.0_env.sh >/dev/null 2>&1; set -eu
+PY="/nobackup/ksuselj1/envs/gchp_4dvar/bin/python3"
+mkdir -p "${EXP}/taylor"
+exec > >(tee -a "${EXP}/taylor/taylor_${DIRN//:/}.log") 2>&1
+RUNF=$(ls "${EXP}"/4dvar_optimizer.osse.*.run | head -1)
+SEMI=$(sed -n 's/^SEMI_OBS_FILE="${SEMI_OBS_FILE:-\(.*\)}"$/\1/p' "${RUNF}" | head -1)
+[ -f "${SEMI}" ] || die "observation file not found in ${RUNF}"
+NCORES=$(awk -F= '/^TOTAL_CORES=/{print $2}' "${EXP}/forward_run/runConfig_forward.sh")
+CS_RES=$(awk -F'[[:space:]:]+' '/^GCHP.IM_WORLD/{print $2}' "${EXP}/forward_run/GCHP.rc")
+MONTHLY=0; [ -d "${EXP}/prior_err_monthly" ] && MONTHLY=1
+T_START=2016-01-01; T_END=2016-04-01; NMON=3
+log "Taylor test ${EXP}  dir ${DIRN}  eps ${EPSLIST}  C${CS_RES} ${NCORES} cores  monthly ${MONTHLY}  state ${STATE}"
+
+for E in $(echo "${EPSLIST}" | tr ':' ' '); do
+    W="${EXP}/taylor/${DIRN//:/}_${E}"
+    [ -f "${W}/J_value.txt" ] && { log "eps ${E}: done ($(cat ${W}/J_value.txt))"; continue; }
+    log "eps ${E}"
+    rm -rf "${W}"; mkdir -p "${W}/forcing"
+    rsync -a --exclude='OutputDir/*' --exclude='gcadj_*' --exclude='Restarts/gcchem_internal_checkpoint*' \
+          --exclude='gchp.log' "${EXP}/forward_run/" "${W}/forward_run/"
+    if [ "${MONTHLY}" = 1 ]; then ln -sfn "${EXP}/prior_err_monthly" "${W}/prior_err_monthly"
+    else ln -sfn "${EXP}/prior_err_co2.nc4" "${W}/prior_err_co2.nc4"; fi
+    # sigma = x0 + eps d, written by the optimizer's own writers
+    ${PY} -I "${G}/taylor_test.py" point --state "${STATE}" --dirn "${DIRN}" --eps "${E}" --nmon ${NMON} \
+        --monthly ${MONTHLY} --out "${W}/state_x.npz"
+    if [ "${MONTHLY}" = 1 ]; then
+        ${PY} -I "${G}/write_sigma_monthly.py" --grid cs --cs-res "${CS_RES}" --sigma-dir "${W}/sigma_monthly" \
+            --state-file "${W}/state_x.npz" --year 2016 --n-months ${NMON} --start-month 1 | tail -1
+    else
+        ${PY} -I "${G}/write_sigma.py" --grid cs --cs-res "${CS_RES}" --sigma-file "${W}/sigma_co2_osse.nc4" \
+            --state-file "${W}/state_x.npz" --t-start "${T_START}" | tail -1
+    fi
+    cd "${W}/forward_run"
+    rm -f cap_restart; find OutputDir -maxdepth 1 -type f -delete 2>/dev/null || true
+    ./runConfig_forward.sh > gchp.log 2>&1 || die "runConfig_forward.sh"
+    mpiexec -n "${NCORES}" ./gchp >> gchp.log 2>&1 &
+    pid=$!
+    while kill -0 ${pid} 2>/dev/null; do
+        sleep 30
+        if grep -a -q "write file: Restarts/gcchem_internal_checkpoint" gchp.log && \
+           [ $(( $(date +%s) - $(stat -c %Y gchp.log) )) -ge 300 ]; then
+            kill ${pid} 2>/dev/null || true; sleep 20; kill -9 ${pid} 2>/dev/null || true; break
+        fi
+    done
+    wait ${pid} 2>/dev/null || true
+    grep -a -q "write file: Restarts/gcchem_internal_checkpoint" gchp.log || { tail -20 gchp.log; die "forward eps ${E} did not finish"; }
+    ./post_forward.sh >> gchp.log 2>&1 || die "post_forward.sh"
+    rm -f gcadj_*
+    ${PY} -I "${G}/co2_adjoint_forcing_osse.py" OutputDir/GEOSChem.sat_track.*.nc4 "${W}/forcing" --ts-chem 1800 \
+        --t-start "${T_START}T00:00:00" --t-end "${T_END}T00:00:00" --semi-obs-file "${SEMI}" --no-save-diagnostics \
+        > "${W}/forcing.log" 2>&1 || { tail "${W}/forcing.log"; die "J computation"; }
+    cp "${W}/forcing/J_value.txt" "${W}/J_value.txt"
+    rm -rf "${W}/forcing"/CO2_adjoint_forcing_* "${W}/forward_run/OutputDir"/*
+    log "eps ${E}: J_obs = $(cat ${W}/J_value.txt)"
+    cd "${EXP}"
+done
+${PY} -I "${G}/taylor_test.py" analyze --exp "${EXP}" --state "${STATE}" --nmon ${NMON} --monthly ${MONTHLY} | tee "${EXP}/taylor/report.txt"
+log "DONE"
