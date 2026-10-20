@@ -482,6 +482,7 @@ fi
 if grep -q '^[^#]*prior_err_monthly/' "${FWD_DIR}/HEMCO_Config.rc"; then
     [ -d "${WORK_DIR}/prior_err_monthly" ] || die "HEMCO uses the monthly prior error E but ${WORK_DIR}/prior_err_monthly is missing (make_prior_err.py --out-dir)"
     log "prior error E (monthly): ${WORK_DIR}/prior_err_monthly"
+    PRIOR_ERR_ARG="--prior-err-dir ${WORK_DIR}/prior_err_monthly"
 elif grep -q '^[^#]*prior_err_co2\.nc4' "${FWD_DIR}/HEMCO_Config.rc"; then
     [ -f "${WORK_DIR}/prior_err_co2.nc4" ] || die "HEMCO uses the prior error E but ${WORK_DIR}/prior_err_co2.nc4 is missing (make_prior_err.py)"
     log "prior error E: ${WORK_DIR}/prior_err_co2.nc4"

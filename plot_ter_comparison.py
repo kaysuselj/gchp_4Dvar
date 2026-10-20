@@ -140,6 +140,8 @@ def main():
     ap.add_argument('--prior-err-file', default=None,
                     help='prior error field E (make_prior_err.py, CS stacked): '
                          'prior TER = truth TER * E, target sigma = 1/E')
+    ap.add_argument('--prior-err-dir', default=None,
+                    help='monthly control: E per month in <dir>/<YYYY>/<MM>.nc4 (make_prior_err.py --out-dir)')
     ap.add_argument('--coord-file', default=('/nobackupp27/ksuselj1/gchp_14.5.3_adjoint_surfaceF/'
                     'tests_final/P2_advection/P2a_edge_corner_8ms/results/coord.nc4'),
                     help='C-grid file with corner_lats/corner_lons (cell areas for the metric)')
@@ -173,9 +175,43 @@ def main():
         print(f'No state file yet ({args.state}); skipping TER comparison plot.')
         return
     st       = np.load(args.state, allow_pickle=True)
-    sigma_cs = st['x_best'].reshape(NF, cs_res, cs_res)
-    it_best  = int(st['it_best'])
+    # annual states keep the best iterate (x_best, it_best); monthly states (lbfgsb_step_monthly.py) only
+    # the current one (x_next, iteration; 4dvar_state_best.npz holds the best one in the same keys)
+    x_best   = st['x_best'] if 'x_best' in st.files else st['x_next']
+    it_best  = int(st['it_best']) if 'it_best' in st.files else int(st['iteration'])
     iter_tag = args.iter_label if args.iter_label else str(it_best)
+    ncell    = NF * cs_res * cs_res
+    if x_best.size != ncell:                                   # monthly control: one figure per month
+        nmon = x_best.size // ncell
+        if nmon * ncell != x_best.size or nmon != len(keep_idx):
+            raise SystemExit(f'state has {x_best.size} values: not C{cs_res} x {len(keep_idx)} months')
+        sig_m = x_best.reshape(nmon, NF, cs_res, cs_res)
+        tru_m = all_months[keep_idx] * _TO_GC_DAY
+        e_m, rows = [], []
+        for m, tm in enumerate(keep_times):
+            if args.prior_err_dir:
+                f = os.path.join(args.prior_err_dir, f'{tm.year}', f'{tm.month:02d}.nc4')
+                with nc.Dataset(f) as de:
+                    e_m.append(np.array(de['Prior_Err'][0]).reshape(NF, cs_res, cs_res))
+            else:
+                e_m.append(np.full((NF, cs_res, cs_res), args.prior_scale))
+        base, ext = os.path.splitext(args.out)
+        for m, tm in enumerate(keep_times):
+            lab = tm.strftime('%b %Y')
+            r = _figure(args, tru_m[m], e_m[m], sig_m[m], lats_cs, lons_cs, cs_res, lab, it_best, iter_tag,
+                        f'monthly, E {lab} mean {e_m[m].mean():.3g}', f'{base}_{tm:%Y%m}{ext}')
+            rows.append((lab,) + r)
+        # whole window, weights over all months (TER x area of each month)
+        w = np.abs(tru_m) * cell_areas(args.coord_file, cs_res)[None]
+        w = w / w.sum()
+        ep, eo = np.array(e_m), np.array(e_m) * sig_m
+        for lab, pb, pr, ob, orr in rows:
+            print(f'  {lab}: prior bias {pb:+.4f} rms {pr:.4f} | optimized bias {ob:+.4f} rms {orr:.4f}')
+        print(f'TER x area weighted flux ratio error (all months): prior bias {float((w * (ep - 1)).sum()):+.4f} '
+              f'rms {float(np.sqrt((w * (ep - 1) ** 2).sum())):.4f}  |  optimized (iter {it_best}) bias '
+              f'{float((w * (eo - 1)).sum()):+.4f} rms {float(np.sqrt((w * (eo - 1) ** 2).sum())):.4f}')
+        return
+    sigma_cs = x_best.reshape(NF, cs_res, cs_res)
 
     # ---- prior error E (constant or field) ----
     if args.prior_err_file:
@@ -196,6 +232,13 @@ def main():
         e_cs = np.full((NF, cs_res, cs_res), args.prior_scale)
         e_label = f'constant {args.prior_scale:g}'
 
+    _figure(args, ter_truth_cs, e_cs, sigma_cs, lats_cs, lons_cs, cs_res, month_str, it_best, iter_tag, e_label,
+            args.out, monthly=False)
+
+
+def _figure(args, ter_truth_cs, e_cs, sigma_cs, lats_cs, lons_cs, cs_res, month_str, it_best, iter_tag, e_label, out,
+            monthly=True):
+    """truth / prior / optimized TER maps, differences and the weighted flux error for one period"""
     # ---- derive flux fields ----
     ter_prior_cs = ter_truth_cs * e_cs
     ter_opt_cs   = ter_truth_cs * e_cs * sigma_cs
@@ -207,8 +250,9 @@ def main():
         return float((w * (r - 1.0)).sum()), float(np.sqrt((w * (r - 1.0) ** 2).sum()))
     prior_bias, prior_rms = _werr(e_cs)
     opt_bias, opt_rms = _werr(e_cs * sigma_cs)
-    print(f'TER x area weighted flux ratio error: prior bias {prior_bias:+.4f} rms {prior_rms:.4f}  |  '
-          f'optimized (iter {it_best}) bias {opt_bias:+.4f} rms {opt_rms:.4f}')
+    if not monthly:
+        print(f'TER x area weighted flux ratio error: prior bias {prior_bias:+.4f} rms {prior_rms:.4f}  |  '
+              f'optimized (iter {it_best}) bias {opt_bias:+.4f} rms {opt_rms:.4f}')
 
     # ---- interpolate to regular grid ----
     lat, lon, truth_ll = cs_to_latlon(ter_truth_cs, lats_cs, lons_cs, args.res)
@@ -290,11 +334,11 @@ def main():
         f'  |  {month_str}',
         fontsize=13, fontweight='bold', y=0.96)
 
-    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
-    plt.savefig(args.out, dpi=150, bbox_inches='tight')
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+    plt.savefig(out, dpi=150, bbox_inches='tight')
     plt.close()
-    print(f'Saved: {args.out}')
-
+    print(f'Saved: {out}')
+    return prior_bias, prior_rms, opt_bias, opt_rms
 
 if __name__ == '__main__':
     main()
