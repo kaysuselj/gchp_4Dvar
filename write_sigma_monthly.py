@@ -162,15 +162,21 @@ def main():
     # integrates the final control month.  Sigma_CO2 is F-persisted (no
     # interpolation), so these values never enter the solution -- the file only
     # has to exist -- so duplicate the last control month.  Not a control var.
-    tot = base + nmon
-    yy, mm = tot // 12, tot % 12 + 1
-    t_stamp = pd.Timestamp(f'{yy}-{mm:02d}-01')
-    path = os.path.join(args.sigma_dir, f'{yy}', f'{mm:02d}.nc4')
-    if writer:
-        writer(sigma[nmon - 1], path, t_stamp)
-    else:
-        write_month(sigma[nmon - 1], lats, lons, path, t_stamp)
-    print(f'[iter {it}] {yy}-{mm:02d}: boundary (=last control month) -> {path}')
+    # GCHP 14.8 (MAPL 2.69) adjoint: starting at the window end and running backwards, ExtData also wants the
+    # right bracket of the boundary month, and at the window start the left bracket before it. So also write
+    # start+nmon+1 (= last control month) and start-1 (= first control month); F-persisted, never used.
+    for off, src, what in ((nmon, nmon - 1, 'boundary (=last control month)'),
+                           (nmon + 1, nmon - 1, 'boundary +1 (=last control month, adjoint right bracket)'),
+                           (-1, 0, 'boundary -1 (=first control month, adjoint left bracket)')):
+        tot = base + off
+        yy, mm = tot // 12, tot % 12 + 1
+        t_stamp = pd.Timestamp(f'{yy}-{mm:02d}-01')
+        path = os.path.join(args.sigma_dir, f'{yy}', f'{mm:02d}.nc4')
+        if writer:
+            writer(sigma[src], path, t_stamp)
+        else:
+            write_month(sigma[src], lats, lons, path, t_stamp)
+        print(f'[iter {it}] {yy}-{mm:02d}: {what} -> {path}')
 
 
 if __name__ == '__main__':

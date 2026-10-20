@@ -151,14 +151,16 @@ def main():
         if a.n_months and len(fac) != a.n_months:
             sys.exit(f'--month-factors has {len(fac)} values, --n-months is {a.n_months}')
         base = a.year * 12 + (a.start_month - 1)
-        for m in range(len(fac) + 1):              # + boundary month (copy of the last)
+        # + boundary months for ExtData brackets (forward and reverse-time adjoint): the two after the window
+        # (copies of the last month) and the one before it (copy of the first); F-persisted, never used
+        for m in [-1] + list(range(len(fac) + 2)):
             tot = base + m; yy, mm = tot // 12, tot % 12 + 1
-            em = np.clip(e * fac[min(m, len(fac) - 1)], a.min, a.max)
+            em = np.clip(e * fac[min(max(m, 0), len(fac) - 1)], a.min, a.max)
             path = os.path.join(a.out_dir, f'{yy}', f'{mm:02d}.nc4')
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            write_cs(em, a.cs_res, path, dict(attrs, month_factor=fac[min(m, len(fac) - 1)]), f'{yy}-{mm:02d}-01T00:00:00')
+            write_cs(em, a.cs_res, path, dict(attrs, month_factor=fac[min(max(m, 0), len(fac) - 1)]), f'{yy}-{mm:02d}-01T00:00:00')
             print(f'{path}: E min={em.min():.4f} max={em.max():.4f} mean={em.mean():.4f}'
-                  + ('   (boundary month = copy of the last)' if m == len(fac) else ''))
+                  + ('   (boundary month, copy)' if m < 0 or m >= len(fac) else ''))
         return
     if not a.out:
         sys.exit('give --out or --out-dir')
