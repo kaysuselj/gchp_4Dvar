@@ -94,6 +94,9 @@ def main():
     parser.add_argument('--state-file', default=None)
     parser.add_argument('--grid', choices=['latlon', 'cs'], default='latlon')
     parser.add_argument('--cs-res', type=int, default=24, help='C{im} for --grid cs')
+    parser.add_argument('--n-fields', type=int, default=1,
+                        help='control fields stacked in the state (DEV3: 2 = TER, ocean); this call writes --field')
+    parser.add_argument('--field', type=int, default=1, help='1-based index of the field written to --sigma-dir')
     parser.add_argument('--nlat',       type=int, default=46)
     parser.add_argument('--nlon',       type=int, default=72)
     parser.add_argument('--year',       type=int, default=2016)
@@ -118,7 +121,7 @@ def main():
     else:
         writer = None
     nmon = args.n_months
-    n = nmon * nlat * nlon
+    n = args.n_fields * nmon * nlat * nlon
     lats, lons = make_latlon_grid(nlat, nlon)
 
     if args.const_per_month:
@@ -136,7 +139,7 @@ def main():
         if x.size != n:
             raise SystemExit(f'state x_next has {x.size} elements, expected {n} '
                              f'({nmon}x{nlat}x{nlon})')
-        sigma = x.reshape(nmon, nlat, nlon)
+        sigma = x.reshape(args.n_fields, nmon, nlat, nlon)[args.field - 1]
         it = int(state['iteration'])
     else:
         sigma = np.ones((nmon, nlat, nlon))

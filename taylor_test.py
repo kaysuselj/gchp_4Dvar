@@ -7,7 +7,8 @@ analyze : J_obs(x0 + eps d) - J_obs(x0) against eps g^T d for all eps directorie
 x0, J_obs(x0) and g = dJ_obs/dsigma come from the iteration-1 state of the optimizer (x_prev, J_obs_prev,
 g_prev; at sigma = 1 the background term and its gradient are 0, which is checked). Directions d:
   grad       d = -g / max|g|          (largest sigma change = eps)
-  month:<k>  monthly control: d = -g in month k (1-based), 0 elsewhere, / max|.|
+  month:<k>  monthly control: d = -g in month k (1-based; every field), 0 elsewhere, / max|.|
+  field:<f>  two-field control (DEV3, 1 = TER, 2 = ocean): d = -g in field f, 0 elsewhere, / max|.|
   rand:<s>   d = N(0,1) field (seed s) / max|.|
 """
 import argparse, glob, os, re
@@ -22,16 +23,23 @@ def load(state):
     return x0, g, j0
 
 
-def direction(g, dirn, nmon, monthly):
+def direction(g, dirn, nmon, monthly, nfld=1):
     if dirn == 'grad':
         d = -g.copy()
     elif dirn.startswith('month'):
         if not monthly:
             raise SystemExit('month:<k> needs a monthly control')
         k = int(re.sub(r'\D', '', dirn)) - 1
-        d = np.zeros_like(g)
-        blk = g.size // nmon
-        d[k * blk:(k + 1) * blk] = -g[k * blk:(k + 1) * blk]
+        d = np.zeros_like(g).reshape(nfld, nmon, -1)
+        d[:, k] = -g.reshape(nfld, nmon, -1)[:, k]
+        d = d.ravel()
+    elif dirn.startswith('field'):
+        f = int(re.sub(r'\D', '', dirn)) - 1
+        if not 0 <= f < nfld:
+            raise SystemExit(f'{dirn}: the control has {nfld} field(s)')
+        d = np.zeros_like(g).reshape(nfld, -1)
+        d[f] = -g.reshape(nfld, -1)[f]
+        d = d.ravel()
     elif dirn.startswith('rand'):
         d = np.random.default_rng(int(re.sub(r'\D', '', dirn) or 1)).standard_normal(g.size)
     else:
@@ -41,7 +49,7 @@ def direction(g, dirn, nmon, monthly):
 
 def cmd_point(a):
     x0, g, _ = load(a.state)
-    d = direction(g, a.dirn, a.nmon, a.monthly)
+    d = direction(g, a.dirn, a.nmon, a.monthly, a.nfld)
     x = x0 + a.eps * d
     np.savez(a.out, x_next=x, iteration=np.int64(0))
     print(f'x = x0 + {a.eps:g} d ({a.dirn}): sigma {x.min():.6f} .. {x.max():.6f}')
@@ -56,10 +64,10 @@ def cmd_analyze(a):
         if not os.path.isfile(jf):
             continue
         dirn, eps = os.path.basename(w).rsplit('_', 1)
-        dirn = re.sub(r'^month(\d)', r'month:\1', re.sub(r'^rand(\d)', r'rand:\1', dirn))
+        dirn = re.sub(r'^(month|rand|field)(\d)', r'\1:\2', dirn)
         rows.setdefault(dirn, []).append((float(eps), float(open(jf).read().split()[0])))
     for dirn, lst in rows.items():
-        d = direction(g, dirn, a.nmon, a.monthly)
+        d = direction(g, dirn, a.nmon, a.monthly, a.nfld)
         gd = float(g @ d)
         out.append(f'--- direction {dirn}:  g^T d = {gd:.6e}')
         out.append(f'{"eps":>10s} {"J_obs(x0+eps d)":>18s} {"dJ":>14s} {"eps g^T d":>14s} {"ratio":>10s} {"resid/eps^2":>14s}')
@@ -76,7 +84,9 @@ sub = p.add_subparsers(dest='cmd', required=True)
 q = sub.add_parser('point'); q.add_argument('--state', required=True); q.add_argument('--dirn', default='grad')
 q.add_argument('--eps', type=float, required=True); q.add_argument('--out', required=True)
 q.add_argument('--nmon', type=int, default=3); q.add_argument('--monthly', type=int, default=0)
+q.add_argument('--nfld', type=int, default=1)
 q = sub.add_parser('analyze'); q.add_argument('--exp', required=True); q.add_argument('--state', required=True)
 q.add_argument('--nmon', type=int, default=3); q.add_argument('--monthly', type=int, default=0)
+q.add_argument('--nfld', type=int, default=1)
 a = p.parse_args()
 {'point': cmd_point, 'analyze': cmd_analyze}[a.cmd](a)

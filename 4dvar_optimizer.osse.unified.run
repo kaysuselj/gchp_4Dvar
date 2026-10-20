@@ -165,6 +165,14 @@ run_phase_148() {
 #  Mode
 # ============================================================
 MODE=${MODE:-annual}
+# Control fields (DEV3, monthly mode only): 1 = TER sigma; 2 = TER sigma + ocean sigma (second adjoint flux
+# sensitivity SurfaceFluxAdj2_CO2, ocean prior error ../prior_err_ocean_monthly, sigma ../sigma_ocean_monthly)
+N_FIELDS=${N_FIELDS:-1}
+case "${N_FIELDS}" in
+    1) ADJ_FIELDS="SurfaceFluxAdj_CO2" ;;
+    2) ADJ_FIELDS="SurfaceFluxAdj_CO2,SurfaceFluxAdj2_CO2" ;;
+    *) echo "N_FIELDS must be 1 or 2"; exit 1 ;;
+esac
 # GCHP_VERSION: 14.5.3 (default; runConfig_*.sh run dirs, MAPL track_file sampler) or 14.8
 # (setCommonRunSettings run dirs with runConfig_*.sh shims, offline satellite sampler in
 # post_forward.sh, finalize-abort tolerance in assert_gchp_ok).
@@ -406,7 +414,7 @@ EST_MONTH_ADJ_S=${EST_MONTH_ADJ_S:-1200} # ~20 min/mo adjoint budget (measured ~
 EST_FORWARD_S=${EST_FORWARD_S:-$(( NMON * EST_MONTH_FWD_S ))}
 EST_ADJOINT_S=${EST_ADJOINT_S:-$(( NMON * EST_MONTH_ADJ_S ))}
 
-VPASS="MODE=${MODE},MAX_ITER=${MAX_ITER},SIGMA_B=${SIGMA_B},SIGMA_MIN=${SIGMA_MIN},SIGMA_MAX=${SIGMA_MAX},GTOL=${GTOL},FTOL=${FTOL}"
+VPASS="MODE=${MODE},N_FIELDS=${N_FIELDS},MAX_ITER=${MAX_ITER},SIGMA_B=${SIGMA_B},SIGMA_MIN=${SIGMA_MIN},SIGMA_MAX=${SIGMA_MAX},GTOL=${GTOL},FTOL=${FTOL}"
 VPASS="${VPASS},T_START=${T_START},T_END=${T_END}"
 VPASS="${VPASS},SAVE_DIAG=${SAVE_DIAG},NLAT=${NLAT},NLON=${NLON},CHAIN=${CHAIN}"
 VPASS="${VPASS},MAX_CHAIN=${MAX_CHAIN},WALLTIME_S=${WALLTIME_S},WALLTIME_MARGIN_S=${WALLTIME_MARGIN_S}"
@@ -510,6 +518,13 @@ else
     log "WARNING: ${SCRIPT_DIR}/check_adjoint_flux_config.py not found, adjoint flux config not checked"
 fi
 # OSSE prior error E (read as ../prior_err_co2.nc4 from the run dirs = the work tree; monthly: ../prior_err_monthly/)
+if [ "${N_FIELDS}" -eq 2 ]; then
+    [ "${MODE}" = monthly ] || die "N_FIELDS=2 (ocean control) needs MODE=monthly"
+    [ -d "${WORK_DIR}/prior_err_ocean_monthly" ] || die "N_FIELDS=2 but ${WORK_DIR}/prior_err_ocean_monthly is missing"
+    grep -q '^ADJ_HEMCO_SFLUX2_DIAGN:' "${ADJ_DIR}/GCHP.rc" || die "N_FIELDS=2 but the adjoint GCHP.rc has no ADJ_HEMCO_SFLUX2_DIAGN"
+    grep -q "SurfaceFluxAdj2_CO2" "${ADJ_DIR}/HISTORY.rc" || die "N_FIELDS=2 but the adjoint HISTORY.rc does not write SurfaceFluxAdj2_CO2"
+    log "control: 2 fields (TER, ocean), ocean prior error ${WORK_DIR}/prior_err_ocean_monthly"
+fi
 if grep -q '^[^#]*prior_err_monthly/' "${FWD_DIR}/HEMCO_Config.rc"; then
     [ -d "${WORK_DIR}/prior_err_monthly" ] || die "HEMCO uses the monthly prior error E but ${WORK_DIR}/prior_err_monthly is missing (make_prior_err.py --out-dir)"
     log "prior error E (monthly): ${WORK_DIR}/prior_err_monthly"
@@ -828,14 +843,19 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
 
         if [ "${MODE}" = "monthly" ]; then
             log "[iter ${CUR_ITER}] Writing ${NMON} monthly sigma files (+1 boundary)"
-            python3 "${SCRIPT_DIR}/write_sigma_monthly.py" \
-                --sigma-dir  "${SIGMA_DIR}" \
-                --state-file "${STATE_FILE}" \
-                --nlat "${NLAT}" --nlon "${NLON}" \
-                --grid "${GRID}" --cs-res "${CS_RES}" \
-                --year "${T_START:0:4}" \
-                --n-months "${NMON}" --start-month "${START_MONTH}" \
-                || die "write_sigma_monthly.py failed"
+            # N_FIELDS=2 (DEV3): field 1 = TER sigma (sigma_monthly/), field 2 = ocean sigma (sigma_ocean_monthly/)
+            for _fld in $(seq 1 "${N_FIELDS}"); do
+                _sdir="${SIGMA_DIR}"; [ "${_fld}" -eq 2 ] && _sdir="${WORK_DIR}/sigma_ocean_monthly"
+                python3 "${SCRIPT_DIR}/write_sigma_monthly.py" \
+                    --sigma-dir  "${_sdir}" \
+                    --state-file "${STATE_FILE}" \
+                    --nlat "${NLAT}" --nlon "${NLON}" \
+                    --grid "${GRID}" --cs-res "${CS_RES}" \
+                    --n-fields "${N_FIELDS}" --field "${_fld}" \
+                    --year "${T_START:0:4}" \
+                    --n-months "${NMON}" --start-month "${START_MONTH}" \
+                    || die "write_sigma_monthly.py failed (field ${_fld})"
+            done
         else
             log "[iter ${CUR_ITER}] Writing sigma_co2_osse.nc4 (grid=${GRID})"
             python3 "${SCRIPT_DIR}/write_sigma.py" \
@@ -995,6 +1015,7 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
                 --adj-output  "${ADJ_DIR}/OutputDir" \
                 --nlat "${NLAT}" --nlon "${NLON}" \
                 --grid "${GRID}" --cs-res "${CS_RES}" \
+                --fields "${ADJ_FIELDS}" \
                 --archive-dir "${OUTPUT_DIR}" \
                 --n-months "${NMON}" \
                 --sigma-b "${SIGMA_B}" \

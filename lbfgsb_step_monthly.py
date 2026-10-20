@@ -104,7 +104,7 @@ def month_boundaries(t_start, t_end, nmon=NMON):
 CS_IM = None      # set by --grid cs: SurfaceFluxAdj is read on the native C{im} grid (6, im, im) -> (6*im, im)
 
 
-def read_boundary_accumulators(adj_output_dir, boundaries, nlat, nlon):
+def read_boundary_accumulators(adj_output_dir, boundaries, nlat, nlon, var='SurfaceFluxAdj_CO2'):
     """
     Read SurfaceFluxAdj_CO2 at each boundary time, exactly.
 
@@ -134,7 +134,7 @@ def read_boundary_accumulators(adj_output_dir, boundaries, nlat, nlon):
                 hits = np.where(times == t)[0]
                 if hits.size == 0:
                     continue
-                da = ds['SurfaceFluxAdj_CO2'].isel(time=int(hits[0]))
+                da = ds[var].isel(time=int(hits[0]))
                 if CS_IM is not None:     # native cubed sphere, stacked like write_sigma_cs: (6, im, im) -> (6*im, im)
                     v = np.squeeze(da.values)
                     if v.shape not in ((6, CS_IM, CS_IM), (6 * CS_IM, CS_IM)):
@@ -216,10 +216,10 @@ def print_balance_diagnostics(J_obs, J_b, g_obs, g_b, n_obs, n_ctrl):
               f'{np.sqrt((g_obs**2).mean())/gb_rms:.1f}')
 
 
-def monthly_obs_gradient(adj_output_dir, t_start, t_end, nlat, nlon, nmon=NMON):
+def monthly_obs_gradient(adj_output_dir, t_start, t_end, nlat, nlon, nmon=NMON, var='SurfaceFluxAdj_CO2'):
     """g_obs as (nmon*nlat*nlon,) via boundary differencing, with guards."""
     boundaries = month_boundaries(t_start, t_end, nmon)
-    A = read_boundary_accumulators(adj_output_dir, boundaries, nlat, nlon)
+    A = read_boundary_accumulators(adj_output_dir, boundaries, nlat, nlon, var)
 
     # Guard 1: the accumulator is exactly 0 at t_end by construction.
     a_end   = np.abs(A[-1]).max()
@@ -508,6 +508,9 @@ def main():
     parser.add_argument('--grid', choices=['latlon', 'cs'], default='latlon',
                         help='cs: native cubed-sphere control (6*im x im per month), as write_sigma_monthly.py --grid cs')
     parser.add_argument('--cs-res', type=int, default=24)
+    parser.add_argument('--fields', default='SurfaceFluxAdj_CO2',
+                        help='comma-separated adjoint flux sensitivities, one control field each, stacked in this order '
+                             '(DEV3: SurfaceFluxAdj_CO2,SurfaceFluxAdj2_CO2 = TER, ocean); all with the same sigma_b')
     parser.add_argument('--nlat',    type=int,   default=46)
     parser.add_argument('--nlon',    type=int,   default=72)
     parser.add_argument('--n-months', type=int,  default=NMON,
@@ -554,7 +557,9 @@ def main():
         print(f'  grid cs: native C{CS_IM}, control (n-months, 6*{CS_IM}, {CS_IM})')
 
     nmon = args.n_months
-    n = nmon * args.nlat * args.nlon
+    fields = [f for f in args.fields.split(',') if f]
+    nfld = len(fields)
+    n = nfld * nmon * args.nlat * args.nlon
     m = args.m
 
     history_csv = args.history_csv or os.path.join(
@@ -581,7 +586,7 @@ def main():
         it      = int(state['iteration'])
         if x_cur.size != n:
             print(f'ERROR: state x_next has {x_cur.size} elements, expected '
-                  f'{n} ({nmon}x{args.nlat}x{args.nlon}) — state file from a '
+                  f'{n} ({nfld}x{nmon}x{args.nlat}x{args.nlon}) — state file from a '
                   'different (non-monthly?) experiment', file=sys.stderr)
             sys.exit(2)
         if 'x_anchor' in keys:                # new-format state
@@ -626,9 +631,15 @@ def main():
     # ------------------------------------------------------------------
     try:
         J_obs = read_J_obs(args.forcing_dir)
-        g_obs, A_bnd, boundaries = monthly_obs_gradient(
-            args.adj_output, args.t_start, args.t_end,
-            args.nlat, args.nlon, nmon)
+        parts, A_parts = [], []
+        for var in fields:                      # one control field per adjoint flux sensitivity, stacked
+            print(f'  control field {len(parts) + 1}/{nfld}: {var}')
+            g_k, A_k, boundaries = monthly_obs_gradient(
+                args.adj_output, args.t_start, args.t_end,
+                args.nlat, args.nlon, nmon, var)
+            parts.append(g_k); A_parts.append(A_k)
+        g_obs = np.concatenate(parts)
+        A_bnd = A_parts[0]
     except Exception as exc:
         print(f'ERROR reading J / gradient: {exc}', file=sys.stderr)
         sys.exit(2)
@@ -650,7 +661,7 @@ def main():
     print_balance_diagnostics(J_obs, J_b, g_obs, g_b, n_obs, n)
 
     if args.archive_dir:
-        save_boundary_diagnostics(A_bnd, g_obs, boundaries, args.archive_dir,
+        save_boundary_diagnostics(A_bnd, g_obs[:nmon * args.nlat * args.nlon], boundaries, args.archive_dir,
                                   it, args.nlat, args.nlon)
 
     g_inf = float(np.abs(g_cur).max())
@@ -693,7 +704,7 @@ def main():
             np.savez(best_file, x_next=st['x_best'], J=np.float64(st['J_best']),
                      iteration=np.int64(st['it_best']),
                      nlat=np.int64(args.nlat), nlon=np.int64(args.nlon),
-                     nmon=np.int64(nmon),
+                     nmon=np.int64(nmon), fields=np.str_(args.fields),
                      start_month=np.int64(pd.Timestamp(args.t_start).month))
         except Exception as exc:
             print(f'  WARNING: could not write best-state file ({exc})')
@@ -723,6 +734,7 @@ def main():
             nlat      = np.int64(args.nlat),
             nlon      = np.int64(args.nlon),
             nmon      = np.int64(nmon),
+            fields    = np.str_(args.fields),
             start_month = np.int64(pd.Timestamp(args.t_start).month),
             # step-control / anchor / best
             x_anchor  = (st['x_anchor'] if st['x_anchor'] is not None else x_cur),
@@ -778,14 +790,16 @@ def main():
 
     # normal continue: deliver the trial point for the next forward
     dx_max = info.get('max_dx', float('nan'))
-    signx = x_next.reshape(nmon, args.nlat, args.nlon)
+    signx = x_next.reshape(nfld * nmon, args.nlat, args.nlon)
     print(f'          max|dx|={dx_max:.4e}  '
           f'sigma: min={x_next.min():.4f}  max={x_next.max():.4f}  '
           f'mean={x_next.mean():.4f}  at_bound={info.get("n_at_bound")}  '
           f'clipped={info.get("n_clipped")}')
-    for mm in range(nmon):
-        print(f'          sigma month {mm + 1:02d}: min={signx[mm].min():.4f}  '
-              f'max={signx[mm].max():.4f}  mean={signx[mm].mean():.4f}')
+    for kf in range(nfld):
+        for mm in range(nmon):
+            s = signx[kf * nmon + mm]
+            print(f'          sigma {fields[kf][:-4] if nfld > 1 else ""} month {mm + 1:02d}: min={s.min():.4f}  '
+                  f'max={s.max():.4f}  mean={s.mean():.4f}')
 
     _save_state(x_next, converged=False)
     print(f'  State saved → {args.state_file}')

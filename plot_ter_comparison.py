@@ -181,6 +181,9 @@ def main():
     it_best  = int(st['it_best']) if 'it_best' in st.files else int(st['iteration'])
     iter_tag = args.iter_label if args.iter_label else str(it_best)
     ncell    = NF * cs_res * cs_res
+    nfld     = len(str(st['fields']).split(',')) if 'fields' in st.files else 1
+    if nfld > 1:                                               # DEV3: field 1 = TER sigma, then ocean sigma
+        x_best = x_best[:x_best.size // nfld]
     if x_best.size != ncell:                                   # monthly control: one figure per month
         nmon = x_best.size // ncell
         if nmon * ncell != x_best.size or nmon != len(keep_idx):

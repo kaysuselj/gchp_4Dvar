@@ -13,7 +13,8 @@
 # With a correct adjoint ratio(eps) -> 1 as eps -> 0, and the residual / eps^2 is constant (J_obs is
 # nearly quadratic in sigma). Each eps = one forward of the experiment's own run directory (same binary,
 # control files, sampling and J computation as the optimizer), in <EXP>/taylor/<DIR>_<eps>/.
-#   EXP=<experiment dir>  [DIRN=grad | month:<k> (monthly control, gradient of month k only) | rand:<seed>]
+#   EXP=<experiment dir>  [DIRN=grad | month:<k> (monthly control, gradient of month k only) | rand:<seed>
+#                          | field:<f> (two-field control: 1 = TER, 2 = ocean only)]
 #   [EPSLIST=1e-1:3e-2:1e-2:3e-3]  [STATE=<EXP>/4dvar_output_osse/4dvar_state_iter001.npz]
 #   qsub -v EXP=...,DIRN=grad taylor_test.pbs   (nodes: as the experiment; select must match its runConfig)
 #   then: python3 taylor_test.py analyze --exp <EXP>   (also run at the end of the job)
@@ -35,8 +36,13 @@ SEMI=$(sed -n 's/^SEMI_OBS_FILE="${SEMI_OBS_FILE:-\(.*\)}"$/\1/p' "${RUNF}" | he
 NCORES=$(awk -F= '/^TOTAL_CORES=/{print $2}' "${EXP}/forward_run/runConfig_forward.sh")
 CS_RES=$(awk -F'[[:space:]:]+' '/^GCHP.IM_WORLD/{print $2}' "${EXP}/forward_run/GCHP.rc")
 MONTHLY=0; [ -d "${EXP}/prior_err_monthly" ] && MONTHLY=1
+NFLD=1; [ -d "${EXP}/prior_err_ocean_monthly" ] && NFLD=2
 T_START=2016-01-01; T_END=2016-04-01; NMON=3
-log "Taylor test ${EXP}  dir ${DIRN}  eps ${EPSLIST}  C${CS_RES} ${NCORES} cores  monthly ${MONTHLY}  state ${STATE}"
+if [ "${MONTHLY}" = 1 ]; then      # window length from the state: n = NFLD * NMON * 6 * CS_RES^2 (12 months = 2016)
+    NMON=$(${PY} -I -c "import numpy as np,sys;print(np.load(sys.argv[1])['x_prev'].size//(${NFLD}*6*${CS_RES}**2))" "${STATE}")
+    case "${NMON}" in 3) ;; 12) T_END=2017-01-01 ;; *) die "unexpected window of ${NMON} months" ;; esac
+fi
+log "Taylor test ${EXP}  dir ${DIRN}  eps ${EPSLIST}  C${CS_RES} ${NCORES} cores  monthly ${MONTHLY} (${NMON} months, ${NFLD} field(s))  state ${STATE}"
 
 for E in $(echo "${EPSLIST}" | tr ':' ' '); do
     W="${EXP}/taylor/${DIRN//:/}_${E}"
@@ -49,13 +55,18 @@ for E in $(echo "${EPSLIST}" | tr ':' ' '); do
     rsync -a --exclude='OutputDir/*' --exclude='gcadj_*' --exclude='Restarts/gcchem_internal_checkpoint*' \
           --exclude='gchp.log' "${EXP}/forward_run/" "${W}/forward_run/"
     if [ "${MONTHLY}" = 1 ]; then ln -sfn "${EXP}/prior_err_monthly" "${W}/prior_err_monthly"
+        [ "${NFLD}" = 2 ] && ln -sfn "${EXP}/prior_err_ocean_monthly" "${W}/prior_err_ocean_monthly"
     else ln -sfn "${EXP}/prior_err_co2.nc4" "${W}/prior_err_co2.nc4"; fi
     # sigma = x0 + eps d, written by the optimizer's own writers
     ${PY} -I "${G}/taylor_test.py" point --state "${STATE}" --dirn "${DIRN}" --eps "${E}" --nmon ${NMON} \
-        --monthly ${MONTHLY} --out "${W}/state_x.npz"
+        --monthly ${MONTHLY} --nfld ${NFLD} --out "${W}/state_x.npz"
     if [ "${MONTHLY}" = 1 ]; then
-        ${PY} -I "${G}/write_sigma_monthly.py" --grid cs --cs-res "${CS_RES}" --sigma-dir "${W}/sigma_monthly" \
-            --state-file "${W}/state_x.npz" --year 2016 --n-months ${NMON} --start-month 1 | tail -1
+        for F in $(seq 1 ${NFLD}); do
+            SD="${W}/sigma_monthly"; [ "${F}" = 2 ] && SD="${W}/sigma_ocean_monthly"
+            ${PY} -I "${G}/write_sigma_monthly.py" --grid cs --cs-res "${CS_RES}" --sigma-dir "${SD}" \
+                --state-file "${W}/state_x.npz" --year 2016 --n-months ${NMON} --start-month 1 \
+                --n-fields ${NFLD} --field ${F} | tail -1
+        done
     else
         ${PY} -I "${G}/write_sigma.py" --grid cs --cs-res "${CS_RES}" --sigma-file "${W}/sigma_co2_osse.nc4" \
             --state-file "${W}/state_x.npz" --t-start "${T_START}" | tail -1
@@ -86,5 +97,5 @@ for E in $(echo "${EPSLIST}" | tr ':' ' '); do
     log "eps ${E}: J_obs = $(cat ${W}/J_value.txt)"
     cd "${EXP}"
 done
-${PY} -I "${G}/taylor_test.py" analyze --exp "${EXP}" --state "${STATE}" --nmon ${NMON} --monthly ${MONTHLY} | tee "${EXP}/taylor/report.txt"
+${PY} -I "${G}/taylor_test.py" analyze --exp "${EXP}" --state "${STATE}" --nmon ${NMON} --monthly ${MONTHLY} --nfld ${NFLD} | tee "${EXP}/taylor/report.txt"
 log "DONE"
