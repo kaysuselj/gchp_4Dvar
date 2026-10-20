@@ -497,6 +497,14 @@ mkdir -p "${FORCING_DIR}" "${OUTPUT_DIR}" "${ADJ_DIR}/Restarts" "${FWD_DIR}/Rest
 rsync -a "${CTRL_FWD_DIR}/" "${FWD_DIR}/"
 rsync -a "${CTRL_ADJ_DIR}/" "${ADJ_DIR}/"
 log "Control files synced to run directories"
+# GCHP_BIN (set by setup_exp.sh since 2026-10-20): one binary for every run (RW/DL = ADV_ADJ_METHOD in the adjoint
+# GCHP.rc, ocean field = ADJ_HEMCO_SFLUX2_DIAGN) instead of the control set's own gchp link.
+GCHP_BIN="${GCHP_BIN:-}"
+if [ -n "${GCHP_BIN}" ]; then
+    [ -x "${GCHP_BIN}" ] || die "GCHP_BIN=${GCHP_BIN} is not an executable"
+    ln -sfn "${GCHP_BIN}" "${FWD_DIR}/gchp"; ln -sfn "${GCHP_BIN}" "${ADJ_DIR}/gchp"
+    log "GCHP binary (GCHP_BIN): ${GCHP_BIN}"
+fi
 
 # Since the MAPL step_reverse fix (binary gchp.ref_20261014 and later) the adjoint must
 # read met with the FORWARD time offsets; the old one-step-shifted adjoint ExtData.rc
