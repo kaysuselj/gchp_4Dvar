@@ -238,12 +238,12 @@ def main():
 
     ds_out['xco2_truth'].attrs.update(
         units='ppm', long_name='Truth xCO2 from GCHP default run + OCO-2 AK')
-    ds_out['xco2_l2'].attrs.update(
-        units='ppm', long_name='ORCHIDEE-ECCO2 L2# pseudo-obs xCO2')
-    ds_out['xco2_apriori'].attrs.update(
-        units='ppm', long_name='OCO-2 L2# xCO2 a priori')
-    ds_out['xco2_uncertainty'].attrs.update(
-        units='ppm', long_name='OCO-2 L2# xCO2 observation uncertainty')
+    ds_out['xco2_l2'].attrs.update(                      # stored as in the L2# files (mol/mol); fixed label 2026-10-21
+        units='mol/mol', long_name='ORCHIDEE-ECCO2 L2# pseudo-obs xCO2')
+    ds_out['xco2_apriori'].attrs.update(                      # stored as in the L2# files (mol/mol); fixed label 2026-10-21
+        units='mol/mol', long_name='OCO-2 L2# xCO2 a priori')
+    ds_out['xco2_uncertainty'].attrs.update(                      # stored as in the L2# files (mol/mol); fixed label 2026-10-21
+        units='mol/mol', long_name='OCO-2 L2# xCO2 observation uncertainty')
     ds_out.attrs['description'] = (
         'OSSE semi-observations: GCHP default CO2 + OCO-2 averaging kernel. '
         f'Period {args.t_start} to {args.t_end}.')
