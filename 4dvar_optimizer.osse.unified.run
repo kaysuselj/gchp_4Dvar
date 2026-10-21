@@ -355,6 +355,7 @@ SIGMA_MAX=${SIGMA_MAX:-3.0}              # upper bound for sigma (sanity cap)
 MAX_ITER=${MAX_ITER:-20}                 # GLOBAL iteration cap across all chained jobs
 GTOL=${GTOL:-1e-5}
 FTOL=${FTOL:-1e-8}
+PLATEAU_N=${PLATEAU_N:-1}               # stop when |dJ/J| < FTOL on PLATEAU_N consecutive accepted steps (OSSE rule 2026-10-21: FTOL 0.005, PLATEAU_N 3, MAX_ITER 20)
 # PLOT_EVERY: per-iteration plots (pipeline, emissions, TER) only every N iterations, plus
 # iteration 1, convergence and the end (default 1 = every iteration). Data archives are unaffected.
 PLOT_EVERY=${PLOT_EVERY:-1}
@@ -414,7 +415,7 @@ EST_MONTH_ADJ_S=${EST_MONTH_ADJ_S:-1200} # ~20 min/mo adjoint budget (measured ~
 EST_FORWARD_S=${EST_FORWARD_S:-$(( NMON * EST_MONTH_FWD_S ))}
 EST_ADJOINT_S=${EST_ADJOINT_S:-$(( NMON * EST_MONTH_ADJ_S ))}
 
-VPASS="MODE=${MODE},N_FIELDS=${N_FIELDS},MAX_ITER=${MAX_ITER},SIGMA_B=${SIGMA_B},SIGMA_MIN=${SIGMA_MIN},SIGMA_MAX=${SIGMA_MAX},GTOL=${GTOL},FTOL=${FTOL}"
+VPASS="MODE=${MODE},N_FIELDS=${N_FIELDS},MAX_ITER=${MAX_ITER},SIGMA_B=${SIGMA_B},SIGMA_MIN=${SIGMA_MIN},SIGMA_MAX=${SIGMA_MAX},GTOL=${GTOL},FTOL=${FTOL},PLATEAU_N=${PLATEAU_N}"
 VPASS="${VPASS},T_START=${T_START},T_END=${T_END}"
 VPASS="${VPASS},SAVE_DIAG=${SAVE_DIAG},NLAT=${NLAT},NLON=${NLON},CHAIN=${CHAIN}"
 VPASS="${VPASS},MAX_CHAIN=${MAX_CHAIN},WALLTIME_S=${WALLTIME_S},WALLTIME_MARGIN_S=${WALLTIME_MARGIN_S}"
@@ -1029,7 +1030,7 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
                 --sigma-b "${SIGMA_B}" \
                 --sigma-min "${SIGMA_MIN}" --sigma-max "${SIGMA_MAX}" \
                 --t-start "${T_START}" --t-end "${T_END}" \
-                --gtol "${GTOL}" --ftol "${FTOL}" \
+                --gtol "${GTOL}" --ftol "${FTOL}" --plateau-n "${PLATEAU_N}" \
                 || rc=$?
         else
             python3 "${SCRIPT_DIR}/lbfgsb_step.py" \
@@ -1041,7 +1042,7 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
                 --sigma-b "${SIGMA_B}" \
                 --sigma-min "${SIGMA_MIN}" --sigma-max "${SIGMA_MAX}" \
                 --t-start "${T_START}" \
-                --gtol "${GTOL}" --ftol "${FTOL}" \
+                --gtol "${GTOL}" --ftol "${FTOL}" --plateau-n "${PLATEAU_N}" \
                 || rc=$?
         fi
 

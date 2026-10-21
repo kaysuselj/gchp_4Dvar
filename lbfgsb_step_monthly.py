@@ -302,6 +302,20 @@ HISTORY_FIELDS = [
 ]
 
 
+def previous_accepted_dJ_rel(csv_path, n):
+    """dJ_rel of the last n accepted steps in the history CSV (oldest first); [] if n <= 0 or unreadable."""
+    if n <= 0:
+        return []
+    try:
+        import csv
+        with open(csv_path) as f:
+            vals = [float(r['dJ_rel']) for r in csv.DictReader(f)
+                    if r.get('action') == 'accept' and r.get('dJ_rel') not in ('', 'nan', None)]
+        return vals[-n:]
+    except Exception:
+        return []
+
+
 def append_history(csv_path, row):
     """Append one diagnostics row (dict keyed by HISTORY_FIELDS) to csv_path,
     writing the header first if the file does not yet exist.  Best-effort: a
@@ -532,6 +546,9 @@ def main():
                         help='Convergence: max |grad| threshold')
     parser.add_argument('--ftol',    type=float, default=1e-8,
                         help='Convergence: relative |dJ/J| threshold (accepted steps)')
+    parser.add_argument('--plateau-n', type=int, default=1,
+                        help='stop only when |dJ/J| < ftol on this many CONSECUTIVE accepted steps '
+                             '(1 = classic ftol; 3 with ftol 0.005 = the 2026-10-21 OSSE rule)')
     parser.add_argument('--c1',      type=float, default=1e-4,
                         help='Armijo sufficient-decrease constant for the '
                              'backtracking line search')
@@ -758,7 +775,14 @@ def main():
     elif info.get('action') == 'accept' and np.isfinite(J_anchor_pre):
         dJ_rel = abs(J_cur - J_anchor_pre) / max(abs(J_cur), 1.0)
         if dJ_rel < args.ftol:
-            stop_reason = f'|dJ/J|={dJ_rel:.4e} < ftol={args.ftol}'
+            prev = previous_accepted_dJ_rel(history_csv, args.plateau_n - 1)
+            if len(prev) == args.plateau_n - 1 and all(v < args.ftol for v in prev):
+                stop_reason = (f'|dJ/J|={dJ_rel:.4e} < ftol={args.ftol}' + (
+                    f' on {args.plateau_n} consecutive accepted steps (previous: '
+                    + ', '.join(f'{v:.4e}' for v in prev) + ')' if args.plateau_n > 1 else ''))
+            else:
+                print(f'          |dJ/J|={dJ_rel:.4e} < ftol={args.ftol}, but not yet on {args.plateau_n} '
+                      f'consecutive accepted steps (previous: {", ".join(f"{v:.4e}" for v in prev) or "-"}): continue')
 
     # diagnostics CSV row (best-effort).  sigma_* describe the EVALUATED iterate
     # x_cur (the sigma this row's J/g correspond to); sigma_prop_max is the max of
