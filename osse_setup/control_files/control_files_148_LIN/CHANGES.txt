@@ -1,0 +1,1 @@
+2026-10-20 10:46:28 O10: linear advection hord_tr 2 / kord_tr 17 in truth, forward and adjoint (input.nml block, re-activated by the runConfig shims after setCommonRunSettings). truth = control_files_148/truth, forward/adjoint = control_files_148_ckpt_reduced_DL (DL, reduced checkpoints)

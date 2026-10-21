@@ -15,7 +15,7 @@ EXCL=(--no-links --exclude='*.nc4' --exclude='*.nc' --exclude='*.log' --exclude=
 # scripts
 mkdir -p "${DST}/scripts" "${DST}/truth" "${DST}/fd_check"
 for f in setup_exp.sh make_ctrl148.sh make_ctrl148_c48.sh SPEEDUP_REPORT.md; do cp -p "${SRC}/${f}" "${DST}/scripts/"; done
-cp -p "${SRC}/truth148/run_truth148.pbs" "${SRC}/truth148_c48/run_truth148_c48.pbs" "${DST}/truth/"
+cp -p "${SRC}/truth148/run_truth148.pbs" "${SRC}/truth148_c48/run_truth148_c48.pbs" "${SRC}/truth148_lin/run_truth148_lin.pbs" "${SRC}/truth148_2016/run_truth148_2016.pbs" "${DST}/truth/"
 cp -p "${SRC}/fd_check/run_fd148.pbs" "${SRC}/fd_check/compare_fd.py" "${SRC}/fd_check/cells_E1.3.txt" "${DST}/fd_check/"
 
 # control-file sets
