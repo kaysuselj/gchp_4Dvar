@@ -29,6 +29,9 @@ STATE="${STATE:-${EXP}/4dvar_output_osse/4dvar_state_iter001.npz}"
 set +eu; source /home5/ksuselj1/nobackup/gchp_14.8.0_adj/gchp_14.8.0_env.sh >/dev/null 2>&1; set -eu
 PY="/nobackup/ksuselj1/envs/gchp_4dvar/bin/python3"
 mkdir -p "${EXP}/taylor"
+# one Taylor job per experiment and direction at a time (2026-10-21: two copies in one directory destroyed each other's runs)
+LOCK="${EXP}/taylor/.lock_${DIRN//:/}"
+exec 9>"${LOCK}"; flock -n 9 || die "another Taylor job for ${EXP} dir ${DIRN} is running (${LOCK})"
 exec > >(tee -a "${EXP}/taylor/taylor_${DIRN//:/}.log") 2>&1
 RUNF=$(ls "${EXP}"/4dvar_optimizer.osse.*.run | head -1)
 SEMI=$(sed -n 's/^SEMI_OBS_FILE="${SEMI_OBS_FILE:-\(.*\)}"$/\1/p' "${RUNF}" | head -1)
