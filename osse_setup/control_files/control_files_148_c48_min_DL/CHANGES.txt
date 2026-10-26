@@ -1,0 +1,2 @@
+2026-10-20 09:44:49 copy of control_files_148_c48 with gchp.disc_20261020 + discrete_linear (fixer linearized, own halo adjoint)
+2026-10-25: copy of /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/control_files_148_c48_DL with ADJ_CKPT_REDUCED: 2 (fwd+adj), forward ADJ_CKPT_TRAJ: 1

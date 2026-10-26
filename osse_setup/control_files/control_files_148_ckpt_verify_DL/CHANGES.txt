@@ -1,0 +1,2 @@
+2026-10-20 09:00:00 binary -> gchp.disc_20261020 (own halo adjoint: DL correct on any layout); ADV_ADJ_HALO_AD own
+2026-10-25: copy of /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/control_files_148_ckpt_reduced_DL, adjoint ADJ_CKPT_VERIFY: 1 (compare recomputed PLE/DryPLE/DELP_DRY with the reduced checkpoint)

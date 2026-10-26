@@ -147,7 +147,7 @@ run_phase_148() {
         if [ "${try}" -eq 2 ]; then
             mv -f gchp.log gchp.log.stall1
             if [ "${ph}" = forward ]; then
-                rm -f gcadj_internal_checkpoint* gcadj_import_checkpoint*
+                rm -f gcadj_internal_checkpoint* gcadj_import_checkpoint* gcadj_checkpoint.*
                 [ -d OutputDir ] && find OutputDir -maxdepth 1 -type f -delete
             else
                 [ -d OutputDir ] && rm -f OutputDir/GEOSChem*
@@ -414,12 +414,16 @@ EST_MONTH_FWD_S=${EST_MONTH_FWD_S:-1800} # ~30 min/mo forward budget (measured ~
 EST_MONTH_ADJ_S=${EST_MONTH_ADJ_S:-1200} # ~20 min/mo adjoint budget (measured ~12)
 EST_FORWARD_S=${EST_FORWARD_S:-$(( NMON * EST_MONTH_FWD_S ))}
 EST_ADJOINT_S=${EST_ADJOINT_S:-$(( NMON * EST_MONTH_ADJ_S ))}
+# Plots (plot_4dvar + TER comparison, emissions comparison) also need budget: a job
+# that ran past its adjoint estimate was killed inside the plots and never chained
+# (O10_O4_LIN_DL 2026-10-24). Plots are skipped (logged) when they no longer fit.
+EST_PLOT_S=${EST_PLOT_S:-900}
 
 VPASS="MODE=${MODE},N_FIELDS=${N_FIELDS},MAX_ITER=${MAX_ITER},SIGMA_B=${SIGMA_B},SIGMA_MIN=${SIGMA_MIN},SIGMA_MAX=${SIGMA_MAX},GTOL=${GTOL},FTOL=${FTOL},PLATEAU_N=${PLATEAU_N}"
 VPASS="${VPASS},T_START=${T_START},T_END=${T_END}"
 VPASS="${VPASS},SAVE_DIAG=${SAVE_DIAG},NLAT=${NLAT},NLON=${NLON},CHAIN=${CHAIN}"
 VPASS="${VPASS},MAX_CHAIN=${MAX_CHAIN},WALLTIME_S=${WALLTIME_S},WALLTIME_MARGIN_S=${WALLTIME_MARGIN_S}"
-VPASS="${VPASS},EST_MONTH_FWD_S=${EST_MONTH_FWD_S},EST_MONTH_ADJ_S=${EST_MONTH_ADJ_S}"
+VPASS="${VPASS},EST_MONTH_FWD_S=${EST_MONTH_FWD_S},EST_MONTH_ADJ_S=${EST_MONTH_ADJ_S},EST_PLOT_S=${EST_PLOT_S}"
 VPASS="${VPASS},GRID=${GRID},EXP_NAME=${EXP_NAME},NODES=${NODES}"
 VPASS="${VPASS},SAT_TRACK_FILE=${SAT_TRACK_FILE},GCHP_VERSION=${GCHP_VERSION},PLOT_EVERY=${PLOT_EVERY}"
 VPASS="${VPASS},OBS_TYPE=${OBS_TYPE},OBS_MODE=${OBS_MODE}"
@@ -878,7 +882,7 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
 
         log "[iter ${CUR_ITER}] Forward GCHP — started (${DURATION_DAYS} days)"
         cd "${FWD_DIR}"
-        rm -f gcadj_internal_checkpoint* gcadj_import_checkpoint*
+        rm -f gcadj_internal_checkpoint* gcadj_import_checkpoint* gcadj_checkpoint.*
         [ -d OutputDir ] && find OutputDir -maxdepth 1 -type f -delete
         rm -f Restarts/gcchem_internal_checkpoint* cap_restart
 
@@ -897,15 +901,18 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
         log "[iter ${CUR_ITER}] Forward GCHP — done"
 
         archive_emissions
-        if plot_now; then plot_emissions_comparison; fi
+        if plot_now; then
+            if budget_ok "${EST_PLOT_S}"; then plot_emissions_comparison
+            else log "[iter ${CUR_ITER}] Walltime budget too short for emissions plots — skipped"; fi
+        fi
 
         # Move gcadj checkpoints forward -> adjoint (mv = rename, no copy).
         # find -exec avoids ARG_MAX on tens of thousands of checkpoint files.
         log "[iter ${CUR_ITER}] Moving checkpoints forward → adjoint"
         _nckpt=$(find . -maxdepth 1 \( -name 'gcadj_internal_checkpoint*' \
-                 -o -name 'gcadj_import_checkpoint*' \) | wc -l)
+                 -o -name 'gcadj_import_checkpoint*' -o -name 'gcadj_checkpoint.*' \) | wc -l)
         find . -maxdepth 1 \( -name 'gcadj_internal_checkpoint*' \
-             -o -name 'gcadj_import_checkpoint*' \) -exec mv -t "${ADJ_DIR}/" {} +
+             -o -name 'gcadj_import_checkpoint*' -o -name 'gcadj_checkpoint.*' \) -exec mv -t "${ADJ_DIR}/" {} +
         log "  Moved ${_nckpt} adjoint checkpoint file(s) → ${ADJ_DIR}/"
 
         _ckpt=$(ls Restarts/gcchem_internal_checkpoint* 2>/dev/null | head -1)
@@ -999,9 +1006,9 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
         # Free the consumed gcadj checkpoints (only after adjoint success, since a
         # redo of THIS phase needs them). find -delete avoids the ARG_MAX limit.
         _nrm=$(find . -maxdepth 1 \( -name 'gcadj_internal_checkpoint*' \
-               -o -name 'gcadj_import_checkpoint*' \) | wc -l)
+               -o -name 'gcadj_import_checkpoint*' -o -name 'gcadj_checkpoint.*' \) | wc -l)
         find . -maxdepth 1 \( -name 'gcadj_internal_checkpoint*' \
-             -o -name 'gcadj_import_checkpoint*' \) -delete
+             -o -name 'gcadj_import_checkpoint*' -o -name 'gcadj_checkpoint.*' \) -delete
         log "  Deleted ${_nrm} consumed gcadj checkpoint file(s)"
 
         cd "${BASE_DIR}"
@@ -1089,10 +1096,15 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
         log "  Restart command saved → ${_restart_cmd}"
 
         if plot_now || [ "${rc}" -eq 1 ]; then
-            make_plots
-            # After the optimizer step so the state file exists (iter 1) and
-            # x_best includes this iteration's evaluation.
-            plot_ter_comparison
+            if budget_ok "${EST_PLOT_S}"; then
+                make_plots
+                # After the optimizer step so the state file exists (iter 1) and
+                # x_best includes this iteration's evaluation.
+                plot_ter_comparison
+            else
+                # step_done is saved, so the next forward budget check resubmits.
+                log "[iter ${CUR_ITER}] Walltime budget too short for plots (${EST_PLOT_S}s) — skipped"
+            fi
         fi
 
         if [ "${rc}" -eq 1 ]; then

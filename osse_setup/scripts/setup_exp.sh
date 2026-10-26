@@ -48,6 +48,10 @@
 #                            gchp_4Dvar/make_noisy_obs.py adds seeded noise to the truth observations)
 #   --lin                    O10: linear advection (hord_tr 2 / kord_tr 17) in truth AND 4D-Var, DL adjoint (exact):
 #                            control_files_148_LIN, observations obs148_lin (truth148_lin/run_truth148_lin.pbs); C24 only
+#   --ckpt min|reduced       adjoint checkpoints (2026-10-25, v1.0-rc3): min (DEFAULT) = ADJ_CKPT_REDUCED 2, one file per step with
+#                            the CO2 after advection (+ CO2 before advection for DL), all other fields recomputed; bit-identical
+#                            to reduced, ~25 % faster. reduced = ADJ_CKPT_REDUCED 1 (the control sets used up to 2026-10-25)
+#   --ctrl <dir>             use this control set (<dir>/forward, <dir>/adjoint) instead of the one chosen by the options
 #   --dry-run                checks only
 #
 # Then:  cd exps/<name>; qsub 4dvar_optimizer.osse.<name>.run   (qsub -v MAX_ITER=..,SIGMA_B=.. to override)
@@ -57,12 +61,12 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 G4D="$(cd "${ROOT}/../gchp_4Dvar" && pwd)"
 TEMPLATE="${G4D}/4dvar_optimizer.osse.unified.run"
 # one binary for all new runs (user 2026-10-20): RW and DL (ADV_ADJ_METHOD) and the ocean field (ADJ_HEMCO_SFLUX2_DIAGN)
-GCHP_BIN="${GCHP_BIN:-/nobackupp27/ksuselj1/gchp_14.8.0_adj/code/build_disc/bin/gchp.ocn_20261020}"
+GCHP_BIN="${GCHP_BIN:-/nobackupp27/ksuselj1/gchp_14.8.0_adj/code/build_rc3/bin/gchp.rc3_20261025}"   # v1.0-rc3 (2026-10-25): DL trajectory fix + minimal checkpoints
 PYTHON_ENV="${PYTHON_ENV:-/nobackup/ksuselj1/envs/gchp_4dvar}"
 CTRL_FWD="${ROOT}/control_files/forward"
 CTRL_ADJ="${ROOT}/control_files/adjoint"
 
-NAME=""; PERR=""; PERR_FILE=""; OBS="satellite"; NODES=2; DRY=false; GV=14.8; FTOLX=""; PLOTX=""; RES=24; ADJ=rw; CMODE=annual; MFAC=""; LIN=false; WIN=2016Q1; OCN=""; OMFAC=""; OBSDIR_X=""
+NAME=""; PERR=""; PERR_FILE=""; OBS="satellite"; NODES=2; DRY=false; GV=14.8; FTOLX=""; PLOTX=""; RES=24; ADJ=rw; CMODE=annual; MFAC=""; LIN=false; WIN=2016Q1; OCN=""; OMFAC=""; OBSDIR_X=""; CKPT=min; CTRL_X=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --prior-err)      PERR="$2"; shift 2 ;;
@@ -79,6 +83,8 @@ while [ $# -gt 0 ]; do
         --month-factors)  MFAC="$2"; shift 2 ;;
         --window)         WIN="$2"; shift 2 ;;
         --obs-dir)        OBSDIR_X="$2"; shift 2 ;;
+        --ckpt)           CKPT="$2"; shift 2 ;;
+        --ctrl)           CTRL_X="$(readlink -f "$2")"; shift 2 ;;
         --ocean)          OCN="$2"; shift 2 ;;
         --ocean-month-factors) OMFAC="$2"; shift 2 ;;
         --dry-run)        DRY=true; shift ;;
@@ -140,6 +146,25 @@ case "${OBS}" in
     24hourly)  MODE=simplified; TRACK=track_file_c24_24h_3months.nc;  SEMI="${ROOT}/obs/semi_obs_xco2_24h_simplified_2016Q1.nc" ;;
     *) echo "ERROR: --obs must be satellite, 6hourly or 24hourly"; exit 1 ;;
 esac
+# minimal checkpoints (default): the _min counterpart of the chosen control set
+if [ "${CKPT}" = min ] && [ -z "${CTRL_X}" ]; then
+    case "$(basename "$(dirname "${CTRL_FWD}")")" in
+        control_files_148_ckpt_reduced)                    CFM=control_files_148_ckpt_min ;;
+        control_files_148_ckpt_reduced_DL)                 CFM=control_files_148_ckpt_min_DL ;;
+        control_files_148_c48)                             CFM=control_files_148_c48_min ;;
+        control_files_148_c48_DL)                          CFM=control_files_148_c48_min_DL ;;
+        control_files_148_ckpt_reduced_monthly)            CFM=control_files_148_ckpt_min_monthly ;;
+        control_files_148_ckpt_reduced_monthly_DL)         CFM=control_files_148_ckpt_min_monthly_DL ;;
+        control_files_148_ckpt_reduced_monthly_ocean)      CFM=control_files_148_ckpt_min_monthly_ocean ;;
+        control_files_148_ckpt_reduced_monthly_ocean_DL)   CFM=control_files_148_ckpt_min_monthly_ocean_DL ;;
+        control_files_148_LIN)                             CFM=control_files_148_LIN_min ;;
+        *) echo "ERROR: no minimal-checkpoint control set for $(dirname "${CTRL_FWD}") (use --ckpt reduced or --ctrl)"; exit 1 ;;
+    esac
+    CTRL_FWD="${ROOT}/${CFM}/forward"; CTRL_ADJ="${ROOT}/${CFM}/adjoint"
+elif [ "${CKPT}" != min ] && [ "${CKPT}" != reduced ]; then
+    echo "ERROR: --ckpt must be min or reduced"; exit 1
+fi
+if [ -n "${CTRL_X}" ]; then CTRL_FWD="${CTRL_X}/forward"; CTRL_ADJ="${CTRL_X}/adjoint"; fi
 EXP="${ROOT}/exps/${NAME}"
 
 NFAIL=0
