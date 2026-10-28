@@ -12,21 +12,33 @@ your locations (see "Inputs" below); a relocatable version is planned for the co
 
 | Where | What |
 |---|---|
-| GCHP model | `kaysuselj/GCHP`, tag `v1.0-rc1` (`git clone --recurse-submodules -b v1.0-rc1 https://github.com/kaysuselj/GCHP.git`), build with `-DMECH=carbon -DADJOINT=yes -DREVERSE_OPERATORS=yes` |
+| GCHP model | `kaysuselj/GCHP`, tag `v1.0-rc4` (`git clone --recurse-submodules -b v1.0-rc4 https://github.com/kaysuselj/GCHP.git`), build with `-DMECH=carbon -DADJOINT=yes -DREVERSE_OPERATORS=yes` |
 | `../4dvar_optimizer.osse.unified.run` | 4D-Var driver (PBS job, self-resubmitting): forward → J_obs and adjoint forcing → adjoint → L-BFGS-B step, per iteration |
 | `../*.py` | optimizer steps (`lbfgsb_step*.py`), control-vector writers (`write_sigma*.py`), prior error E (`make_prior_err.py`), observation operator (`co2_adjoint_forcing_osse.py`, `make_sat_track_offline.py`), plots, Taylor test (`taylor_test.*`) |
 | `scripts/setup_exp.sh` | creates one experiment in `exps/<name>`: E file, a copy of the driver bound to a control-file set, observations and resolution |
 | `scripts/make_ctrl148.sh`, `make_ctrl148_c48.sh` | build the base control files (`control_files_148`, `control_files_148_c48`: truth, forward, adjoint run directories) from a GCHP run directory |
+| `scripts/make_ctrl_rc4.sh` | makes the `*_rc4` sets: copies of the minimal-checkpoint sets with the v1.0-rc4 checkpoint key `ADJ_CKPT` |
 | `control_files/` | the control-file sets (GCHP.rc, HEMCO_Config.rc, ExtData.rc, HISTORY.rc, input.nml, run scripts) |
 | `truth/` | truth runs (C24, C48): unmodified fluxes, sampled along the OCO-2 track → synthetic observations |
 | `fd_check/` | finite-difference check of the 4D-Var gradient for a set of control cells (P3b) |
 
 ### Control-file sets
 
+Since v1.0-rc4 (2026-10-28) the **standard sets are the `*_rc4` sets** below; `setup_exp.sh` picks them by default
+(`--release rc4`). They differ from the `*_min` sets only in `GCHP.rc`: one checkpoint key `ADJ_CKPT` (1 = minimal
+checkpoints, RW; 2 = minimal + CO2 before advection, DL, in the forward **and** adjoint run) instead of the rc3 keys
+`ADJ_CKPT_REDUCED` / `ADJ_CKPT_TRAJ`, which make rc4 stop. The other sets are kept for runs started with v1.0-rc3 or
+earlier (`--release rc3`); the results of the two releases are bit-identical.
+
 | Set | Use |
 |---|---|
+| `control_files_148_ckpt_min_rc4`, `..._ckpt_min_DL_rc4` | **standard** C24 (v1.0-rc4): minimal checkpoints, RW / DL |
+| `control_files_148_ckpt_min_monthly[_ocean][_DL]_rc4` | as standard, monthly control (+ ocean flux as second control field) |
+| `control_files_148_c48_min_rc4`, `..._c48_min_DL_rc4` | C48, RW / DL |
+| `control_files_148_LIN_min_rc4` | linear advection scheme, DL (O10) |
+| `control_files_148_*_min*` (no `_rc4`) | the same for v1.0-rc3 (`ADJ_CKPT_REDUCED: 2`, `ADJ_CKPT_TRAJ`) |
 | `control_files_148` | base set (truth / forward / adjoint), C24, full adjoint checkpoints |
-| `control_files_148_ckpt_reduced` | **standard** C24 OSSE set: reduced checkpoints (gradient bit-identical), RW advection adjoint |
+| `control_files_148_ckpt_reduced` | reduced checkpoints (v1.0-rc1/rc2 standard; gradient bit-identical), RW advection adjoint |
 | `control_files_148_ckpt_reduced_DL` | as standard, DL advection adjoint (`ADV_ADJ_METHOD: discrete_linear`) |
 | `control_files_148_ckpt_reduced_monthly` | as standard, monthly control (sigma and E read per month) |
 | `control_files_148_c48`, `control_files_148_c48_DL` | C48 (reduced checkpoints), RW / DL |
@@ -43,9 +55,11 @@ data directories) and `DATA_FILES.txt` (the NetCDF files that were not copied: r
    per-sounding averaging kernels) and `obs148/truth_emissions_monthly_2016Q1.nc`.
 3. Experiment: e.g. constant prior error 1.3 (O1):
    `scripts/setup_exp.sh E1.3_const --prior-err "--type constant --value 1.3" --obs satellite`
-   options: `--res 24|48`, `--adj rw|dl`, `--mode annual|monthly` (+ `--month-factors 1.3,1.0,0.8`), `--ftol`
-4. `cd exps/E1.3_const && qsub 4dvar_optimizer.osse.E1.3_const.run`  (the job resubmits itself; it stops at
-   `|dJ/J| < ftol`, default 0.02, or at MAX_ITER). Results: `4dvar_output_osse/` (state per iteration,
+   options: `--res 24|48`, `--adj rw|dl`, `--mode annual|monthly` (+ `--month-factors 1.3,1.0,0.8`), `--window 2016Q1|2016`,
+   `--ocean "<E opts>"`, `--release rc4|rc3` (default rc4: binary and `*_rc4` control sets; the pre-flight checks stop if the
+   checkpoint keys do not match the release)
+4. `cd exps/E1.3_const && qsub 4dvar_optimizer.osse.E1.3_const.run`  (the job resubmits itself; it stops when
+   `|dJ/J| < 0.005` on 3 consecutive iterations, or at MAX_ITER = 20). Results: `4dvar_output_osse/` (state per iteration,
    `4dvar_history.csv`), `plots_osse/`.
 5. Gradient checks: `fd_check/run_fd148.pbs` (finite differences, P3b) and `../taylor_test.pbs` (Taylor test, G1).
 

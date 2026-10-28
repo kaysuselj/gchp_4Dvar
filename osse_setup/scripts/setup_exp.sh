@@ -48,9 +48,14 @@
 #                            gchp_4Dvar/make_noisy_obs.py adds seeded noise to the truth observations)
 #   --lin                    O10: linear advection (hord_tr 2 / kord_tr 17) in truth AND 4D-Var, DL adjoint (exact):
 #                            control_files_148_LIN, observations obs148_lin (truth148_lin/run_truth148_lin.pbs); C24 only
-#   --ckpt min|reduced       adjoint checkpoints (2026-10-25, v1.0-rc3): min (DEFAULT) = ADJ_CKPT_REDUCED 2, one file per step with
+#   --release rc4|rc3        code release (2026-10-28). rc4 (DEFAULT): binary gchp.rc4b_20261028 and the *_rc4 control sets
+#                            (make_ctrl_rc4.sh), checkpoint key ADJ_CKPT: 1 (RW) / 2 (DL); rc4 stops on the rc3 keys.
+#                            rc3: binary gchp.rc3_20261025 and the rc3 sets (ADJ_CKPT_REDUCED / ADJ_CKPT_TRAJ), for runs
+#                            started before 2026-10-28. Both give bit-identical results.
+#   --ckpt min|reduced       adjoint checkpoints (2026-10-25, v1.0-rc3): min (DEFAULT) = one file per step with
 #                            the CO2 after advection (+ CO2 before advection for DL), all other fields recomputed; bit-identical
-#                            to reduced, ~25 % faster. reduced = ADJ_CKPT_REDUCED 1 (the control sets used up to 2026-10-25)
+#                            to reduced, ~25 % faster. reduced = ADJ_CKPT_REDUCED 1 (the control sets used up to 2026-10-25;
+#                            rc3 only, with rc4 use --ctrl with ADJ_CKPT: 3 for debugging)
 #   --ctrl <dir>             use this control set (<dir>/forward, <dir>/adjoint) instead of the one chosen by the options
 #   --dry-run                checks only
 #
@@ -61,12 +66,14 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 G4D="$(cd "${ROOT}/../gchp_4Dvar" && pwd)"
 TEMPLATE="${G4D}/4dvar_optimizer.osse.unified.run"
 # one binary for all new runs (user 2026-10-20): RW and DL (ADV_ADJ_METHOD) and the ocean field (ADJ_HEMCO_SFLUX2_DIAGN)
-GCHP_BIN="${GCHP_BIN:-/nobackupp27/ksuselj1/gchp_14.8.0_adj/code/build_rc3/bin/gchp.rc3_20261025}"   # v1.0-rc3 (2026-10-25): DL trajectory fix + minimal checkpoints
+GCHP_BIN_X="${GCHP_BIN:-}"                                       # environment override; default set by --release below
+BIN_RC4=/nobackupp27/ksuselj1/gchp_14.8.0_adj/code/build_rc4/bin/gchp.rc4b_20261028   # v1.0-rc4 (2026-10-28): ADJ_CKPT key, new defaults
+BIN_RC3=/nobackupp27/ksuselj1/gchp_14.8.0_adj/code/build_rc3/bin/gchp.rc3_20261025   # v1.0-rc3 (2026-10-25): DL trajectory fix + minimal checkpoints
 PYTHON_ENV="${PYTHON_ENV:-/nobackup/ksuselj1/envs/gchp_4dvar}"
 CTRL_FWD="${ROOT}/control_files/forward"
 CTRL_ADJ="${ROOT}/control_files/adjoint"
 
-NAME=""; PERR=""; PERR_FILE=""; OBS="satellite"; NODES=2; DRY=false; GV=14.8; FTOLX=""; PLOTX=""; RES=24; ADJ=rw; CMODE=annual; MFAC=""; LIN=false; WIN=2016Q1; OCN=""; OMFAC=""; OBSDIR_X=""; CKPT=min; CTRL_X=""
+NAME=""; PERR=""; PERR_FILE=""; OBS="satellite"; NODES=2; DRY=false; GV=14.8; FTOLX=""; PLOTX=""; RES=24; ADJ=rw; CMODE=annual; MFAC=""; LIN=false; WIN=2016Q1; OCN=""; OMFAC=""; OBSDIR_X=""; CKPT=min; CTRL_X=""; REL=rc4
 while [ $# -gt 0 ]; do
     case "$1" in
         --prior-err)      PERR="$2"; shift 2 ;;
@@ -84,6 +91,7 @@ while [ $# -gt 0 ]; do
         --window)         WIN="$2"; shift 2 ;;
         --obs-dir)        OBSDIR_X="$2"; shift 2 ;;
         --ckpt)           CKPT="$2"; shift 2 ;;
+        --release)        REL="$2"; shift 2 ;;
         --ctrl)           CTRL_X="$(readlink -f "$2")"; shift 2 ;;
         --ocean)          OCN="$2"; shift 2 ;;
         --ocean-month-factors) OMFAC="$2"; shift 2 ;;
@@ -160,17 +168,39 @@ if [ "${CKPT}" = min ] && [ -z "${CTRL_X}" ]; then
         control_files_148_LIN)                             CFM=control_files_148_LIN_min ;;
         *) echo "ERROR: no minimal-checkpoint control set for $(dirname "${CTRL_FWD}") (use --ckpt reduced or --ctrl)"; exit 1 ;;
     esac
+    [ "${REL}" = rc4 ] && CFM=${CFM}_rc4
     CTRL_FWD="${ROOT}/${CFM}/forward"; CTRL_ADJ="${ROOT}/${CFM}/adjoint"
+elif [ "${CKPT}" = reduced ] && [ "${REL}" = rc4 ] && [ -z "${CTRL_X}" ]; then
+    echo "ERROR: --ckpt reduced has no rc4 control set (debugging only: --release rc3, or --ctrl with ADJ_CKPT: 3)"; exit 1
 elif [ "${CKPT}" != min ] && [ "${CKPT}" != reduced ]; then
     echo "ERROR: --ckpt must be min or reduced"; exit 1
 fi
 if [ -n "${CTRL_X}" ]; then CTRL_FWD="${CTRL_X}/forward"; CTRL_ADJ="${CTRL_X}/adjoint"; fi
+case "${REL}" in
+    rc4) GCHP_BIN="${GCHP_BIN_X:-${BIN_RC4}}" ;;
+    rc3) GCHP_BIN="${GCHP_BIN_X:-${BIN_RC3}}" ;;
+    *) echo "ERROR: --release must be rc4 or rc3"; exit 1 ;;
+esac
 EXP="${ROOT}/exps/${NAME}"
 
 NFAIL=0
 ok()   { echo "  OK   $1"; }
 fail() { echo "  FAIL $1"; NFAIL=$((NFAIL + 1)); }
 echo "Pre-flight checks"
+for d in "${CTRL_FWD}" "${CTRL_ADJ}"; do                 # checkpoint keys must match the release (rc4 stops on the rc3 keys)
+    if [ "${REL}" = rc4 ]; then
+        grep -qE '^ADJ_CKPT_(REDUCED|TRAJ):' "${d}/GCHP.rc" && fail "$(basename "$(dirname "${d}")")/$(basename "${d}"): rc3 key ADJ_CKPT_REDUCED/TRAJ with rc4 (use ADJ_CKPT)" \
+            || ok "$(basename "${d}") GCHP.rc: ADJ_CKPT $(awk -F'[[:space:]:]+' '/^ADJ_CKPT:/{print $2}' "${d}/GCHP.rc" | tail -1)"
+    else
+        grep -q '^ADJ_CKPT:' "${d}/GCHP.rc" && fail "$(basename "${d}"): ADJ_CKPT is an rc4 key (rc3 ignores it)" || true
+    fi
+done
+if [ "${REL}" = rc4 ] && [ "${ADJ}" = dl ]; then
+    for d in "${CTRL_FWD}" "${CTRL_ADJ}"; do
+        [ "$(awk -F'[[:space:]:]+' '/^ADJ_CKPT:/{print $2}' "${d}/GCHP.rc" | tail -1)" = 2 ] && ok "DL: ADJ_CKPT 2 in $(basename "${d}")" \
+            || fail "DL needs ADJ_CKPT: 2 in $(basename "${d}")/GCHP.rc"
+    done
+fi
 [ -x "${GCHP_BIN}" ] && ok "binary ${GCHP_BIN} (replaces the control sets' gchp links)" || fail "GCHP_BIN ${GCHP_BIN} not executable"
 for d in "${CTRL_FWD}" "${CTRL_ADJ}"; do
     [ -f "${d}/gchp.env" ] && ok "$(basename "$d")/gchp.env" || fail "no gchp.env in ${d}"
