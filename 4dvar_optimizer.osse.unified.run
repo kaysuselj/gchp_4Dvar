@@ -361,6 +361,9 @@ OSSE_SUBDIRS="${OSSE_SUBDIRS:-}"
 # exps1 (2026-11-11): sigma_b-scaled first L-BFGS step (and after a memory reset): largest |dx|/sigma_b = this fraction,
 # e.g. 1.0 (lbfgsb_step_monthly.py --first-step-sigma-b). Empty = the default step (largest |dx| = median sigma_b).
 FIRST_STEP_SIGMA_B="${FIRST_STEP_SIGMA_B:-}"
+# 2026-11-17: correlated background error B = Sigma C Sigma (spatial length per field, tau), operator file of b_corr.py
+# build; the optimizer works in the whitened variable v. Needs FIRST_STEP_SIGMA_B. Empty = diagonal B (as before).
+B_CORR_FILE="${B_CORR_FILE:-}"
 MAX_ITER=${MAX_ITER:-20}                 # GLOBAL iteration cap across all chained jobs
 GTOL=${GTOL:-1e-5}
 FTOL=${FTOL:-1e-8}
@@ -412,6 +415,11 @@ if [ -n "${OBS_DIR}" ]; then
     for _sub in ${OBS_SUBDIRS//:/ }; do [ -d "${OBS_DIR}/${_sub}" ] || die "observations ${OBS_DIR}/${_sub} not found"; done
 fi
 [ -z "${SIGMA_B_FILE}" ] || [ -f "${SIGMA_B_FILE}" ] || die "SIGMA_B_FILE not found: ${SIGMA_B_FILE}"
+if [ -n "${B_CORR_FILE}" ]; then
+    [ -f "${B_CORR_FILE}" ]        || die "B_CORR_FILE not found: ${B_CORR_FILE}"
+    [ "${MODE}" = "monthly" ]      || die "B_CORR_FILE needs MODE=monthly"
+    [ -n "${FIRST_STEP_SIGMA_B}" ] || die "B_CORR_FILE needs FIRST_STEP_SIGMA_B (first step in units of sigma_b, e.g. 1.0)"
+fi
 
 # Parallelism knob: one PBS node = 24 MPI ranks, so total cores = NODES * 24,
 # mapped to a cubed-sphere layout by NXNY_AUTO in runConfig. Default 1 node
@@ -466,6 +474,7 @@ VPASS="${VPASS},OBS_TYPE=${OBS_TYPE},OBS_MODE=${OBS_MODE}"
 [ -n "${SIGMA_BOUNDS_FIELD}" ]  && VPASS="${VPASS},SIGMA_BOUNDS_FIELD=${SIGMA_BOUNDS_FIELD}"
 [ -n "${OSSE_SUBDIRS}" ]        && VPASS="${VPASS},OSSE_SUBDIRS=${OSSE_SUBDIRS}"
 [ -n "${FIRST_STEP_SIGMA_B}" ]  && VPASS="${VPASS},FIRST_STEP_SIGMA_B=${FIRST_STEP_SIGMA_B}"
+[ -n "${B_CORR_FILE}" ]         && VPASS="${VPASS},B_CORR_FILE=${B_CORR_FILE}"
 [ -n "${SIMPLIFIED_AK_FILE}" ]  && VPASS="${VPASS},SIMPLIFIED_AK_FILE=${SIMPLIFIED_AK_FILE}"
 [ -n "${CTRL_FWD_DIR}" ]        && VPASS="${VPASS},CTRL_FWD_DIR=${CTRL_FWD_DIR}"
 [ -n "${CTRL_ADJ_DIR}" ]        && VPASS="${VPASS},CTRL_ADJ_DIR=${CTRL_ADJ_DIR}"
@@ -1080,6 +1089,7 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
                 --sigma-b "${SIGMA_B}" ${SIGMA_B_FILE:+--sigma-b-file "${SIGMA_B_FILE}"} \
                 --sigma-min "${SIGMA_MIN}" --sigma-max "${SIGMA_MAX}" \
                 ${FIRST_STEP_SIGMA_B:+--first-step-sigma-b "${FIRST_STEP_SIGMA_B}"} \
+                ${B_CORR_FILE:+--b-corr-file "${B_CORR_FILE}"} \
                 ${SIGMA_BOUNDS_FIELD:+--sigma-bounds-field "$(echo "${SIGMA_BOUNDS_FIELD}" | sed -E 's/([^:]*:[^:]*):/\1,/g')"} \
                 --t-start "${T_START}" --t-end "${T_END}" \
                 --gtol "${GTOL}" --ftol "${FTOL}" --plateau-n "${PLATEAU_N}" \

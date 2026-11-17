@@ -39,6 +39,15 @@ STEP CONTROL (added 2026-08-05, see project analysis of 3months_osse):
     Set --max-backtrack 0 to recover the old pure-unit-step behaviour (keep-best
     still active, which is harmless).
 
+CORRELATED B (2026-11-17, optional, --b-corr-file; b_corr.py): B = Sigma C Sigma with spatial and temporal
+correlations (C = C_t (x) C_h per field). The optimizer then works in the whitened variable v,
+    x = 1 + Sigma L v   (L L^T = C),   J_b = 0.5 v^T v,   grad_v J = v + L^T Sigma grad_x J_obs,
+i.e. the L-BFGS memory, anchor, direction and best iterate are in v. The state keeps x_next = the physical scale
+factors (write_sigma_monthly.py reads it unchanged) and adds v_next, b_corr = the operator file. The box bounds on x
+are not applied in v (a box in x is not a box in v); x is not clipped, and the number of elements outside the
+--sigma-bounds-field / --sigma-min/max range is reported (n_clipped column) so it can be monitored. Without
+--b-corr-file everything is as before (diagonal B).
+
 State-file schema extends lbfgsb_step.py's (x_next, x_prev, g_prev, J_prev,
 s_hist, y_hist, m_used, iteration, nlat, nlon, nmon, start_month) with the
 anchor / step-control / best-iterate fields (x_anchor, g_anchor, J_anchor,
@@ -72,6 +81,8 @@ import argparse
 import numpy as np
 import pandas as pd
 import xarray as xr
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 NMON = 12          # default control-vector length (full-year run)
 
@@ -575,6 +586,9 @@ def main():
     parser.add_argument('--first-step-sigma-b', type=float, default=None,
                         help='exps1 (2026-11-11): sigma_b-scaled first step (and after a memory reset), d = -c sigma_b^2 g with '
                              'the largest |d|/sigma_b equal to this fraction (e.g. 1.0); overrides --first-step-max')
+    parser.add_argument('--b-corr-file', default=None,
+                        help='2026-11-17: correlated B, operator file of b_corr.py build (horizontal length per field, '
+                             'tau); the optimizer works in v with x = 1 + sigma_b L v. Default: diagonal B')
     parser.add_argument('--max-backtrack', type=int, default=6,
                         help='Max step halvings along one direction before '
                              'declaring a line-search stall (0 = old unit-step '
@@ -623,6 +637,22 @@ def main():
         print('  bounds per field: ' + ', '.join(f'{f} [{lo:g}, {hi:g}]' for f, (lo, hi) in zip(fields, pairs)))
     m = args.m
 
+    bc = None
+    if args.b_corr_file:
+        from b_corr import BCorr
+        bc = BCorr(args.b_corr_file)
+        print('  ' + bc.summary())
+        if bc.n != n or bc.n_fields != nfld or bc.n_months != nmon:
+            print(f'ERROR: {args.b_corr_file}: operator for {bc.n_fields}x{bc.n_months}x{bc.n_cells} = {bc.n}, control '
+                  f'{nfld}x{nmon}x{args.nlat * args.nlon} = {n}', file=sys.stderr)
+            sys.exit(2)
+        if args.first_step_sigma_b is None:
+            print('ERROR: --b-corr-file needs --first-step-sigma-b (the first step in units of sigma_b, e.g. 1.0)',
+                  file=sys.stderr)
+            sys.exit(2)
+    sig_b_vec = np.broadcast_to(np.asarray(sig_b, dtype=np.float64), (n,)).copy()
+    to_x = (lambda v: 1.0 + sig_b_vec * bc.apply_L(v)) if bc is not None else None    # v -> physical x
+
     history_csv = args.history_csv or os.path.join(
         os.path.dirname(os.path.abspath(args.state_file)),
         '4dvar_output_osse', '4dvar_history.csv')
@@ -638,6 +668,18 @@ def main():
         state   = np.load(args.state_file)
         keys    = set(state.files)
         x_cur   = state['x_next'].copy()      # sigma used in this iteration
+        if bc is not None:                    # correlated B: the optimizer variable is v (x_cur stays physical)
+            if 'v_next' not in keys or str(state['b_corr']) != os.path.abspath(args.b_corr_file):
+                print(f'ERROR: state {args.state_file} was not written with --b-corr-file {args.b_corr_file} '
+                      '(no v_next, or another operator)', file=sys.stderr)
+                sys.exit(2)
+            v_cur = state['v_next'].copy()
+            if np.abs(to_x(v_cur) - x_cur).max() > 1e-8 * max(1.0, np.abs(x_cur).max()):
+                print('ERROR: state x_next != 1 + sigma_b L v_next (sigma_b or operator changed?)', file=sys.stderr)
+                sys.exit(2)
+        elif 'v_next' in keys:
+            print(f'ERROR: state {args.state_file} is a correlated-B state; pass the same --b-corr-file', file=sys.stderr)
+            sys.exit(2)
         x_prev  = state['x_prev'].copy()      # sigma from iteration before
         g_prev  = state['g_prev'].copy()
         J_prev  = float(state['J_prev'])
@@ -650,7 +692,12 @@ def main():
                   f'{n} ({nfld}x{nmon}x{args.nlat}x{args.nlon}) — state file from a '
                   'different (non-monthly?) experiment', file=sys.stderr)
             sys.exit(2)
-        if 'x_anchor' in keys:                # new-format state
+        if bc is not None and it == 1:        # (iteration-1 state with v: nothing accepted yet)
+            x_anchor = g_anchor = None; J_anchor = float('inf')
+            d_cur = np.zeros(n); alpha, n_bt = 1.0, 0
+            x_best, J_best, it_best = v_cur.copy(), float('inf'), 0
+            n_reject_total = 0
+        elif 'x_anchor' in keys:              # new-format state
             x_anchor = state['x_anchor'].copy()
             g_anchor = state['g_anchor'].copy()
             J_anchor = float(state['J_anchor'])
@@ -675,6 +722,7 @@ def main():
             n_reject_total = 0
     else:
         x_cur   = np.ones(n)
+        v_cur   = np.zeros(n)                 # (used with --b-corr-file only: x = 1 + sigma_b L v, v = 0 at the prior)
         x_prev  = np.empty(n)
         g_prev  = np.empty(n)
         J_prev  = np.inf
@@ -684,7 +732,7 @@ def main():
         it      = 1
         x_anchor = g_anchor = None; J_anchor = float('inf')
         d_cur = np.zeros(n); alpha, n_bt = 1.0, 0
-        x_best, J_best, it_best = x_cur.copy(), float('inf'), 0
+        x_best, J_best, it_best = (v_cur if bc is not None else x_cur).copy(), float('inf'), 0
         n_reject_total = 0
 
     # ------------------------------------------------------------------
@@ -712,12 +760,28 @@ def main():
         sys.exit(2)
     if args.first_step_sigma_b is not None:              # sigma_b per element for the sigma_b-scaled first step
         sig_b_scale = np.broadcast_to(np.asarray(sig_b, dtype=np.float64), (n,)).copy()
-    delta  = x_cur - 1.0
-    J_b    = 0.5 * float(np.sum(delta ** 2 / sig_b ** 2))
-    g_b    = delta / sig_b ** 2
-
-    J_cur  = J_obs + J_b
-    g_cur  = g_obs + g_b
+    g_obs_x = g_obs
+    if bc is None:
+        delta  = x_cur - 1.0
+        J_b    = 0.5 * float(np.sum(delta ** 2 / sig_b ** 2))
+        g_b    = delta / sig_b ** 2
+        J_cur  = J_obs + J_b
+        g_cur  = g_obs + g_b
+        u_cur  = x_cur                        # the optimizer variable
+    else:
+        # correlated B in v: J_b = 0.5 v.v, grad_v = v + L^T sigma_b grad_x J_obs (g_obs/g_b below are in v units)
+        J_b    = 0.5 * float(np.dot(v_cur, v_cur))
+        g_b    = v_cur.copy()
+        g_obs_x = g_obs                       # physical gradient (archived below)
+        g_obs  = bc.apply_LT(sig_b_vec * g_obs)
+        J_cur  = J_obs + J_b
+        g_cur  = g_obs + g_b
+        u_cur  = v_cur
+        # first step (and after a memory reset): steepest descent in v, d = -c g_v, scaled so that the largest change
+        # of x is first_step x sigma_b (max |L d| = first_step), as the diagonal sigma_b-scaled first step
+        sig_b_scale = None
+        lg = np.abs(bc.apply_L(g_cur)).max()
+        first_step = float(args.first_step_sigma_b) * float(np.abs(g_cur).max()) / max(lg, 1e-300)
 
     print(f'[iter {it}]  J_obs={J_obs:.6e}  J_b={J_b:.6e}  J={J_cur:.6e}')
     print(f'          |g_obs|_inf={np.abs(g_obs).max():.4e}  '
@@ -727,7 +791,7 @@ def main():
     print_balance_diagnostics(J_obs, J_b, g_obs, g_b, n_obs, n)
 
     if args.archive_dir:
-        save_boundary_diagnostics(A_bnd, g_obs[:nmon * args.nlat * args.nlon], boundaries, args.archive_dir,
+        save_boundary_diagnostics(A_bnd, g_obs_x[:nmon * args.nlat * args.nlon], boundaries, args.archive_dir,
                                   it, args.nlat, args.nlon)
 
     g_inf = float(np.abs(g_cur).max())
@@ -743,10 +807,19 @@ def main():
               s_hist=s_hist, y_hist=y_hist, m_used=m_used, it=it,
               x_best=x_best, J_best=J_best, it_best=it_best,
               n_reject_total=n_reject_total)
-    x_next, st, info = lbfgs_backtrack_step(x_cur, g_cur, J_cur, st,
+    x_next, st, info = lbfgs_backtrack_step(u_cur, g_cur, J_cur, st,
                                             m, args.c1, args.max_backtrack,
-                                            sig_lo, sig_hi,
+                                            sig_lo if bc is None else -np.inf, sig_hi if bc is None else np.inf,
                                             first_step, sig_b_scale)
+    v_next = None
+    if bc is not None and x_next is not None:   # trial point: v -> physical x; bounds monitored, not applied
+        v_next = x_next
+        x_next = to_x(v_next)
+        info['n_clipped'] = int(((x_next < sig_lo) | (x_next > sig_hi)).sum())
+        info['n_at_bound'] = 0
+        info['max_dx'] = float(np.abs(x_next - x_cur).max())
+        if info['n_clipped']:
+            print(f'          NOTE (correlated B): {info["n_clipped"]} elements of x outside the bounds (not clipped)')
 
     # console step report
     if info.get('action') in ('accept', 'init'):
@@ -767,7 +840,7 @@ def main():
     def _persist_best():
         """Write the best iterate to a standalone file for recovery / delivery."""
         try:
-            np.savez(best_file, x_next=st['x_best'], J=np.float64(st['J_best']),
+            np.savez(best_file, x_next=(st['x_best'] if bc is None else to_x(st['x_best'])), J=np.float64(st['J_best']),
                      iteration=np.int64(st['it_best']),
                      nlat=np.int64(args.nlat), nlon=np.int64(args.nlon),
                      nmon=np.int64(nmon), fields=np.str_(args.fields),
@@ -784,9 +857,13 @@ def main():
     # Convergence / stall.  On any stop we DELIVER the best iterate (write it as
     # the final x_next) so the optimizer never returns a worse-than-best sigma.
     # ------------------------------------------------------------------
-    def _save_state(x_deliver, converged):
+    def _save_state(x_deliver, converged, v_deliver=None):
+        extra = {}
+        if bc is not None:                    # correlated B: v of the delivered point, operator path
+            extra = dict(v_next=v_deliver, b_corr=np.str_(os.path.abspath(args.b_corr_file)))
         np.savez(
             args.state_file,
+            **extra,
             x_next    = x_deliver,
             x_prev    = x_cur,
             g_prev    = g_cur,
@@ -857,7 +934,10 @@ def main():
         print(f'  Delivering BEST iterate (iter {st["it_best"]}, '
               f'J={st["J_best"]:.6e}) as the solution')
         _persist_best()
-        _save_state(st['x_best'], converged=True)
+        if bc is None:
+            _save_state(st['x_best'], converged=True)
+        else:
+            _save_state(to_x(st['x_best']), converged=True, v_deliver=st['x_best'])
         print(f'  State saved → {args.state_file}')
         sys.exit(1)
 
@@ -874,7 +954,7 @@ def main():
             print(f'          sigma {fields[kf][:-4] if nfld > 1 else ""} month {mm + 1:02d}: min={s.min():.4f}  '
                   f'max={s.max():.4f}  mean={s.mean():.4f}')
 
-    _save_state(x_next, converged=False)
+    _save_state(x_next, converged=False, v_deliver=v_next)
     print(f'  State saved → {args.state_file}')
     sys.exit(0)   # continue
 
