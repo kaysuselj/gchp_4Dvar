@@ -704,7 +704,7 @@ def main():
             d_cur    = state['d_cur'].copy()
             alpha    = float(state['alpha'])
             n_bt     = int(state['n_backtrack'])
-            x_best   = state['x_best'].copy()
+            x_best   = (state['v_best'] if bc is not None else state['x_best']).copy()   # optimizer variable
             J_best   = float(state['J_best'])
             it_best  = int(state['it_best'])
             n_reject_total = int(state['n_reject_total']) if 'n_reject_total' in keys else 0
@@ -860,7 +860,7 @@ def main():
     def _save_state(x_deliver, converged, v_deliver=None):
         extra = {}
         if bc is not None:                    # correlated B: v of the delivered point, operator path
-            extra = dict(v_next=v_deliver, b_corr=np.str_(os.path.abspath(args.b_corr_file)))
+            extra = dict(v_next=v_deliver, v_best=st['x_best'], b_corr=np.str_(os.path.abspath(args.b_corr_file)))
         np.savez(
             args.state_file,
             **extra,
@@ -886,7 +886,7 @@ def main():
             d_cur     = st['d'],
             alpha     = np.float64(st['alpha']),
             n_backtrack = np.int64(st['n_bt']),
-            x_best    = st['x_best'],
+            x_best    = (st['x_best'] if bc is None else to_x(st['x_best'])),   # physical (plots); v in v_best
             J_best    = np.float64(st['J_best']),
             it_best   = np.int64(st['it_best']),
             n_reject_total = np.int64(st['n_reject_total']),

@@ -217,6 +217,7 @@ def main():
     e = np.abs(xb - x_ex_c).max()
     check(f'b) correlated B: exact minimizer ({it_b} iterations)', e < 2e-3, f'max |x - x*| {e:.2e}')
     check('b) state x_next = 1 + sigma_b L v_next', np.allclose(stb['x_next'], 1 + sig_b * B.apply_L(stb['v_next'])))
+    check('b) state x_best physical (= 1 + sigma_b L v_best)', np.allclose(stb['x_best'], 1 + sig_b * B.apply_L(stb['v_best'])))
     # first step of the correlated run: largest |dx| / sigma_b = 1 (--first-step-sigma-b 1.0)
     h = [l.split(',') for l in open(os.path.join(work, 'hist.csv')).read().splitlines()]
     col = h[0].index('max_dx')
