@@ -1,0 +1,11 @@
+#!/bin/bash
+#PBS -S /bin/bash
+#PBS -j oe
+#PBS -W group_list=s1055
+#PBS -q devel
+#PBS -l select=1:ncpus=28:model=bro_ele
+#PBS -l walltime=00:30:00
+set -euo pipefail
+PY=/nobackup/ksuselj1/envs/gchp_4dvar/bin/python3
+mkdir -p /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1/figures/sb_tmp
+$PY -I /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1/scripts/fig_exps1_inputs.py --out-dir /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1/figures --sigma-b /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1/figures/sb_tmp/sigma_b.npz --only-sigma-b

@@ -39,3 +39,7 @@ MONTHLY_SIGMA_STATUS.md
 
 # local python environment (large, machine-specific)
 gchp-env/
+
+# local backup copies made before edits (2026-11)
+*.pre_*
+backups_2026*/

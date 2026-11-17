@@ -1,0 +1,117 @@
+#!/bin/bash
+#PBS -S /bin/bash
+#PBS -N exps1_truth_c24
+#PBS -l select=2:ncpus=24:mpiprocs=24:model=bro_ele
+#PBS -l walltime=08:00:00
+#PBS -q long
+#PBS -j oe
+#PBS -W group_list=s1055
+# ============================================================================
+# exps1 truth, C24 (2026-11-09; window variables 2026-11-10): forward T0 -> T1 + 1 day with the exps1 truth fluxes
+# (FF_regrid2, ECCO-Darwin, CARDAMOM-ECCO, ORCHIDEE GPP, ORCHIDEE TER; unit conversion only), control set
+# exps1/ctrl/truth_c24 (make_ctrl_exps1.sh truth_c24 ORCHIDEE ECCO-Darwin-MON-v05 truth), 2 Broadwell nodes (48 ranks;
+# cheaper in SBU and faster than 1 Rome node at C24, scaling stage 2).
+# Sampling: offline sampler on the LN + LG + OG track (post_forward.sh) -> GEOSChem.sat_track.* ->
+#   <OBS>/semi_obs_xco2_<TAG>_clean.nc   truth XCO2 with the per-sounding L2# AK (LN + LG + OG)
+#   <OBS>/semi_obs_xco2_<TAG>.nc         + Gaussian noise, sigma = each sounding's uncertainty, seed 1 (as O9)
+#   <OBS>/truth_emissions_monthly_<TAG>.nc  monthly-mean truth fluxes
+# Window (qsub -v): T0, T1 (YYYY-MM-DD, T1 exclusive), RST (start restart), OBS, TRUTH (run dir), TAG, TRACK.
+# Defaults = the 2016 run: T0 2016-01-01, T1 2017-01-01, the C24 OSSE restart, exps1/obs_c24, exps1/truth_c24, TAG 2016.
+# Same structure as 4dvar_osse/truth148_2016/run_truth148_2016.pbs. STAGE=obs: sampling (and the offline sampler if
+# needed) only.
+# ============================================================================
+set -euo pipefail
+X=/nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1
+T0=${T0:-2016-01-01}; T1=${T1:-2017-01-01}; TAG=${TAG:-2016}
+RST=${RST:-}; TRACK=${TRACK:-}
+RES=${RES:-24}                                     # 48 (2026-11-11): exps1/ctrl/truth_c48 (MERRA-2 2x2.5)
+CTRL=${X}/ctrl/truth_c${RES}/forward; FWD=${TRUTH:-${X}/truth_c24}/forward_run; OBS=${OBS:-${X}/obs_c24}
+TEND=$(date -d "${T1} + 1 day" +%Y%m%d)
+NDAYS=$(( ( $(date -d "${TEND}" +%s) - $(date -d "${T0}" +%s) ) / 86400 ))
+# MAPL Duration / JOB_SGMT is YYYYMMDD (years, months, days), not a day count: 579 days must be written as
+# 00010701 (1 year 7 months 1 day) for 2015-10-01 -> 2017-05-02; a bare 00000579 is read as 5 months 79 days (2026-11-10 bug)
+_y0=$(date -d "${T0}" +%Y); _m0=$(date -d "${T0}" +%m); _d0=$(date -d "${T0}" +%d)
+_y1=${TEND:0:4}; _m1=${TEND:4:2}; _d1=${TEND:6:2}
+_mon=$(( (10#${_y1} * 12 + 10#${_m1}) - (10#${_y0} * 12 + 10#${_m0}) )); _day=$(( 10#${_d1} - 10#${_d0} ))
+[ "${_day}" -ge 0 ] || { echo "window must start on a day <= the end day"; exit 1; }
+DUR=$(printf '%04d%02d%02d' $(( _mon / 12 )) $(( _mon % 12 )) ${_day})
+G4D=/nobackupp27/ksuselj1/gchp_14.8.0_adj/gchp_4Dvar
+L2_DIR='/nobackupp17/jliu7/OCO2/L2#/OCO2-B10/PSEUDO/TRENDY/ORCHIDEE-ECCO2/'
+NCORES=${NCORES:-48}; NODES=${NODES:-2}; PPN=$(( NCORES / NODES ))
+PYS=/nobackup/ksuselj1/envs/gchp_4dvar/bin/python3
+STAGE="${STAGE:-all}"
+log() { echo "[$(date '+%F %T')] $*"; }
+die() { echo "ERROR: $*" >&2; exit 1; }
+mkdir -p "${FWD}" "${OBS}"
+if [ "${STAGE}" = all ]; then
+    rsync -a "${CTRL}/" "${FWD}/"
+    cd "${FWD}"
+    if [ -n "${RST}" ]; then
+        ln -sfn "${RST}" "Restarts/GEOSChem.Restart.${T0//-/}_0000z.c${RES}.nc4"
+        sed -i "s|^INITIAL_RESTART=.*|INITIAL_RESTART=./Restarts/GEOSChem.Restart.${T0//-/}_0000z.c${RES}.nc4|" runConfig_forward.sh
+    fi
+    [ -n "${TRACK}" ] && ln -sfn "${TRACK}" track_file_osse_2016.nc
+    sed -i -e "s/^Start_Time=.*/Start_Time=\"${T0//-/} 000000\"/" -e "s/^End_Time=.*/End_Time=\"${TEND} 000000\"/" \
+           -e "s/^Duration=.*/Duration=\"${DUR} 000000\"/" \
+           -e "s/^TOTAL_CORES=.*/TOTAL_CORES=${NCORES}/" -e "s/^NUM_NODES=.*/NUM_NODES=${NODES}/" \
+           -e "s/^NUM_CORES_PER_NODE=.*/NUM_CORES_PER_NODE=${PPN}/" runConfig_forward.sh
+    set +eu; source ./gchp.env >/dev/null 2>&1; set -eu
+    find OutputDir -maxdepth 1 -type f -delete 2>/dev/null || true
+    rm -f Restarts/gcchem_internal_checkpoint* cap_restart gcadj_*checkpoint*
+    log "truth forward ${T0} -> ${TEND} (${NDAYS} days, Duration ${DUR}), ${NCORES} ranks, binary $(readlink -f gchp), track $(readlink -f track_file_osse_2016.nc)"
+    grep -E '^0 (TER_CLASS_CTEM|OCEAN_ECCO_DARWIN|GPP_ORCHIDEE|NBE_CARDAMOM|FOSSILCO2_ODIAC) ' HEMCO_Config.rc | awk '{print "  flux", $2, $3, "scale", $11}'
+    ./runConfig_forward.sh > gchp.log 2>&1 || die "shim failed"
+    grep -a "shim:" gchp.log
+    export MPI_LAUNCH_TIMEOUT=120
+    # 14.8.0 aborts or hangs in finalize after the last write: stop mpiexec once the final checkpoint is written and the
+    # log has been idle 180 s (as scaling/scripts/run_stage1.pbs)
+    mpiexec -n ${NCORES} ./gchp >> gchp.log 2>&1 &
+    pid=$!
+    while kill -0 "${pid}" 2>/dev/null; do
+        sleep 30
+        if grep -a -q "write file: Restarts/gcchem_internal_checkpoint" gchp.log && [ $(( $(date +%s) - $(stat -c %Y gchp.log) )) -ge 180 ]; then
+            log "final checkpoint written, finalize idle: stopping mpiexec"; kill "${pid}" 2>/dev/null; sleep 15; kill -9 "${pid}" 2>/dev/null || true; break
+        fi
+    done
+    wait "${pid}" 2>/dev/null || true
+    nw=$(grep -a -n -m1 "write file: Restarts/gcchem_internal_checkpoint" gchp.log | cut -d: -f1)
+    [ -n "${nw}" ] || die "no final checkpoint, see ${FWD}/gchp.log"
+    last=$(grep -a -o "GCHP Date: [0-9/]*" gchp.log | tail -1 | awk '{print $3}' | tr -d /)
+    [ "${last}" = "${TEND}" ] || die "model stopped at ${last}, expected ${TEND} (Duration ${DUR})"
+    head -n "${nw}" gchp.log | grep -a -q -E 'MPT ERROR|MPI_ABORT|aborting with error code|forrtl: severe|SIGSEGV|FAIL at line=' && die "GCHP crashed, see ${FWD}/gchp.log"
+    find . -maxdepth 1 -name 'gcadj_*checkpoint*' -delete
+    ${PYS} -I "${X}/scripts/make_sat_track_offline_fast.py" --track track_file_osse_2016.nc \
+        --inst-glob 'OutputDir/GEOSChem.Inst30.*.nc4' --out-dir OutputDir >> gchp.log 2>&1 || die "offline sampler failed"
+    rm -f OutputDir/GEOSChem.Inst30.*.nc4
+    log "truth forward done: $(ls OutputDir | wc -l) output files"
+fi
+# STAGE=obs after an interrupted job: sample the forward output if that step did not run
+if [ "${STAGE}" != all ] && ! ls ${FWD}/OutputDir/GEOSChem.sat_track.*.nc4 >/dev/null 2>&1; then
+    grep -a -q "write file: Restarts/gcchem_internal_checkpoint" "${FWD}/gchp.log" || die "forward did not finish (no final checkpoint)"
+    (cd "${FWD}" && find . -maxdepth 1 -name 'gcadj_*checkpoint*' -delete && ${PYS} -I "${X}/scripts/make_sat_track_offline_fast.py" \
+        --track track_file_osse_2016.nc --inst-glob 'OutputDir/GEOSChem.Inst30.*.nc4' --out-dir OutputDir >> gchp.log 2>&1) \
+        || die "offline sampler failed"
+    log "offline sampling done"
+fi
+source /nobackup/ksuselj1/envs/gchp_4dvar/bin/activate
+n=$(ls ${FWD}/OutputDir/GEOSChem.sat_track.*.nc4 2>/dev/null | wc -l); log "sat_track: ${n} files"; [ "${n}" -gt 0 ] || die "no sat_track output"
+python3 -I "${X}/scripts/make_semi_obs_lnlgog.py" --sat-track-dir "${FWD}/OutputDir/" --l2-dir "${L2_DIR}" \
+    --t-start "${T0}" --t-end "${T1}" --out "${OBS}/semi_obs_xco2_${TAG}_clean.nc" || die "semi-obs failed"
+mkdir -p "${OBS}/noisy"
+python3 -I "${G4D}/make_noisy_obs.py" --in "${OBS}/semi_obs_xco2_${TAG}_clean.nc" --out-dir "${OBS}/noisy" --seed 1 \
+    || die "make_noisy_obs failed"
+mv "${OBS}/noisy/semi_obs_xco2_${TAG}_clean.nc" "${OBS}/semi_obs_xco2_${TAG}.nc"; rm -rf "${OBS}/noisy"
+python3 - "${FWD}/OutputDir" "${OBS}/truth_emissions_monthly_${TAG}.nc" "${T1}" <<'PYEOF'
+import sys, glob, xarray as xr, pandas as pd
+src, out, t1 = sys.argv[1], sys.argv[2], sys.argv[3]
+files = sorted(glob.glob(f'{src}/GEOSChem.Emissions.*.nc4'))
+ds = xr.concat([xr.open_dataset(f, drop_variables=['anchor']) for f in files], dim='time',
+               data_vars='minimal', coords='minimal', compat='override')
+ds = ds.sortby('time')
+t = pd.DatetimeIndex(ds['time'].values)
+ds = ds.isel(time=[i for i, x in enumerate(t) if x < pd.Timestamp(t1)])
+ds.load().to_netcdf(out)
+print(f'truth emissions: {len(files)} files -> {out}, times {list(pd.DatetimeIndex(ds.time.values).strftime("%Y-%m-%d"))}')
+PYEOF
+ls -l "${OBS}"
+log "ALL DONE"

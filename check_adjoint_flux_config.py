@@ -28,10 +28,15 @@ def parse(path):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    argv = sys.argv[1:]
+    sid = '750'
+    if '--sigma-id' in argv:                 # value after the flag is not a file argument
+        k = argv.index('--sigma-id')
+        sid = argv[k + 1]
+        argv = argv[:k] + argv[k + 2:]
+    args = [a for a in argv if not a.startswith('--')]
     if len(args) != 2:
         sys.exit(__doc__)
-    sid = sys.argv[sys.argv.index('--sigma-id') + 1] if '--sigma-id' in sys.argv else '750'
     fb, fs = parse(args[0])
     ab, as_ = parse(args[1])
     problems, n = [], 0

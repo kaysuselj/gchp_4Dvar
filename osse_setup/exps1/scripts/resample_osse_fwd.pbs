@@ -1,0 +1,33 @@
+#!/bin/bash
+#PBS -S /bin/bash
+#PBS -j oe
+#PBS -W group_list=s1055
+#PBS -q normal
+#PBS -l select=1:ncpus=24:mpiprocs=24:model=bro_ele
+#PBS -l walltime=01:00:00
+# exps1 (2026-11-11): the first OSSE forward runs finished GCHP but spent 16 h in the slow original offline sampler.
+# Re-sample their every-step output with the fast copy (identical output) so the forward phase need not be rerun:
+# writes forward_run/OutputDir/GEOSChem.sat_track.* for E=<experiment dir>, then deletes the Inst30 files, moves the
+# checkpoints and the end state to the adjoint run dir and sets the progress to forward_done, exactly as the driver
+# does after post_forward.sh (4dvar_optimizer.osse.unified.run, forward phase).
+set -euo pipefail
+E=${E:?experiment dir}
+X=/nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1
+PY=/nobackup/ksuselj1/envs/gchp_4dvar/bin/python3
+F=${E}/forward_run; A=${E}/adjoint
+cd "${F}"
+grep -a -q "write file: Restarts/gcchem_internal_checkpoint" gchp.log || { echo "forward did not finish"; exit 1; }
+n=$(ls OutputDir/GEOSChem.Inst30.*.nc4 | wc -l); echo "Inst30 files: ${n}"
+rm -f OutputDir/GEOSChem.sat_track.*.nc4
+date; ${PY} -I "${X}/scripts/make_sat_track_offline_fast.py" --track track_file_osse_2016.nc \
+    --inst-glob 'OutputDir/GEOSChem.Inst30.*.nc4' --out-dir OutputDir; date
+[ "$(ls OutputDir/GEOSChem.sat_track.*.nc4 | wc -l)" -eq 19 ] || { echo "expected 19 sat_track files"; exit 1; }
+rm -f OutputDir/GEOSChem.Inst30.*.nc4
+k=$(find . -maxdepth 1 \( -name 'gcadj_internal_checkpoint*' -o -name 'gcadj_import_checkpoint*' -o -name 'gcadj_checkpoint.*' \) | wc -l)
+find . -maxdepth 1 \( -name 'gcadj_internal_checkpoint*' -o -name 'gcadj_import_checkpoint*' -o -name 'gcadj_checkpoint.*' \) -exec mv -t "${A}/" {} +
+echo "moved ${k} adjoint checkpoint file(s)"
+c=$(ls Restarts/gcchem_internal_checkpoint* | head -1)
+mv "${c}" "${A}/gcchem_initial_restart.nc4"
+echo "iter=1 phase=forward_done" > "${E}/4dvar_progress_monthly.txt"
+echo "$(date '+%F %T') resample_osse_fwd.pbs: forward of iteration 1 sampled with the fast sampler; phase forward_done" >> "${E}/logs/$(ls ${E}/logs | head -1)"
+echo DONE

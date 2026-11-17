@@ -338,11 +338,15 @@ def append_history(csv_path, row):
 # — identical to lbfgsb_step.py
 # ---------------------------------------------------------------------------
 
-def lbfgsb_direction(g, s_hist, y_hist, m_used, first_step=1.0):
+def lbfgsb_direction(g, s_hist, y_hist, m_used, first_step=1.0, sig_b_scale=None):
     """
     Compute L-BFGS-B search direction d = -H_k g  via the two-loop recursion.
     s_hist, y_hist: arrays of shape (m, n); first m_used rows are valid
     (oldest first).
+    sig_b_scale (exps1, 2026-11-11): None (default) or sigma_b per element. Only with no curvature information
+    (first step, memory reset): the steepest-descent step is then d = -c sigma_b^2 g, the gradient in units of the
+    background error, with c such that the largest |d_i| / sigma_b_i is first_step (a fraction of sigma_b) instead of
+    the largest |d_i| being first_step. With a constant sigma_b this is the default step (first_step = frac x sigma_b).
     Returns the descent direction d (same shape as g).
     """
     s = s_hist[:m_used]   # (m_used, n)
@@ -361,6 +365,10 @@ def lbfgsb_direction(g, s_hist, y_hist, m_used, first_step=1.0):
     # Initial Hessian scaling: gamma = s_{k-1}^T y_{k-1} / y_{k-1}^T y_{k-1}
     if m_used > 0:
         gamma = np.dot(s[-1], y[-1]) / np.dot(y[-1], y[-1])
+    elif sig_b_scale is not None:
+        # No curvature information, sigma_b-scaled steepest descent: d = -c sigma_b^2 g, max |d / sigma_b| = first_step
+        c = first_step / max(np.abs(sig_b_scale * g).max(), 1e-30)
+        return -c * sig_b_scale ** 2 * g
     else:
         # No curvature information yet (first step or memory reset): steepest
         # descent scaled so the largest per-element change is first_step
@@ -375,11 +383,13 @@ def lbfgsb_direction(g, s_hist, y_hist, m_used, first_step=1.0):
     return -r   # descent direction
 
 
-def _gamma_scale(g, s_hist, y_hist, m_used, first_step=1.0):
+def _gamma_scale(g, s_hist, y_hist, m_used, first_step=1.0, sig_b_scale=None):
     """Initial-Hessian scaling gamma used by lbfgsb_direction (for logging)."""
     if m_used > 0:
         return float(np.dot(s_hist[m_used - 1], y_hist[m_used - 1])
                      / np.dot(y_hist[m_used - 1], y_hist[m_used - 1]))
+    if sig_b_scale is not None:
+        return float(first_step / max(np.abs(sig_b_scale * g).max(), 1e-30))   # c of d = -c sigma_b^2 g
     return float(first_step / max(np.abs(g).max(), 1e-8))
 
 
@@ -388,7 +398,7 @@ def _gamma_scale(g, s_hist, y_hist, m_used, first_step=1.0):
 # ---------------------------------------------------------------------------
 
 def lbfgs_backtrack_step(x_cur, g_cur, J_cur, st, m, c1, max_bt,
-                         sigma_min=0.0, sigma_max=3.0, first_step=1.0):
+                         sigma_min=0.0, sigma_max=3.0, first_step=1.0, sig_b_scale=None):
     """One projected L-BFGS step with a line search deferred across outer
     iterations.  PURE (no I/O) so it can be unit-tested on a toy quadratic.
 
@@ -465,13 +475,13 @@ def lbfgs_backtrack_step(x_cur, g_cur, J_cur, st, m, c1, max_bt,
         # advance the anchor to the accepted iterate
         st['x_anchor'], st['g_anchor'], st['J_anchor'] = x_cur.copy(), g_cur.copy(), float(J_cur)
         # fresh L-BFGS direction from the new anchor
-        d = lbfgsb_direction(g_cur, st['s_hist'], st['y_hist'], st['m_used'], first_step)
+        d = lbfgsb_direction(g_cur, st['s_hist'], st['y_hist'], st['m_used'], first_step, sig_b_scale)
         gTd = float(np.dot(g_cur, d))
         if gTd >= 0.0:      # non-descent safeguard: drop memory -> scaled steepest descent
             st['m_used'] = 0
             st['s_hist'][:] = 0.0
             st['y_hist'][:] = 0.0
-            d = lbfgsb_direction(g_cur, st['s_hist'], st['y_hist'], 0, first_step)
+            d = lbfgsb_direction(g_cur, st['s_hist'], st['y_hist'], 0, first_step, sig_b_scale)
             gTd = float(np.dot(g_cur, d))
             info['reset_memory'] = True
         st['d'], st['alpha'], st['n_bt'] = d, 1.0, 0
@@ -504,7 +514,7 @@ def lbfgs_backtrack_step(x_cur, g_cur, J_cur, st, m, c1, max_bt,
     info['n_clipped']  = int(((x_raw < sigma_min) | (x_raw > sigma_max)).sum())
     info['n_at_bound'] = int(((x_next <= sigma_min) | (x_next >= sigma_max)).sum())
     info['max_dx']     = float(np.abs(x_next - x_cur).max())
-    info['gamma']      = _gamma_scale(anchor_g, st['s_hist'], st['y_hist'], st['m_used'], first_step)
+    info['gamma']      = _gamma_scale(anchor_g, st['s_hist'], st['y_hist'], st['m_used'], first_step, sig_b_scale)
     return x_next, st, info
 
 
@@ -531,10 +541,17 @@ def main():
                         help='Number of monthly control-vector fields (default '
                              '12); must equal the months spanned by t-start..t-end.')
     parser.add_argument('--sigma-b',   type=float, default=0.2)
+    parser.add_argument('--sigma-b-file', default=None,
+                        help='npz with sigma_b (one value per control element, same layout as x: '
+                             'fields x months x cells) instead of the constant --sigma-b '
+                             '(4dvar_realcase: the flux files\' Uncertainty, as in the Classic J_b)')
     parser.add_argument('--sigma-min', type=float, default=0.0,
                         help='Lower bound for sigma (default: 0)')
     parser.add_argument('--sigma-max', type=float, default=3.0,
                         help='Upper bound for sigma (default: 3)')
+    parser.add_argument('--sigma-bounds-field', default=None,
+                        help='Bounds per control field instead of --sigma-min/--sigma-max, "lo:hi,lo:hi" in the order '
+                             'of --fields (exps1 2026-11-09: TER 0:4, ocean -4:4)')
     parser.add_argument('--m',       type=int,   default=10,
                         help='L-BFGS-B memory (number of vector pairs)')
     parser.add_argument('--t-start', required=True,
@@ -555,6 +572,9 @@ def main():
     parser.add_argument('--first-step-max', type=float, default=None,
                         help='Largest per-element sigma change of a steepest-descent '
                              'step (first step, memory reset); default: --sigma-b')
+    parser.add_argument('--first-step-sigma-b', type=float, default=None,
+                        help='exps1 (2026-11-11): sigma_b-scaled first step (and after a memory reset), d = -c sigma_b^2 g with '
+                             'the largest |d|/sigma_b equal to this fraction (e.g. 1.0); overrides --first-step-max')
     parser.add_argument('--max-backtrack', type=int, default=6,
                         help='Max step halvings along one direction before '
                              'declaring a line-search stall (0 = old unit-step '
@@ -566,7 +586,19 @@ def main():
                         help='If set, write adj_boundaries_iter{N}.nc4 (boundary '
                              'accumulators + monthly obs gradients) here each iteration')
     args = parser.parse_args()
-    first_step = args.first_step_max if args.first_step_max is not None else args.sigma_b
+    sig_b = args.sigma_b                       # scalar, or one value per control element (--sigma-b-file)
+    if args.sigma_b_file:
+        sig_b = np.load(args.sigma_b_file)['sigma_b'].astype(np.float64).ravel()
+        if not np.all(np.isfinite(sig_b)) or sig_b.min() <= 0:
+            print(f'ERROR: {args.sigma_b_file}: sigma_b must be finite and > 0', file=sys.stderr)
+            sys.exit(2)
+        print(f'  sigma_b from {args.sigma_b_file}: min {sig_b.min():.4g} median {np.median(sig_b):.4g} '
+              f'max {sig_b.max():.4g}')
+    first_step = args.first_step_max if args.first_step_max is not None else float(np.median(sig_b))
+    sig_b_scale = None
+    if args.first_step_sigma_b is not None:
+        first_step = float(args.first_step_sigma_b)
+        print(f'  first step sigma_b-scaled: max |dx| / sigma_b = {first_step:g}')
     if args.grid == 'cs':
         global CS_IM
         CS_IM = args.cs_res
@@ -577,6 +609,18 @@ def main():
     fields = [f for f in args.fields.split(',') if f]
     nfld = len(fields)
     n = nfld * nmon * args.nlat * args.nlon
+    # bounds: scalars (all fields) or one value per control element (--sigma-bounds-field)
+    sig_lo, sig_hi = args.sigma_min, args.sigma_max
+    if args.sigma_bounds_field:
+        pairs = [tuple(float(v) for v in b.split(':')) for b in args.sigma_bounds_field.split(',') if b]
+        if len(pairs) != nfld or any(len(p) != 2 or not p[0] < 1.0 < p[1] for p in pairs):
+            print(f'ERROR: --sigma-bounds-field {args.sigma_bounds_field}: need {nfld} lo:hi pairs with lo < 1 < hi',
+                  file=sys.stderr)
+            sys.exit(2)
+        blk = nmon * args.nlat * args.nlon
+        sig_lo = np.repeat([p[0] for p in pairs], blk).astype(np.float64)
+        sig_hi = np.repeat([p[1] for p in pairs], blk).astype(np.float64)
+        print('  bounds per field: ' + ', '.join(f'{f} [{lo:g}, {hi:g}]' for f, (lo, hi) in zip(fields, pairs)))
     m = args.m
 
     history_csv = args.history_csv or os.path.join(
@@ -661,11 +705,16 @@ def main():
         print(f'ERROR reading J / gradient: {exc}', file=sys.stderr)
         sys.exit(2)
 
-    # Background cost and gradient: J_b = 0.5 * ||x-1||^2 / sigma_b^2
-    # (per month; x already stacks the 12 monthly fields)
+    # Background cost and gradient: J_b = 0.5 * sum((x-1)^2 / sigma_b^2)
+    # (per month; x already stacks the 12 monthly fields; sigma_b scalar or per element)
+    if np.ndim(sig_b) and sig_b.size != n:
+        print(f'ERROR: sigma_b has {sig_b.size} elements, the control {n}', file=sys.stderr)
+        sys.exit(2)
+    if args.first_step_sigma_b is not None:              # sigma_b per element for the sigma_b-scaled first step
+        sig_b_scale = np.broadcast_to(np.asarray(sig_b, dtype=np.float64), (n,)).copy()
     delta  = x_cur - 1.0
-    J_b    = 0.5 * np.dot(delta, delta) / args.sigma_b ** 2
-    g_b    = delta / args.sigma_b ** 2
+    J_b    = 0.5 * float(np.sum(delta ** 2 / sig_b ** 2))
+    g_b    = delta / sig_b ** 2
 
     J_cur  = J_obs + J_b
     g_cur  = g_obs + g_b
@@ -696,8 +745,8 @@ def main():
               n_reject_total=n_reject_total)
     x_next, st, info = lbfgs_backtrack_step(x_cur, g_cur, J_cur, st,
                                             m, args.c1, args.max_backtrack,
-                                            args.sigma_min, args.sigma_max,
-                                            first_step)
+                                            sig_lo, sig_hi,
+                                            first_step, sig_b_scale)
 
     # console step report
     if info.get('action') in ('accept', 'init'):

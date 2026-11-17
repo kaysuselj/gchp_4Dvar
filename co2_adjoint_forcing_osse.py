@@ -77,11 +77,13 @@ M_CO2 = 44.01
 # SpeciesAdj [1/(kg_CO2/kg_dry)] = forcing [ppm^-1] * (M_AIR/M_CO2) * 1e6
 PPM_TO_MMR_ADJ = (M_AIR / M_CO2) * 1e6   # ≈ 6.585e5
 
-from convert_satelite_tracks_osse import read_oco_daily_osse
+from convert_satelite_tracks_osse import read_oco_daily_osse, OSSE_SUB_FOLDS
 import calendar
 
-# OSSE data location
+# OSSE data location (default). --obs-dir / --obs-subdirs replace both, e.g. the real OCO-2 B11.2 LN + LG
+# retrievals (4dvar_realcase): the retrieved xCO2 is then the observation (no semi-obs truth file).
 BASE_FOLD_OBS = '/nobackupp17/jliu7/OCO2/L2#/OCO2-B10/PSEUDO/TRENDY/ORCHIDEE-ECCO2/'
+OBS_SUB_FOLDS = OSSE_SUB_FOLDS
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +176,7 @@ def nearest_checkpoint(obs_time, checkpoints, ts_chem_s):
 # Read OSSE observations (monthly aggregation from daily files)
 # ---------------------------------------------------------------------------
 
-def read_oco_monthly_osse(year, month, base_fold):
+def read_oco_monthly_osse(year, month, base_fold, sub_folds=OSSE_SUB_FOLDS):
     """
     Read OSSE OCO-2 observations for a given month.
 
@@ -198,7 +200,7 @@ def read_oco_monthly_osse(year, month, base_fold):
     for day in range(1, num_days + 1):
         try:
             date = f'{year}{month:02d}{day:02d}'
-            ds = read_oco_daily_osse(date, base_fold)
+            ds = read_oco_daily_osse(date, base_fold, sub_folds)
             if ds is not None:
                 datasets.append(ds)
         except Exception as e:
@@ -862,7 +864,7 @@ def _accumulate_forcing_one_file(gchp_file, checkpoints, obs_by_ckpt, stats,
         # Normalize GCHP longitudes to [0, 360) to match OCO-2
         gchp_lons_m = gchp_lons_m % 360
 
-        ds_obs = read_oco_monthly_osse(year, month, BASE_FOLD_OBS)
+        ds_obs = read_oco_monthly_osse(year, month, BASE_FOLD_OBS, OBS_SUB_FOLDS)
         if ds_obs is None:
             print('  No OSSE OCO-2 data, skipping')
             continue
@@ -1329,7 +1331,39 @@ if __name__ == '__main__':
                              'make_semi_obs_xco2_simplified.py. Activates simplified '
                              'mode: fixed mean AK for all obs, no ORCHIDEE-ECCO2 reads. '
                              'Requires --semi-obs-file (may be the same file).')
+    parser.add_argument('--obs-dir', default=None,
+                        help='Root of the daily OCO-2 L2# files (<obs-dir>/<subdir>/YYYY/MM/DD.nc) instead of the '
+                             'ORCHIDEE-ECCO2 OSSE data; the retrieved xCO2 is the observation. Real data '
+                             '(4dvar_realcase): /nobackupp17/jliu7/OCO2/L2#/OCO2-B11.2/ with --obs-subdirs LN,LG')
+    parser.add_argument('--obs-subdirs', default=None,
+                        help='Comma-separated mission subdirectories under --obs-dir (default: the OSSE ones)')
+    parser.add_argument('--osse-subdirs', default=None,
+                        help='OSSE (semi-obs truth) only: comma-separated subdirectories of the ORCHIDEE-ECCO2 L2# '
+                             'set that provide the AK / prior / uncertainty, instead of the default LG,LN (exps1 '
+                             '2026-11-09: OCO2b10_29Aug2020_LG,OCO2b10_29Aug2020_LN,OCO2b10_29Aug2020_OG)')
     args = parser.parse_args()
+
+    if args.obs_dir or args.obs_subdirs:
+        if not (args.obs_dir and args.obs_subdirs):
+            parser.error('--obs-dir and --obs-subdirs go together')
+        if args.semi_obs_file or args.semi_obs_dir or args.simplified_ak_file:
+            parser.error('--obs-dir (real observations) excludes the OSSE truth options '
+                         '--semi-obs-file / --semi-obs-dir / --simplified-ak-file')
+        BASE_FOLD_OBS = args.obs_dir
+        OBS_SUB_FOLDS = tuple(x for x in args.obs_subdirs.split(',') if x)
+        for sub in OBS_SUB_FOLDS:
+            if not os.path.isdir(os.path.join(BASE_FOLD_OBS, sub)):
+                parser.error(f'observation directory {os.path.join(BASE_FOLD_OBS, sub)} not found')
+        print(f'Observations: {BASE_FOLD_OBS} {", ".join(OBS_SUB_FOLDS)} (retrieved xCO2)')
+
+    if args.osse_subdirs:
+        if args.obs_dir:
+            parser.error('--osse-subdirs is for the OSSE (semi-obs) mode; real observations use --obs-subdirs')
+        OBS_SUB_FOLDS = tuple(x for x in args.osse_subdirs.split(',') if x)
+        for sub in OBS_SUB_FOLDS:
+            if not os.path.isdir(os.path.join(BASE_FOLD_OBS, sub)):
+                parser.error(f'observation directory {os.path.join(BASE_FOLD_OBS, sub)} not found')
+        print(f'OSSE observation subdirectories: {", ".join(OBS_SUB_FOLDS)}')
 
     if args.obs_error_inflation <= 0:
         parser.error('--obs-error-inflation must be > 0')

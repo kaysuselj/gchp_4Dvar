@@ -1,0 +1,8 @@
+#!/bin/bash
+#PBS -S /bin/bash
+#PBS -j oe
+#PBS -W group_list=s1055
+#PBS -q devel
+#PBS -l select=1:ncpus=28:model=bro_ele
+#PBS -l walltime=00:30:00
+cd /nobackupp27/ksuselj1/gchp_14.8.0_adj/gchp_4Dvar/osse_setup && ./sync_from_pleiades.sh && cd .. && git status --short | head -60 && du -sh osse_setup/exps1

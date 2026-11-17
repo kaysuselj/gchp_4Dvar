@@ -1,0 +1,4 @@
+2026-11-11 15:40:06 exps1 control set osse1_c48 (4dvar): copy of /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/control_files_148_c48_min_monthly_ocean_adjm/forward
+  ADJ_METHOD 3; slim ExtData.rc (full one kept as ExtData.rc.full)
+  TER = /nobackupp27/ksuselj1/gchp_14.8.0_adj/inputs/surface_fluxes_osse/TER/ORCHIDEE (HEMCO container TER_CLASS_CTEM), ocean = /nobackupp27/ksuselj1/gchp_14.8.0_adj/inputs/surface_fluxes_osse/Ocean/ECCO-Darwin-MON-v05 (container OCEAN_ECCO_DARWIN)
+  track_file_osse_2016.nc -> /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1/obs_c24_1510_1705/track_file_lnlgog_201510_201705.nc (LN + LG + OG)

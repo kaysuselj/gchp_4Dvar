@@ -1,0 +1,34 @@
+#!/bin/bash
+#PBS -S /bin/bash
+#PBS -j oe
+#PBS -W group_list=s1055
+#PBS -q devel
+#PBS -l select=1:ncpus=28:model=bro_ele
+#PBS -l walltime=00:20:00
+# exps1: TER ORCHIDEE and MOM6-MON into inputs/surface_fluxes_osse (2015-2016, as the other OSSE fluxes); check the
+# converter on CLASS-CTEM against the existing converted files.
+set -euo pipefail
+PY=/nobackup/ksuselj1/envs/gchp_4dvar/bin/python3
+V=/nobackupp17/jliu7/INVENTORY/V4; I=/nobackupp27/ksuselj1/gchp_14.8.0_adj/inputs/surface_fluxes_osse
+rm -rf /tmp/ctem_check; $PY -I /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1/scripts/convert_jliu_monthly.py $V/TER2/CLASS-CTEM /tmp/ctem_check 2016
+$PY -I - <<PYEOF
+import numpy as np, netCDF4 as nc
+for m in range(1, 13):
+    a = nc.Dataset("/tmp/ctem_check/2016/%02d.nc" % m); b = nc.Dataset("$I/TER/CLASS-CTEM/2016/%02d.nc" % m)
+    for k in ("CO2_Flux", "Uncertainty", "lat", "lon", "time"):
+        assert np.array_equal(np.asarray(a[k][:]), np.asarray(b[k][:]), equal_nan=True), (m, k)
+print("converter check: CLASS-CTEM 2016 identical to the existing files (CO2_Flux, Uncertainty, lat, lon, time)")
+PYEOF
+rm -rf /tmp/ecco_check; $PY -I /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1/scripts/convert_jliu_monthly.py $V/Ocean/ECCO-Darwin-MON-v05 /tmp/ecco_check 2016; $PY -I /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1/scripts/cmp_ecco_conv.py
+ls -la $I/TER/ORCHIDEE/2016 $I/Ocean/MOM6-MON/2016 | head -8
+$PY -I - <<PYEOF
+import numpy as np, netCDF4 as nc
+c = nc.Dataset("/nobackupp17/lwu5/GCHP/ExtData/GEOS_4x5/MERRA2/2015/01/MERRA2.20150101.CN.4x5.nc4")
+fl = np.squeeze(c["FRLAND"][:]) + np.squeeze(c["FRLANDIC"][:])
+for m in (1, 7):
+    d = nc.Dataset("$I/TER/CLASS-CTEM/2016/%02d.nc" % m)
+    u = np.squeeze(d["Uncertainty"][:]); f = np.squeeze(d["CO2_Flux"][:])
+    i, j = np.where(np.isnan(u))
+    print("CTEM Uncertainty NaN, month", m, ":", i.size, "cells; TER there: max |flux|", float(np.abs(f[i, j]).max()), "of", float(np.abs(f).max()),
+          "; land fraction there: max", float(fl[i, j].max()), "; lats", sorted(set((-89 + 4 * i).tolist()))[:12])
+PYEOF

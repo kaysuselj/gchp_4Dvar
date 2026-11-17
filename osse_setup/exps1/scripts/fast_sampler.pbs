@@ -1,0 +1,23 @@
+#!/bin/bash
+#PBS -S /bin/bash
+#PBS -j oe
+#PBS -W group_list=s1055
+#PBS -q normal
+#PBS -l select=1:ncpus=24:mpiprocs=24:model=bro_ele
+#PBS -l walltime=02:00:00
+# exps1: sample the truth forward with the fast copy of make_sat_track_offline.py into OutputDir_fast and check it
+# against the file(s) the original sampler already wrote (identical expected).
+set -euo pipefail
+PY=/nobackup/ksuselj1/envs/gchp_4dvar/bin/python3
+F=/nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1/truth_c24/forward_run
+cd $F
+rm -rf OutputDir_fast; mkdir OutputDir_fast
+date; $PY -I /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1/scripts/make_sat_track_offline_fast.py --track track_file_osse_2016.nc --inst-glob "OutputDir/GEOSChem.Inst30.*.nc4" --out-dir OutputDir_fast; date
+$PY -I - <<PYEOF
+import glob, os, numpy as np, netCDF4 as nc
+for f in sorted(glob.glob("$F/OutputDir/GEOSChem.sat_track.*.nc4")):
+    g = "$F/OutputDir_fast/" + os.path.basename(f)
+    a, b = nc.Dataset(f), nc.Dataset(g)
+    bad = [k for k in a.variables if not np.array_equal(np.asarray(a[k][:]), np.asarray(b[k][:]), equal_nan=True)]
+    print(os.path.basename(f), "IDENTICAL" if not bad else "DIFFERENT: %s" % bad)
+PYEOF

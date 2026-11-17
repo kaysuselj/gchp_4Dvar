@@ -352,6 +352,15 @@ NLON=${NLON:-72}
 SIGMA_B=${SIGMA_B:-0.2}
 SIGMA_MIN=${SIGMA_MIN:-0.0}              # lower bound for sigma (physical: >= 0)
 SIGMA_MAX=${SIGMA_MAX:-3.0}              # upper bound for sigma (sanity cap)
+# exps1 (2026-11-09): bounds per control field, "lo:hi:lo:hi" in field order (TER, ocean), e.g. 0:4:-4:4 (colons: qsub -v
+# splits on commas). Empty = SIGMA_MIN/SIGMA_MAX for every field (monthly mode only).
+SIGMA_BOUNDS_FIELD="${SIGMA_BOUNDS_FIELD:-}"
+# exps1 (2026-11-09): OSSE observation subdirectories of the ORCHIDEE-ECCO2 L2# set (AK, prior, uncertainty), colon-separated,
+# e.g. OCO2b10_29Aug2020_LG:OCO2b10_29Aug2020_LN:OCO2b10_29Aug2020_OG. Empty = LG + LN (all earlier OSSEs).
+OSSE_SUBDIRS="${OSSE_SUBDIRS:-}"
+# exps1 (2026-11-11): sigma_b-scaled first L-BFGS step (and after a memory reset): largest |dx|/sigma_b = this fraction,
+# e.g. 1.0 (lbfgsb_step_monthly.py --first-step-sigma-b). Empty = the default step (largest |dx| = median sigma_b).
+FIRST_STEP_SIGMA_B="${FIRST_STEP_SIGMA_B:-}"
 MAX_ITER=${MAX_ITER:-20}                 # GLOBAL iteration cap across all chained jobs
 GTOL=${GTOL:-1e-5}
 FTOL=${FTOL:-1e-8}
@@ -359,7 +368,8 @@ PLATEAU_N=${PLATEAU_N:-1}               # stop when |dJ/J| < FTOL on PLATEAU_N c
 # PLOT_EVERY: per-iteration plots (pipeline, emissions, TER) only every N iterations, plus
 # iteration 1, convergence and the end (default 1 = every iteration). Data archives are unaffected.
 PLOT_EVERY=${PLOT_EVERY:-1}
-plot_now() { [ "${CUR_ITER}" -eq 1 ] || [ $(( CUR_ITER % PLOT_EVERY )) -eq 0 ]; }
+# PLOT_EVERY=0 (2026-11-06): no per-iteration plots at all (the final convergence plots at the end still run)
+plot_now() { [ "${PLOT_EVERY}" -gt 0 ] && { [ "${CUR_ITER}" -eq 1 ] || [ $(( CUR_ITER % PLOT_EVERY )) -eq 0 ]; }; }
 SAVE_DIAG=${SAVE_DIAG:-true}
 RESTART=${RESTART:-false}
 
@@ -388,6 +398,20 @@ if [ "${OBS_MODE}" = "simplified" ]; then
 fi
 [ "${OBS_MODE}" = "real" ] && [ -n "${SEMI_OBS_FILE}" ] && \
     { [ -f "${SEMI_OBS_FILE}" ] || die "SEMI_OBS_FILE not found: ${SEMI_OBS_FILE}"; }
+# Real observations (4dvar_realcase, 2026-11-05): OBS_DIR + OBS_SUBDIRS = daily L2# files of the retrievals
+# (e.g. /nobackupp17/jliu7/OCO2/L2#/OCO2-B11.2/ with LN:LG, colon-separated so qsub -v passes it); the retrieved xCO2 is the observation, so no
+# semi-obs truth file. SIGMA_B_FILE: sigma_b per control element (npz 'sigma_b', layout of x) instead of SIGMA_B.
+OBS_DIR="${OBS_DIR:-}"
+OBS_SUBDIRS="${OBS_SUBDIRS:-}"
+SIGMA_B_FILE="${SIGMA_B_FILE:-}"
+if [ -n "${OBS_DIR}" ]; then
+    [ "${OBS_MODE}" = "real" ] || die "OBS_DIR needs OBS_MODE=real"
+    [ -n "${OBS_SUBDIRS}" ]    || die "OBS_DIR needs OBS_SUBDIRS (e.g. LN:LG)"
+    case "${OBS_SUBDIRS}" in *,*) die "OBS_SUBDIRS is colon-separated (LN:LG): qsub -v splits on commas" ;; esac
+    [ -z "${SEMI_OBS_FILE}" ]  || die "OBS_DIR (real observations) and SEMI_OBS_FILE (OSSE truth) exclude each other"
+    for _sub in ${OBS_SUBDIRS//:/ }; do [ -d "${OBS_DIR}/${_sub}" ] || die "observations ${OBS_DIR}/${_sub} not found"; done
+fi
+[ -z "${SIGMA_B_FILE}" ] || [ -f "${SIGMA_B_FILE}" ] || die "SIGMA_B_FILE not found: ${SIGMA_B_FILE}"
 
 # Parallelism knob: one PBS node = 24 MPI ranks, so total cores = NODES * 24,
 # mapped to a cubed-sphere layout by NXNY_AUTO in runConfig. Default 1 node
@@ -403,6 +427,15 @@ CHAIN=${CHAIN:-true}                     # resubmit self when walltime is spent
 CHAIN_N=${CHAIN_N:-0}                    # chained-job counter (safety)
 MAX_CHAIN=${MAX_CHAIN:-60}
 WALLTIME_S=${WALLTIME_S:-86400}          # must match the #PBS walltime
+# 2026-11-06: use the walltime PBS actually granted (an inherited WALLTIME_S from a resubmitting job with a shorter
+# allocation would otherwise make this job stop and resubmit too early)
+if [ -n "${PBS_JOBID:-}" ] && command -v qstat >/dev/null 2>&1; then
+    _wt=$(qstat -f "${PBS_JOBID}" 2>/dev/null | awk -F'= ' '/Resource_List.walltime/{print $2}' | head -1 || true)   # (no early awk exit: SIGPIPE + pipefail killed the job)
+    if [[ "${_wt}" =~ ^[0-9]+:[0-9]{2}:[0-9]{2}$ ]]; then
+        IFS=: read -r _wh _wm _wsec <<< "${_wt}"
+        WALLTIME_S=$(( 10#${_wh} * 3600 + 10#${_wm} * 60 + 10#${_wsec} ))
+    fi
+fi
 WALLTIME_MARGIN_S=${WALLTIME_MARGIN_S:-1800}
 # Per-simulated-month cost estimates; the whole forward/adjoint estimate scales
 # with the window so both annual (1 month) and monthly (12 months) are correct.
@@ -428,6 +461,11 @@ VPASS="${VPASS},GRID=${GRID},EXP_NAME=${EXP_NAME},NODES=${NODES}"
 VPASS="${VPASS},SAT_TRACK_FILE=${SAT_TRACK_FILE},GCHP_VERSION=${GCHP_VERSION},PLOT_EVERY=${PLOT_EVERY}"
 VPASS="${VPASS},OBS_TYPE=${OBS_TYPE},OBS_MODE=${OBS_MODE}"
 [ -n "${SEMI_OBS_FILE}" ]       && VPASS="${VPASS},SEMI_OBS_FILE=${SEMI_OBS_FILE}"
+[ -n "${OBS_DIR}" ]             && VPASS="${VPASS},OBS_DIR=${OBS_DIR},OBS_SUBDIRS=${OBS_SUBDIRS}"
+[ -n "${SIGMA_B_FILE}" ]        && VPASS="${VPASS},SIGMA_B_FILE=${SIGMA_B_FILE}"
+[ -n "${SIGMA_BOUNDS_FIELD}" ]  && VPASS="${VPASS},SIGMA_BOUNDS_FIELD=${SIGMA_BOUNDS_FIELD}"
+[ -n "${OSSE_SUBDIRS}" ]        && VPASS="${VPASS},OSSE_SUBDIRS=${OSSE_SUBDIRS}"
+[ -n "${FIRST_STEP_SIGMA_B}" ]  && VPASS="${VPASS},FIRST_STEP_SIGMA_B=${FIRST_STEP_SIGMA_B}"
 [ -n "${SIMPLIFIED_AK_FILE}" ]  && VPASS="${VPASS},SIMPLIFIED_AK_FILE=${SIMPLIFIED_AK_FILE}"
 [ -n "${CTRL_FWD_DIR}" ]        && VPASS="${VPASS},CTRL_FWD_DIR=${CTRL_FWD_DIR}"
 [ -n "${CTRL_ADJ_DIR}" ]        && VPASS="${VPASS},CTRL_ADJ_DIR=${CTRL_ADJ_DIR}"
@@ -455,7 +493,9 @@ resubmit() {
         die "MAX_CHAIN=${MAX_CHAIN} chained jobs reached — refusing to resubmit (raise MAX_CHAIN if intended)"
     fi
     log "Resubmitting self (chain job $((CHAIN_N + 1)))"
+    # resubmit with this job's walltime (WALLTIME_S), not the #PBS header default
     qsub -N "${JOB_NAME}" -l "select=${NODES}:ncpus=24:mpiprocs=24:model=bro_ele" \
+        -l "walltime=$(( WALLTIME_S / 3600 )):$(printf '%02d' $(( WALLTIME_S % 3600 / 60 ))):00" \
         -v "RESTART=true,CHAIN_N=$((CHAIN_N + 1)),${VPASS}" "${SELF}" \
         || die "qsub resubmission failed — resume manually with RESTART=true"
     exit 0
@@ -951,12 +991,15 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
 
         # Build observation-mode flags
         _obs_flags=""
-        if [ "${OBS_MODE}" = "simplified" ]; then
+        if [ -n "${OBS_DIR}" ]; then
+            _obs_flags="--obs-dir ${OBS_DIR} --obs-subdirs ${OBS_SUBDIRS//:/,}"
+            log "  OBS_MODE=real, observations ${OBS_DIR} (${OBS_SUBDIRS}), retrieved xCO2"
+        elif [ "${OBS_MODE}" = "simplified" ]; then
             _obs_flags="--simplified-ak-file ${SIMPLIFIED_AK_FILE} --semi-obs-file ${SEMI_OBS_FILE}"
             log "  OBS_MODE=simplified: using fixed mean AK from $(basename "${SIMPLIFIED_AK_FILE}")"
         elif [ -n "${SEMI_OBS_FILE}" ]; then
-            _obs_flags="--semi-obs-file ${SEMI_OBS_FILE}"
-            log "  OBS_MODE=real (semi-obs-file): $(basename "${SEMI_OBS_FILE}")"
+            _obs_flags="--semi-obs-file ${SEMI_OBS_FILE}${OSSE_SUBDIRS:+ --osse-subdirs ${OSSE_SUBDIRS//:/,}}"
+            log "  OBS_MODE=real (semi-obs-file): $(basename "${SEMI_OBS_FILE}")${OSSE_SUBDIRS:+, subdirs ${OSSE_SUBDIRS}}"
         else
             log "  OBS_MODE=real (ORCHIDEE-ECCO2 L2# per-obs AK)"
         fi
@@ -1034,8 +1077,10 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
                 --fields "${ADJ_FIELDS}" \
                 --archive-dir "${OUTPUT_DIR}" \
                 --n-months "${NMON}" \
-                --sigma-b "${SIGMA_B}" \
+                --sigma-b "${SIGMA_B}" ${SIGMA_B_FILE:+--sigma-b-file "${SIGMA_B_FILE}"} \
                 --sigma-min "${SIGMA_MIN}" --sigma-max "${SIGMA_MAX}" \
+                ${FIRST_STEP_SIGMA_B:+--first-step-sigma-b "${FIRST_STEP_SIGMA_B}"} \
+                ${SIGMA_BOUNDS_FIELD:+--sigma-bounds-field "$(echo "${SIGMA_BOUNDS_FIELD}" | sed -E 's/([^:]*:[^:]*):/\1,/g')"} \
                 --t-start "${T_START}" --t-end "${T_END}" \
                 --gtol "${GTOL}" --ftol "${FTOL}" --plateau-n "${PLATEAU_N}" \
                 || rc=$?

@@ -33,18 +33,25 @@ mkdir -p "${EXP}/taylor"
 LOCK="${EXP}/taylor/.lock_${DIRN//:/}"
 exec 9>"${LOCK}"; flock -n 9 || die "another Taylor job for ${EXP} dir ${DIRN} is running (${LOCK})"
 exec > >(tee -a "${EXP}/taylor/taylor_${DIRN//:/}.log") 2>&1
-RUNF=$(ls "${EXP}"/4dvar_optimizer.osse.*.run | head -1)
+RUNF=$(ls "${EXP}"/4dvar_optimizer.*.run | grep -v -E "\.(pre_|bak)" | head -1)   # OSSE: .osse.<name>.run, realcase: .realcase.<name>.run
 SEMI=$(sed -n 's/^SEMI_OBS_FILE="${SEMI_OBS_FILE:-\(.*\)}"$/\1/p' "${RUNF}" | head -1)
-[ -f "${SEMI}" ] || die "observation file not found in ${RUNF}"
+# real observations (4dvar_realcase, 2026-11-05): OBS_DIR / OBS_SUBDIRS defaults of the run file instead of a truth file
+OBSD=$(sed -n 's/^OBS_DIR="${OBS_DIR:-\(.*\)}"$/\1/p' "${RUNF}" | head -1)
+OBSS=$(sed -n 's/^OBS_SUBDIRS="${OBS_SUBDIRS:-\(.*\)}"$/\1/p' "${RUNF}" | head -1)
+if [ -n "${OBSD}" ]; then OBSFLAGS="--obs-dir ${OBSD} --obs-subdirs ${OBSS//:/,}"
+else [ -f "${SEMI}" ] || die "observation file not found in ${RUNF}"; OBSFLAGS="--semi-obs-file ${SEMI}"; fi
 NCORES=$(awk -F= '/^TOTAL_CORES=/{print $2}' "${EXP}/forward_run/runConfig_forward.sh")
 CS_RES=$(awk -F'[[:space:]:]+' '/^GCHP.IM_WORLD/{print $2}' "${EXP}/forward_run/GCHP.rc")
 MONTHLY=0; [ -d "${EXP}/prior_err_monthly" ] && MONTHLY=1
 NFLD=1; [ -d "${EXP}/prior_err_ocean_monthly" ] && NFLD=2
-T_START=2016-01-01; T_END=2016-04-01; NMON=3
-if [ "${MONTHLY}" = 1 ]; then      # window length from the state: n = NFLD * NMON * 6 * CS_RES^2 (12 months = 2016)
+# window: the run file's T_START default (2016-01-01 in the OSSEs), length from the state
+T_START=$(sed -n 's/^T_START=${T_START:-\([0-9-]*\)}.*/\1/p' "${RUNF}" | head -1); T_START=${T_START:-2016-01-01}
+T_END=$(date -d "${T_START} + 3 months" +%F); NMON=3
+if [ "${MONTHLY}" = 1 ]; then      # window length from the state: n = NFLD * NMON * 6 * CS_RES^2
     NMON=$(${PY} -I -c "import numpy as np,sys;print(np.load(sys.argv[1])['x_prev'].size//(${NFLD}*6*${CS_RES}**2))" "${STATE}")
-    case "${NMON}" in 3) ;; 12) T_END=2017-01-01 ;; *) die "unexpected window of ${NMON} months" ;; esac
+    T_END=$(date -d "${T_START} + ${NMON} months" +%F)
 fi
+START_MONTH=$(( 10#${T_START:5:2} ))
 log "Taylor test ${EXP}  dir ${DIRN}  eps ${EPSLIST}  C${CS_RES} ${NCORES} cores  monthly ${MONTHLY} (${NMON} months, ${NFLD} field(s))  state ${STATE}"
 
 for E in $(echo "${EPSLIST}" | tr ':' ' '); do
@@ -67,7 +74,7 @@ for E in $(echo "${EPSLIST}" | tr ':' ' '); do
         for F in $(seq 1 ${NFLD}); do
             SD="${W}/sigma_monthly"; [ "${F}" = 2 ] && SD="${W}/sigma_ocean_monthly"
             ${PY} -I "${G}/write_sigma_monthly.py" --grid cs --cs-res "${CS_RES}" --sigma-dir "${SD}" \
-                --state-file "${W}/state_x.npz" --year 2016 --n-months ${NMON} --start-month 1 \
+                --state-file "${W}/state_x.npz" --year "${T_START:0:4}" --n-months ${NMON} --start-month ${START_MONTH} \
                 --n-fields ${NFLD} --field ${F} | tail -1
         done
     else
@@ -93,7 +100,7 @@ for E in $(echo "${EPSLIST}" | tr ':' ' '); do
     fi
     cd "${W}/forward_run"; mkdir -p "${W}/forcing"
     ${PY} "${G}/co2_adjoint_forcing_osse.py" OutputDir/GEOSChem.sat_track.*.nc4 "${W}/forcing" --ts-chem 1800 \
-        --t-start "${T_START}T00:00:00" --t-end "${T_END}T00:00:00" --semi-obs-file "${SEMI}" --no-save-diagnostics \
+        --t-start "${T_START}T00:00:00" --t-end "${T_END}T00:00:00" ${OBSFLAGS} --no-save-diagnostics \
         > "${W}/forcing.log" 2>&1 || { tail "${W}/forcing.log"; die "J computation"; }
     cp "${W}/forcing/J_value.txt" "${W}/J_value.txt"
     rm -rf "${W}/forcing"/CO2_adjoint_forcing_* "${W}/forward_run/OutputDir"/*

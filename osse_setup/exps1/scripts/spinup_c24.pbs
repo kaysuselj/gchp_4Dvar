@@ -1,0 +1,79 @@
+#!/bin/bash
+#PBS -S /bin/bash
+#PBS -N exps1_spinup_c24
+#PBS -l select=2:ncpus=24:mpiprocs=24:model=bro_ele
+#PBS -l walltime=04:00:00
+#PBS -q normal
+#PBS -j oe
+#PBS -W group_list=s1055
+# ============================================================================
+# exps1 C24 spin-up (2026-11-10): the window starts 2015-10-01, but the only restarts are 2015-01-01 (lwu5 GCHP carbon run)
+# and 2016-01-01. Run the exps1 truth (control set exps1/ctrl/truth_c24: ORCHIDEE TER, ECCO-Darwin, ORCHIDEE GPP,
+# CARDAMOM, FF_regrid2) from lwu5's 2015-01-01 restart (DELP_DRY set to 0, as all OSSE restarts) to 2015-10-01 and write
+#   exps1/inputs/GEOSChem.Restart.20151001_0000z.c24.noDELP.nc4  (final state, time 2015-10-01, DELP_DRY 0)
+# No sampling, no History output needed.
+# ============================================================================
+set -euo pipefail
+X=/nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1
+SRC_RST=/nobackupp17/lwu5/GCHP/GCHP_run/gchp_merra2_carbon_CO2/Restarts/GEOSChem.Restart.20150101_0000z.c24.nc4
+RUN=${X}/spinup_c24/run; OUT=${X}/inputs
+NCORES=48; NODES=2; PPN=24
+PY=/nobackup/ksuselj1/envs/gchp_4dvar/bin/python3
+log() { echo "[$(date '+%F %T')] $*"; }
+die() { echo "ERROR: $*" >&2; exit 1; }
+mkdir -p "${RUN}" "${OUT}"
+rsync -a "${X}/ctrl/truth_c24/forward/" "${RUN}/"
+cd "${RUN}"
+${PY} -I - "${SRC_RST}" "${OUT}/GEOSChem.Restart.20150101_0000z.c24.noDELP.nc4" <<'PYEOF'
+import sys, shutil, netCDF4 as nc
+src, dst = sys.argv[1], sys.argv[2]
+shutil.copy(src, dst)
+with nc.Dataset(dst, "a") as d:
+    d["DELP_DRY"][:] = 0.0
+    d.history = f"copy of {src} with DELP_DRY = 0 (exps1 spin-up start)"
+print("start restart:", dst)
+PYEOF
+ln -sfn "${OUT}/GEOSChem.Restart.20150101_0000z.c24.noDELP.nc4" Restarts/GEOSChem.Restart.20150101_0000z.c24.nc4
+sed -i -e "s|^INITIAL_RESTART=.*|INITIAL_RESTART=./Restarts/GEOSChem.Restart.20150101_0000z.c24.nc4|" \
+       -e 's/^Start_Time=.*/Start_Time="20150101 000000"/' -e 's/^End_Time=.*/End_Time="20151001 000000"/' \
+       -e 's/^Duration=.*/Duration="00000900 000000"/' \
+       -e "s/^TOTAL_CORES=.*/TOTAL_CORES=${NCORES}/" -e "s/^NUM_NODES=.*/NUM_NODES=${NODES}/" \
+       -e "s/^NUM_CORES_PER_NODE=.*/NUM_CORES_PER_NODE=${PPN}/" runConfig_forward.sh
+# no every-step output for the offline sampler (not needed for a spin-up)
+sed -i "s/^\([[:space:]]*\)'Inst30',/\1#'Inst30',/" HISTORY.rc
+set +eu; source ./gchp.env >/dev/null 2>&1; set -eu
+find OutputDir -maxdepth 1 -type f -delete 2>/dev/null || true
+rm -f Restarts/gcchem_internal_checkpoint* cap_restart gcadj_*checkpoint*
+log "spin-up 2015-01-01 -> 2015-10-01, ${NCORES} ranks, binary $(readlink -f gchp)"
+./runConfig_forward.sh > gchp.log 2>&1 || die "shim failed"
+grep -a "shim:" gchp.log | grep -q "GEOSChem.Restart.20150101_0000z.c24.noDELP.nc4" || die "shim did not take the 2015 restart: $(grep -a shim: gchp.log)"
+export MPI_LAUNCH_TIMEOUT=120
+mpiexec -n ${NCORES} ./gchp >> gchp.log 2>&1 &
+pid=$!
+while kill -0 "${pid}" 2>/dev/null; do
+    sleep 30
+    if grep -a -q "write file: Restarts/gcchem_internal_checkpoint" gchp.log && [ $(( $(date +%s) - $(stat -c %Y gchp.log) )) -ge 180 ]; then
+        log "final checkpoint written, finalize idle: stopping mpiexec"; kill "${pid}" 2>/dev/null; sleep 15; kill -9 "${pid}" 2>/dev/null || true; break
+    fi
+done
+wait "${pid}" 2>/dev/null || true
+nw=$(grep -a -n -m1 "write file: Restarts/gcchem_internal_checkpoint" gchp.log | cut -d: -f1)
+[ -n "${nw}" ] || die "no final checkpoint, see ${RUN}/gchp.log"
+head -n "${nw}" gchp.log | grep -a -q -E 'MPT ERROR|MPI_ABORT|aborting with error code|forrtl: severe|SIGSEGV|FAIL at line=' && die "GCHP crashed, see ${RUN}/gchp.log"
+grep -a "GCHP Date" gchp.log | tail -1
+${PY} -I - "${RUN}/Restarts/gcchem_internal_checkpoint" "${OUT}/GEOSChem.Restart.20151001_0000z.c24.noDELP.nc4" \
+    "${X}/../control_files_148/common/GEOSChem.Restart.20160101_0000z.c24.noDELP.nc4" <<'PYEOF'
+import sys, shutil, numpy as np, netCDF4 as nc
+src, dst, ref = sys.argv[1:4]
+shutil.copy(src, dst)
+with nc.Dataset(dst, "a") as d:
+    d["time"].units = "minutes since 2015-10-01 00:00:00"; d["time"][:] = 0
+    if "DELP_DRY" in d.variables:
+        d["DELP_DRY"][:] = 0.0
+    d.history = f"exps1 spin-up 2015-01-01 -> 2015-10-01 (truth fluxes) from lwu5's 2015-01-01 restart; DELP_DRY = 0"
+a, b = nc.Dataset(dst), nc.Dataset(ref)
+miss = sorted(set(b.variables) - set(a.variables))
+co2 = np.asarray(a["SPC_CO2"][:], float) * 1e6
+print(f"restart {dst}: CO2 min {co2.min():.1f} mean {co2.mean():.1f} max {co2.max():.1f} ppm; variables of the 2016 OSSE restart missing: {miss}")
+PYEOF
+log "ALL DONE"

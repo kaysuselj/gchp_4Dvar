@@ -38,7 +38,10 @@
 #                            3-month window Jan-Mar 2016, E per month in exps/<name>/prior_err_monthly/)
 #   --month-factors f1,f2,f3 monthly: E_m = (E from --prior-err) x f_m, e.g. --prior-err "--type constant --value 1"
 #                            --month-factors 1.3,1.0,0.8 (O7)
-#   --window 2016Q1|2016     monthly: 3-month window Jan-Mar 2016 (default) or the full year 2016 (12 months,
+#   --window 2016Q1|2016|YYYY-MM:YYYY-MM   monthly: 3-month window Jan-Mar 2016 (default), the full year 2016 (12 months,
+#                            or (exps1, 2026-11-10) any window from the first month to the end month (exclusive), e.g.
+#                            2015-10:2017-05 = 2015-10-01 .. 2017-05-01, 19 months; the observation files are then
+#                            semi_obs_xco2_<YYYYMM>_<YYYYMM>.nc / truth_emissions_monthly_<YYYYMM>_<YYYYMM>.nc (--obs-root)
 #                            T_END 2017-01-01, truth obs148_2016/ from truth148_2016/run_truth148_2016.pbs)
 #   --ocean "<opts>"         DEV3 (monthly only): ocean flux in the control as field 2 (prior ocean = ocean x E_ocn,
 #                            E_ocn from make_prior_err.py <opts>, e.g. "--type constant --value 0.8"; same sigma_b):
@@ -48,15 +51,21 @@
 #                            gchp_4Dvar/make_noisy_obs.py adds seeded noise to the truth observations)
 #   --lin                    O10: linear advection (hord_tr 2 / kord_tr 17) in truth AND 4D-Var, DL adjoint (exact):
 #                            control_files_148_LIN, observations obs148_lin (truth148_lin/run_truth148_lin.pbs); C24 only
-#   --release rc4|rc3        code release (2026-10-28). rc4 (DEFAULT): binary gchp.rc4b_20261028 and the *_rc4 control sets
+#   --release adjm|rc4|rc3   code release. adjm is the DEFAULT since 2026-11-06 (user). rc4 (2026-10-28): binary gchp.rc4b_20261028 and the *_rc4 control sets
 #                            (make_ctrl_rc4.sh), checkpoint key ADJ_CKPT: 1 (RW) / 2 (DL); rc4 stops on the rc3 keys.
 #                            rc3: binary gchp.rc3_20261025 and the rc3 sets (ADJ_CKPT_REDUCED / ADJ_CKPT_TRAJ), for runs
 #                            started before 2026-10-28. Both give bit-identical results.
+#                            adjm (DEFAULT, 2026-11-06, branch adj-method): binary gchp.adjm_* and the *_adjm sets (make_ctrl_adjm.sh):
+#                            one key ADJ_METHOD (1 RW, 2 DL), adjoint output SurfaceFluxAdj at month starts only, debug prints off; stops on the
+#                            rc3/rc4 keys
 #   --ckpt min|reduced       adjoint checkpoints (2026-10-25, v1.0-rc3): min (DEFAULT) = one file per step with
 #                            the CO2 after advection (+ CO2 before advection for DL), all other fields recomputed; bit-identical
 #                            to reduced, ~25 % faster. reduced = ADJ_CKPT_REDUCED 1 (the control sets used up to 2026-10-25;
 #                            rc3 only, with rc4 use --ctrl with ADJ_CKPT: 3 for debugging)
 #   --ctrl <dir>             use this control set (<dir>/forward, <dir>/adjoint) instead of the one chosen by the options
+#   --exps-dir <dir>         create the experiment in <dir>/<name> instead of exps/<name> (exps1, 2026-11-09)
+#   --obs-root <dir>         observations from <dir> (semi_obs_xco2_<tag>.nc, truth_emissions_monthly_<tag>.nc) instead of
+#                            <osse root>/<obs dir> (exps1: exps1/obs_c24, LN + LG + OG)
 #   --dry-run                checks only
 #
 # Then:  cd exps/<name>; qsub 4dvar_optimizer.osse.<name>.run   (qsub -v MAX_ITER=..,SIGMA_B=.. to override)
@@ -68,12 +77,13 @@ TEMPLATE="${G4D}/4dvar_optimizer.osse.unified.run"
 # one binary for all new runs (user 2026-10-20): RW and DL (ADV_ADJ_METHOD) and the ocean field (ADJ_HEMCO_SFLUX2_DIAGN)
 GCHP_BIN_X="${GCHP_BIN:-}"                                       # environment override; default set by --release below
 BIN_RC4=/nobackupp27/ksuselj1/gchp_14.8.0_adj/code/build_rc4/bin/gchp.rc4b_20261028   # v1.0-rc4 (2026-10-28): ADJ_CKPT key, new defaults
+BIN_ADJM=/nobackupp27/ksuselj1/gchp_14.8.0_adj/code/build_adjm/bin/gchp.adjm_20261106c # adj-method (2026-11-06): ADJ_METHOD key, backwards History fix
 BIN_RC3=/nobackupp27/ksuselj1/gchp_14.8.0_adj/code/build_rc3/bin/gchp.rc3_20261025   # v1.0-rc3 (2026-10-25): DL trajectory fix + minimal checkpoints
 PYTHON_ENV="${PYTHON_ENV:-/nobackup/ksuselj1/envs/gchp_4dvar}"
 CTRL_FWD="${ROOT}/control_files/forward"
 CTRL_ADJ="${ROOT}/control_files/adjoint"
 
-NAME=""; PERR=""; PERR_FILE=""; OBS="satellite"; NODES=2; DRY=false; GV=14.8; FTOLX=""; PLOTX=""; RES=24; ADJ=rw; CMODE=annual; MFAC=""; LIN=false; WIN=2016Q1; OCN=""; OMFAC=""; OBSDIR_X=""; CKPT=min; CTRL_X=""; REL=rc4
+NAME=""; PERR=""; PERR_FILE=""; OBS="satellite"; NODES=2; DRY=false; GV=14.8; FTOLX=""; PLOTX=""; RES=24; ADJ=rw; CMODE=annual; MFAC=""; LIN=false; WIN=2016Q1; OCN=""; OMFAC=""; OBSDIR_X=""; CKPT=min; CTRL_X=""; REL=adjm; EXPS_X=""; OBSROOT_X=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --prior-err)      PERR="$2"; shift 2 ;;
@@ -93,6 +103,8 @@ while [ $# -gt 0 ]; do
         --ckpt)           CKPT="$2"; shift 2 ;;
         --release)        REL="$2"; shift 2 ;;
         --ctrl)           CTRL_X="$(readlink -f "$2")"; shift 2 ;;
+        --exps-dir)       EXPS_X="$(readlink -f "$2")"; shift 2 ;;
+        --obs-root)       OBSROOT_X="$(readlink -f "$2")"; shift 2 ;;
         --ocean)          OCN="$2"; shift 2 ;;
         --ocean-month-factors) OMFAC="$2"; shift 2 ;;
         --dry-run)        DRY=true; shift ;;
@@ -132,7 +144,8 @@ if [ "${LIN}" = true ]; then
 fi
 case "${CMODE}" in
     annual) [ -z "${MFAC}" ] || { echo "ERROR: --month-factors needs --mode monthly"; exit 1; } ;;
-    monthly) [ "${GV}" = 14.8 ] && [ "${RES}" = 24 ] && [ "${LIN}" = false ] || { echo "ERROR: --mode monthly only with --gchp 14.8 --res 24 (rw or dl, no --lin) so far"; exit 1; }
+    monthly) [ "${GV}" = 14.8 ] && [ "${LIN}" = false ] && { [ "${RES}" = 24 ] || [ -n "${CTRL_X}" ]; } \
+                 || { echo "ERROR: --mode monthly only with --gchp 14.8 --res 24 (rw or dl, no --lin), or any --res with --ctrl (exps1 C48, 2026-11-11)"; exit 1; }
              [ -z "${PERR_FILE}" ] || { echo "ERROR: --mode monthly needs --prior-err (E is written per month)"; exit 1; }
              CF=control_files_148_ckpt_reduced_monthly; [ -n "${OCN}" ] && CF=${CF}_ocean; [ "${ADJ}" = dl ] && CF=${CF}_DL
              CTRL_FWD="${ROOT}/${CF}/forward"; CTRL_ADJ="${ROOT}/${CF}/adjoint"
@@ -144,12 +157,19 @@ esac
 case "${WIN}" in
     2016Q1) TAG=2016Q1 ;;
     2016)   TAG=2016; NMONTHS=12; OBSD=obs148_2016 ;;
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]:[0-9][0-9][0-9][0-9]-[0-9][0-9])
+            [ -n "${OBSROOT_X}" ] || { echo "ERROR: --window ${WIN} needs --obs-root"; exit 1; }
+            WS=${WIN%%:*}; WE=${WIN##*:}
+            NMONTHS=$(( (10#${WE:0:4} * 12 + 10#${WE:5:2}) - (10#${WS:0:4} * 12 + 10#${WS:5:2}) ))
+            [ "${NMONTHS}" -ge 1 ] || { echo "ERROR: --window ${WIN}: end must be after start"; exit 1; }
+            TAG="${WS/-/}_${WE/-/}" ;;
     *) echo "ERROR: --window must be 2016Q1 or 2016"; exit 1 ;;
 esac
 COORD="${ROOT}/../inputs/osse_base/coords/coord_c${RES}.nc4"
 [ -z "${OBSDIR_X}" ] || { [ -d "${ROOT}/${OBSDIR_X}" ] || { echo "ERROR: --obs-dir ${OBSDIR_X} not found in ${ROOT}"; exit 1; }; OBSD="${OBSDIR_X}"; }
+OBSBASE="${ROOT}/${OBSD}"; [ -n "${OBSROOT_X}" ] && OBSBASE="${OBSROOT_X}"
 case "${OBS}" in
-    satellite) MODE=real;       TRACK=track_file_osse_2016.nc;        SEMI="${ROOT}/${OBSD}/semi_obs_xco2_${TAG:-2016Q1}.nc" ;;
+    satellite) MODE=real;       TRACK=track_file_osse_2016.nc;        SEMI="${OBSBASE}/semi_obs_xco2_${TAG:-2016Q1}.nc" ;;
     6hourly)   MODE=simplified; TRACK=track_file_c24_6h_3months.nc;   SEMI="${ROOT}/obs/semi_obs_xco2_6h_simplified_2016Q1.nc" ;;
     24hourly)  MODE=simplified; TRACK=track_file_c24_24h_3months.nc;  SEMI="${ROOT}/obs/semi_obs_xco2_24h_simplified_2016Q1.nc" ;;
     *) echo "ERROR: --obs must be satellite, 6hourly or 24hourly"; exit 1 ;;
@@ -169,9 +189,10 @@ if [ "${CKPT}" = min ] && [ -z "${CTRL_X}" ]; then
         *) echo "ERROR: no minimal-checkpoint control set for $(dirname "${CTRL_FWD}") (use --ckpt reduced or --ctrl)"; exit 1 ;;
     esac
     [ "${REL}" = rc4 ] && CFM=${CFM}_rc4
+    [ "${REL}" = adjm ] && CFM=${CFM}_adjm
     CTRL_FWD="${ROOT}/${CFM}/forward"; CTRL_ADJ="${ROOT}/${CFM}/adjoint"
-elif [ "${CKPT}" = reduced ] && [ "${REL}" = rc4 ] && [ -z "${CTRL_X}" ]; then
-    echo "ERROR: --ckpt reduced has no rc4 control set (debugging only: --release rc3, or --ctrl with ADJ_CKPT: 3)"; exit 1
+elif [ "${CKPT}" = reduced ] && [ "${REL}" != rc3 ] && [ -z "${CTRL_X}" ]; then
+    echo "ERROR: --ckpt reduced has no rc4/adjm control set (debugging only: --release rc3, or --ctrl with ADJ_CKPT: 3)"; exit 1
 elif [ "${CKPT}" != min ] && [ "${CKPT}" != reduced ]; then
     echo "ERROR: --ckpt must be min or reduced"; exit 1
 fi
@@ -179,16 +200,22 @@ if [ -n "${CTRL_X}" ]; then CTRL_FWD="${CTRL_X}/forward"; CTRL_ADJ="${CTRL_X}/ad
 case "${REL}" in
     rc4) GCHP_BIN="${GCHP_BIN_X:-${BIN_RC4}}" ;;
     rc3) GCHP_BIN="${GCHP_BIN_X:-${BIN_RC3}}" ;;
-    *) echo "ERROR: --release must be rc4 or rc3"; exit 1 ;;
+    adjm) GCHP_BIN="${GCHP_BIN_X:-${BIN_ADJM}}" ;;
+    *) echo "ERROR: --release must be rc4, rc3 or adjm"; exit 1 ;;
 esac
-EXP="${ROOT}/exps/${NAME}"
+EXP="${ROOT}/exps/${NAME}"; [ -n "${EXPS_X}" ] && EXP="${EXPS_X}/${NAME}"
 
 NFAIL=0
 ok()   { echo "  OK   $1"; }
 fail() { echo "  FAIL $1"; NFAIL=$((NFAIL + 1)); }
 echo "Pre-flight checks"
 for d in "${CTRL_FWD}" "${CTRL_ADJ}"; do                 # checkpoint keys must match the release (rc4 stops on the rc3 keys)
-    if [ "${REL}" = rc4 ]; then
+    if [ "${REL}" = adjm ]; then
+        # (anywhere in the file, comments too: ESMF can find a label in a comment)
+        grep -qE 'ADJ_CKPT:|ADV_ADJ_METHOD:|ADJ_CKPT_REDUCED:|ADJ_CKPT_TRAJ:' "${d}/GCHP.rc" \
+            && fail "$(basename "$(dirname "${d}")")/$(basename "${d}"): old key ADJ_CKPT*/ADV_ADJ_METHOD with adjm (use ADJ_METHOD)" \
+            || ok "$(basename "${d}") GCHP.rc: ADJ_METHOD $(awk -F'[[:space:]:]+' '/^ADJ_METHOD:/{print $2}' "${d}/GCHP.rc" | tail -1)"
+    elif [ "${REL}" = rc4 ]; then
         grep -qE '^ADJ_CKPT_(REDUCED|TRAJ):' "${d}/GCHP.rc" && fail "$(basename "$(dirname "${d}")")/$(basename "${d}"): rc3 key ADJ_CKPT_REDUCED/TRAJ with rc4 (use ADJ_CKPT)" \
             || ok "$(basename "${d}") GCHP.rc: ADJ_CKPT $(awk -F'[[:space:]:]+' '/^ADJ_CKPT:/{print $2}' "${d}/GCHP.rc" | tail -1)"
     else
@@ -207,7 +234,7 @@ for d in "${CTRL_FWD}" "${CTRL_ADJ}"; do
 done
 [ -e "${CTRL_FWD}/${TRACK}" ] && ok "track file ${TRACK}" || fail "track file ${TRACK} not in ${CTRL_FWD}"
 [ -f "${SEMI}" ] && ok "observations $(basename "${SEMI}")" || fail "observations missing: ${SEMI} (truth/run_truth.pbs done?)"
-[ -f "${ROOT}/${OBSD}/truth_emissions_monthly_${TAG:-2016Q1}.nc" ] && ok "truth emissions (${OBSD})" || fail "${OBSD}/truth_emissions_monthly_${TAG:-2016Q1}.nc missing"
+[ -f "${OBSBASE}/truth_emissions_monthly_${TAG:-2016Q1}.nc" ] && ok "truth emissions (${OBSBASE})" || fail "${OBSBASE}/truth_emissions_monthly_${TAG:-2016Q1}.nc missing"
 if [ "${CMODE}" = monthly ]; then
     grep -q '^752 TER_PRIOR_ERR ../prior_err_monthly/' "${CTRL_FWD}/HEMCO_Config.rc" && ok "forward reads monthly E (factor 752)" || fail "forward HEMCO does not read ../prior_err_monthly/"
     grep -q '^Sigma_CO2 .*sigma_monthly' "${CTRL_ADJ}/ExtData.rc" && ok "adjoint reads monthly sigma" || fail "adjoint ExtData does not read ../sigma_monthly/"
@@ -228,9 +255,21 @@ python3 "${G4D}/set_adjoint_met_offsets.py" "${CTRL_FWD}/ExtData.rc" "${CTRL_ADJ
 for d in "${CTRL_FWD}" "${CTRL_ADJ}"; do
     grep -q "^GCHP.IM_WORLD: *${RES}\$" "${d}/GCHP.rc" && ok "$(basename "$d") GCHP.rc is C${RES}" || fail "$(basename "$d") GCHP.rc is not C${RES}"
 done
+if [ "${REL}" = adjm ]; then
+    # rw: ADJ_METHOD 1 (or 3 = simplified convection adjoint, no checkpoints); dl: 2 (or 4)
+    AM="1 3"; [ "${ADJ}" = dl ] && AM="2 4"
+    AMF=$(awk -F'[[:space:]:]+' '/^ADJ_METHOD:/{print $2}' "${CTRL_FWD}/GCHP.rc" | tail -1)
+    for d in "${CTRL_FWD}" "${CTRL_ADJ}"; do
+        m=$(awk -F'[[:space:]:]+' '/^ADJ_METHOD:/{print $2}' "${d}/GCHP.rc" | tail -1)
+        [[ " ${AM} " == *" ${m} "* ]] && [ "${m}" = "${AMF}" ] \
+            && ok "$(basename "${d}") ADJ_METHOD = ${m} (--adj ${ADJ})" \
+            || fail "$(basename "${d}") GCHP.rc ADJ_METHOD ${m:-missing}: not one of ${AM} or forward/adjoint differ"
+    done
+else
 AM=reverse_wind_pure; [ "${ADJ}" = dl ] && AM=discrete_linear
 [ "$(awk -F'[[:space:]:]+' '/^ADV_ADJ_METHOD:/{print $2}' "${CTRL_ADJ}/GCHP.rc" | tail -1)" = "${AM}" ] \
     && ok "adjoint ADV_ADJ_METHOD = ${AM}" || fail "adjoint GCHP.rc ADV_ADJ_METHOD is not ${AM}"
+fi
 [ -f "${COORD}" ] && ok "C${RES} coordinates $(basename "${COORD}")" || fail "coordinate file missing: ${COORD}"
 [ "${NFAIL}" -eq 0 ] || { echo "${NFAIL} check(s) failed"; exit 1; }
 [ "${DRY}" = true ] && { echo "dry run: nothing created"; exit 0; }
@@ -239,11 +278,12 @@ mkdir -p "${EXP}"/{forward_run,adjoint,forcing_files_osse,4dvar_output_osse,logs
 source "${PYTHON_ENV}/bin/activate"
 if [ "${CMODE}" = monthly ]; then
     # shellcheck disable=SC2086
-    python3 -I "${G4D}/make_prior_err.py" --out-dir "${EXP}/prior_err_monthly" --n-months "${NMONTHS}" \
+    WOPT=(); [ -n "${WS:-}" ] && WOPT=(--year "${WS:0:4}" --start-month "$(( 10#${WS:5:2} ))")
+    python3 -I "${G4D}/make_prior_err.py" --out-dir "${EXP}/prior_err_monthly" --n-months "${NMONTHS}" "${WOPT[@]}" \
         ${MFAC:+--month-factors "${MFAC}"} --cs-res "${RES}" --coord-file "${COORD}" ${PERR}
     if [ -n "${OCN}" ]; then
         # shellcheck disable=SC2086
-        python3 -I "${G4D}/make_prior_err.py" --out-dir "${EXP}/prior_err_ocean_monthly" --n-months "${NMONTHS}" \
+        python3 -I "${G4D}/make_prior_err.py" --out-dir "${EXP}/prior_err_ocean_monthly" --n-months "${NMONTHS}" "${WOPT[@]}" \
             ${OMFAC:+--month-factors "${OMFAC}"} --cs-res "${RES}" --coord-file "${COORD}" ${OCN}
     fi
 elif [ -n "${PERR_FILE}" ]; then
@@ -276,14 +316,21 @@ sed -i "s|SEMI_OBS_FILE=\"\${SEMI_OBS_FILE:-\${_OBS_SEMI_OBS}}\"|SEMI_OBS_FILE=\
     sed -i "s|SIMPLIFIED_AK_FILE=\"\${SIMPLIFIED_AK_FILE:-\${_OBS_SIMPL_AK}}\"|SIMPLIFIED_AK_FILE=\"\${SIMPLIFIED_AK_FILE:-${SEMI}}\"|" "${RUN}"
 if [ "${GV}" != 14.5.3 ]; then
     sed -i 's|^GCHP_VERSION=${GCHP_VERSION:-14.5.3}|GCHP_VERSION=${GCHP_VERSION:-14.8}|' "${RUN}"
-    sed -i "s|\${_OSSE4DVAR_DIR}/obs/|\${_OSSE4DVAR_DIR}/${OBSD}/|g" "${RUN}"
+    if [ -n "${OBSROOT_X}" ]; then sed -i "s|\${_OSSE4DVAR_DIR}/obs/|${OBSROOT_X}/|g" "${RUN}"
+    else sed -i "s|\${_OSSE4DVAR_DIR}/obs/|\${_OSSE4DVAR_DIR}/${OBSD}/|g" "${RUN}"; fi
     grep -q '^GCHP_VERSION=${GCHP_VERSION:-14.8}' "${RUN}" || { echo "ERROR: could not set GCHP_VERSION=14.8"; exit 1; }
 fi
 if [ "${CMODE}" = monthly ]; then
     sed -i -e 's|^MODE=${MODE:-annual}|MODE=${MODE:-monthly}|' -e 's|^    GRID=${GRID:-latlon}|    GRID=${GRID:-cs}|' \
            -e '0,/^    T_END_DEFAULT=""/s||    T_END_DEFAULT="2016-04-01"|' "${RUN}"
     grep -q '^MODE=${MODE:-monthly}' "${RUN}" && grep -q '^    GRID=${GRID:-cs}' "${RUN}" || { echo "ERROR: could not set monthly defaults"; exit 1; }
-    if [ "${WIN}" = 2016 ]; then
+    if [ -n "${WS:-}" ]; then
+        sed -i -e "s|^T_START=\${T_START:-2016-01-01}|T_START=\${T_START:-${WS}-01}|" \
+               -e "s|^    T_END_DEFAULT=\"2016-04-01\"\$|    T_END_DEFAULT=\"${WE}-01\"|" \
+               -e "s|truth_emissions_monthly_2016Q1\.nc|truth_emissions_monthly_${TAG}.nc|g" "${RUN}"
+        grep -q "^T_START=\${T_START:-${WS}-01}" "${RUN}" && grep -q "^    T_END_DEFAULT=\"${WE}-01\"" "${RUN}" \
+            && ! grep -q 'truth_emissions_monthly_2016Q1' "${RUN}" || { echo "ERROR: could not set the window ${WIN}"; exit 1; }
+    elif [ "${WIN}" = 2016 ]; then
         sed -i -e 's|^    T_END_DEFAULT="2016-04-01"$|    T_END_DEFAULT="2017-01-01"|' \
                -e 's|truth_emissions_monthly_2016Q1\.nc|truth_emissions_monthly_2016.nc|g' "${RUN}"
         grep -q '^    T_END_DEFAULT="2017-01-01"' "${RUN}" && ! grep -q 'truth_emissions_monthly_2016Q1' "${RUN}" \
@@ -321,7 +368,9 @@ done
     [ -n "${OBSDIR_X}" ] && printf -- ' --obs-dir %s' "${OBSDIR_X}"
     [ "${CMODE}" = monthly ] && printf -- ' --window %s' "${WIN}"
     [ -n "${OCN}" ] && printf -- ' --ocean %q' "${OCN}"; [ -n "${OMFAC}" ] && printf -- ' --ocean-month-factors %s' "${OMFAC}"
-    [ "${LIN}" = true ] && printf -- ' --lin'; echo
+    [ "${LIN}" = true ] && printf -- ' --lin'; [ "${REL}" != adjm ] && printf -- ' --release %s' "${REL}"
+    [ -n "${CTRL_X}" ] && printf -- ' --ctrl %s' "${CTRL_X}"; [ -n "${EXPS_X}" ] && printf -- ' --exps-dir %s' "${EXPS_X}"
+    [ -n "${OBSROOT_X}" ] && printf -- ' --obs-root %s' "${OBSROOT_X}"; [ -n "${GCHP_BIN_X}" ] && printf -- ' (GCHP_BIN=%s)' "${GCHP_BIN_X}"; echo
 } > "${EXP}/setup_cmd.sh"
 echo
 echo "Experiment ready: ${EXP}"

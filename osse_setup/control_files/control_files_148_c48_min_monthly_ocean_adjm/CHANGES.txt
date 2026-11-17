@@ -1,0 +1,1 @@
+2026-11-11 15:37:16 exps1: C48 monthly TER + ocean set, from /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/control_files_148_c48_min_adjm with the changes of /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/control_files_148_ckpt_min_monthly_ocean_adjm (make_ctrl_monthly_ocean_c48.sh)

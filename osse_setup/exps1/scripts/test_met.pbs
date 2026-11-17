@@ -1,0 +1,9 @@
+#!/bin/bash
+#PBS -S /bin/bash
+#PBS -j oe
+#PBS -W group_list=s1055
+#PBS -q devel
+#PBS -l select=1:ncpus=28:model=bro_ele
+#PBS -l walltime=00:20:00
+timeout 30 curl -sI https://geos-chem.s3.amazonaws.com/GEOS_2x2.5/MERRA2/2017/01/MERRA2.20170101.A1.2x25.nc4 | head -1
+bash /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1/scripts/get_met_2x25.sh 2016-01-01 2016-01-02 4

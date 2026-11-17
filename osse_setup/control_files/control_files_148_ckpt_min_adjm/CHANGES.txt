@@ -1,0 +1,1 @@
+2026-10-25: copy of ../../gchp_14.8.0_adj/4dvar_osse/control_files_148_ckpt_reduced with ADJ_CKPT_REDUCED: 2 (forward + adjoint), forward ADJ_CKPT_TRAJ: 0 (minimal adjoint checkpoints, gchp.mck_20261025)

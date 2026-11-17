@@ -4,20 +4,27 @@ import calendar
 from datetime import datetime, timedelta
 import os
 
-# Read processed OCO-2 OSSE daily data from Junjie
-def read_oco_daily_osse(date, base_fold):
+# Only LG and LN exist for OSSE (no OG)
+OSSE_SUB_FOLDS = ('OCO2b10_29Aug2020_LG', 'OCO2b10_29Aug2020_LN')
+REAL_B10_FOLD = '/nobackupp17/jliu7/OCO2/L2#/OCO2-B10/'
+
+
+# Read processed OCO-2 daily data from Junjie: <base_fold>/<sub_fold>/YYYY/MM/DD.nc.
+# OSSE (default): ORCHIDEE-ECCO2 pseudo-observations. Real data (4dvar_realcase): e.g.
+# base_fold /nobackupp17/jliu7/OCO2/L2#/OCO2-B11.2/, sub_folds ('LN', 'LG') -- same file format.
+def read_oco_daily_osse(date, base_fold, sub_folds=OSSE_SUB_FOLDS):
     #date='20150101'
     #base_fold='/nobackupp17/jliu7/OCO2/L2#/OCO2-B10/PSEUDO/TRENDY/ORCHIDEE-ECCO2/'
     base_date = datetime.strptime(date, '%Y%m%d')
     date_str = base_date.strftime('%Y/%m/%d')
     daily_datasets = []
-    # Only LG and LN exist for OSSE (no OG)
-    sub_folds = {
-        'LG': 'OCO2b10_29Aug2020_LG',
-        'LN': 'OCO2b10_29Aug2020_LN'
-    }
-    for fold_name in sub_folds.values():
+    for fold_name in sub_folds:
         file_path = os.path.join(base_fold, fold_name, date_str + '.nc')
+        # exps1 (2026-11-10): the ORCHIDEE-ECCO2 pseudo set starts 2016-01-01; for earlier days fall back to the real B10
+        # 50 km buddy files, which have identical soundings, AK, uncertainty and prior (only xCO2 differs; the OSSE
+        # takes xCO2 from the semi-obs truth file). Only for the pseudo base folder.
+        if not os.path.exists(file_path) and base_fold.rstrip('/').endswith('PSEUDO/TRENDY/ORCHIDEE-ECCO2'):
+            file_path = os.path.join(REAL_B10_FOLD, fold_name, date_str + '.nc')
         if os.path.exists(file_path):
             ds = xr.open_dataset(file_path)
             daily_datasets.append(ds)
@@ -112,12 +119,15 @@ def convert_track_yearly(year, base_fold):
         print(f"No data found for year {year}")
 
 
-start_year = 2016
-end_year = 2016
-base_fold = '/nobackupp17/jliu7/OCO2/L2#/OCO2-B10/PSEUDO/TRENDY/ORCHIDEE-ECCO2/'
+# Run as a script only: before 2026-11-05 this block also ran on every import (co2_adjoint_forcing_osse.py imports
+# read_oco_daily_osse), re-writing sat_track/track_file_osse_2016.nc in the caller's directory each time.
+if __name__ == '__main__':
+    start_year = 2016
+    end_year = 2016
+    base_fold = '/nobackupp17/jliu7/OCO2/L2#/OCO2-B10/PSEUDO/TRENDY/ORCHIDEE-ECCO2/'
 
-for year in range(start_year, end_year + 1):
-    print(f"\n{'='*60}")
-    print(f"Processing year {year}")
-    print(f"{'='*60}")
-    convert_track_yearly(year, base_fold)
+    for year in range(start_year, end_year + 1):
+        print(f"\n{'='*60}")
+        print(f"Processing year {year}")
+        print(f"{'='*60}")
+        convert_track_yearly(year, base_fold)

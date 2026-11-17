@@ -1,0 +1,9 @@
+#!/bin/bash
+#PBS -S /bin/bash
+#PBS -j oe
+#PBS -W group_list=s1055
+#PBS -q devel
+#PBS -l select=1:ncpus=28:model=bro_ele
+#PBS -l walltime=00:15:00
+rm -rf /tmp/sb_test; mkdir -p /tmp/sb_test; /nobackup/ksuselj1/envs/gchp_4dvar/bin/python3 -I /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1/scripts/make_exps1_inputs.py /tmp/sb_test osse2
+/nobackup/ksuselj1/envs/gchp_4dvar/bin/python3 -I -c "import numpy as np; d=np.load('/tmp/sb_test/sigma_b.npz'); s=d['sigma_b']; print('size', s.size, 'expected', 2*12*144*24, 'finite', bool(np.isfinite(s).all()), 'min', s.min())"

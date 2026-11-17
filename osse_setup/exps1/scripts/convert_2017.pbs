@@ -1,0 +1,31 @@
+#!/bin/bash
+#PBS -S /bin/bash
+#PBS -j oe
+#PBS -W group_list=s1055
+#PBS -q devel
+#PBS -l select=1:ncpus=28:model=bro_ele
+#PBS -l walltime=01:00:00
+# exps1: 2017-01..2017-08 flux files (window to 2017-05-01 + boundary months) for all OSSE fluxes. First reproduce
+# 2016-03 of the existing daily files exactly (converter check), then write 2017.
+set -euo pipefail
+PY=/nobackup/ksuselj1/envs/gchp_4dvar/bin/python3
+V=/nobackupp17/jliu7/INVENTORY/V4; I=/nobackupp27/ksuselj1/gchp_14.8.0_adj/inputs/surface_fluxes_osse
+rm -rf /tmp/dchk; $PY -I /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1/scripts/convert_jliu_daily.py fossil $V/Fossilfuel/FF_regrid2 /tmp/dchk/ff 2016-03 2016-03
+$PY -I /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1/scripts/convert_jliu_daily.py balbio $V/Balbio/CARDAMOM-ECCO /tmp/dchk/bb 2016-03 2016-03
+$PY -I - <<PYEOF
+import numpy as np, netCDF4 as nc
+for k, sub in (("ff", "Fossilfuel/FF_regrid2"), ("bb", "Balbio/CARDAMOM-ECCO")):
+    bad = []
+    for d in range(1, 32):
+        a = nc.Dataset("/tmp/dchk/%s/2016/03/%02d.nc" % (k, d)); b = nc.Dataset("$I/%s/2016/03/%02d.nc" % (sub, d))
+        for v in ("CO2_Flux", "time", "lat", "lon"):
+            if not np.array_equal(np.asarray(a[v][:]), np.asarray(b[v][:]), equal_nan=True): bad.append((d, v))
+        if a["time"].units != b["time"].units: bad.append((d, "time units"))
+    print(sub, "2016-03 reproduced exactly" if not bad else "DIFFERENT %s" % bad[:5])
+    assert not bad
+PYEOF
+$PY -I /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1/scripts/convert_jliu_daily.py fossil $V/Fossilfuel/FF_regrid2 $I/Fossilfuel/FF_regrid2 2017-01 2017-08
+$PY -I /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1/scripts/convert_jliu_daily.py balbio $V/Balbio/CARDAMOM-ECCO $I/Balbio/CARDAMOM-ECCO 2017-01 2017-08
+for d in TER2/ORCHIDEE:TER/ORCHIDEE TER2/CLASS-CTEM:TER/CLASS-CTEM GPP/ORCHIDEE:GPP/ORCHIDEE Ocean/ECCO-Darwin-MON-v05:Ocean/ECCO-Darwin-MON-v05 Ocean/MOM6-MON:Ocean/MOM6-MON; do
+    $PY -I /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1/scripts/convert_jliu_monthly.py $V/${d%%:*} $I/${d##*:} 2017
+done

@@ -1,0 +1,10 @@
+#!/bin/bash
+#PBS -S /bin/bash
+#PBS -j oe
+#PBS -W group_list=s1055
+#PBS -q devel
+#PBS -l select=1:ncpus=28:model=bro_ele
+#PBS -l walltime=00:30:00
+/nobackup/ksuselj1/envs/gchp_4dvar/bin/python3 -I /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1/scripts/make_track_lnlgog.py --out /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1/obs_c24_1510_1705/track_file_lnlgog_201510_201705.nc --start 2015-10-01 --end 2017-05-01
+/nobackup/ksuselj1/envs/gchp_4dvar/bin/python3 -I /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1/scripts/make_track_lnlgog.py --out /tmp/trk2016.nc --start 2016-01-01 --end 2017-01-01
+/nobackup/ksuselj1/envs/gchp_4dvar/bin/python3 -I -c "import numpy as np, netCDF4 as nc; a=nc.Dataset('/tmp/trk2016.nc'); b=nc.Dataset('/nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1/obs_c24/track_file_lnlgog_2016.nc'); print('2016 part identical to the 2016 track:', all(np.array_equal(np.asarray(a[k][:]), np.asarray(b[k][:])) for k in ('time','latitude','longitude')))"

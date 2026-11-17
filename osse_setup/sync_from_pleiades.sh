@@ -18,6 +18,16 @@ for f in setup_exp.sh make_ctrl148.sh make_ctrl148_c48.sh make_ctrl_rc4.sh SPEED
 cp -p "${SRC}/truth148/run_truth148.pbs" "${SRC}/truth148_c48/run_truth148_c48.pbs" "${SRC}/truth148_lin/run_truth148_lin.pbs" "${SRC}/truth148_2016/run_truth148_2016.pbs" "${DST}/truth/"
 cp -p "${SRC}/fd_check/run_fd148.pbs" "${SRC}/fd_check/compare_fd.py" "${SRC}/fd_check/cells_E1.3.txt" "${DST}/fd_check/"
 
+# exps1 OSSE series (2026-11-09..): scripts (text only; outputs, data and job logs left out) and control-file sets
+mkdir -p "${DST}/exps1/scripts" "${DST}/exps1/control_files"
+rsync -a -q --delete --exclude='*.o[0-9]*' --exclude='*.log' --exclude='__pycache__/' --exclude='*.pre_*' --exclude='*.bak*' \
+      --include='*.py' --include='*.sh' --include='*.pbs' --include='*.md' --exclude='*' "${SRC}/exps1/scripts/" "${DST}/exps1/scripts/"
+for c in "${SRC}"/exps1/ctrl/*; do
+    n=$(basename "${c}")
+    rsync -a -q --delete "${EXCL[@]}" "${c}/" "${DST}/exps1/control_files/${n}/"
+    ( cd "${c}" && find . -type l -printf '%p -> %l\n' | sort ) > "${DST}/exps1/control_files/${n}/LINKS.txt"
+done
+
 # control-file sets
 mkdir -p "${DST}/control_files"
 for c in "${SRC}"/control_files_148*; do
