@@ -11,6 +11,9 @@
 #                                        (exps1/ctrl/osse2_c24_dl, ADJ_METHOD 4), sigma_b-scaled first step (1 sigma_b)
 #     setup_exps1_c24.sh DL1 [SUBMIT=1]  (2026-11-12) OSSE1_C24_DL: OSSE1 with the discrete advection adjoint
 #                                        (exps1/ctrl/osse1_c24_dl, ADJ_METHOD 4), sigma_b 0.2, same first step
+#     setup_exps1_c24.sh DL1BC [SUBMIT=1] (2026-11-17) OSSE1_C24_DL_BC: OSSE1_C24_DL with the correlated background error
+#                                        B = Sigma C Sigma (exps1/bcorr/b_corr_c24_L500_1000_tau1.npz: TER 500 km, ocean
+#                                        1000 km, tau 1 month; B_CORR_FILE); bounds monitored, not applied
 set -euo pipefail
 B=/nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse
 X=${B}/exps1
@@ -23,8 +26,11 @@ BOUNDS=0:4:-4:4
 WALL=120:00:00
 cd "${B}"
 source /nobackup/ksuselj1/envs/gchp_4dvar/bin/activate
-if [ "${1:-}" = DL ] || [ "${1:-}" = DL1 ]; then
-    if [ "${1}" = DL ]; then o=osse2; e=OSSE2_C24_DL; E0=1.0; else o=osse1; e=OSSE1_C24_DL; E0=1.3; fi
+BCORR=${X}/bcorr/b_corr_c24_L500_1000_tau1.npz
+if [ "${1:-}" = DL ] || [ "${1:-}" = DL1 ] || [ "${1:-}" = DL1BC ]; then
+    if [ "${1}" = DL ]; then o=osse2; e=OSSE2_C24_DL; E0=1.0
+    elif [ "${1}" = DL1BC ]; then o=osse1; e=OSSE1_C24_DL_BC; E0=1.3
+    else o=osse1; e=OSSE1_C24_DL; E0=1.3; fi
     ln -sfn "${OBSROOT}/track_file_lnlgog_201510_201705.nc" "${X}/ctrl/${o}_c24_dl/forward/track_file_osse_2016.nc"
     MAXITX=60 ./setup_exp.sh "${e}" --prior-err "--type constant --value ${E0}" --ocean "--type constant --value ${E0}" \
         --ctrl "${X}/ctrl/${o}_c24_dl" --mode monthly --window "${WIN}" --res 24 --adj dl --nodes 2 --plot-every 5 \
@@ -36,6 +42,10 @@ if [ "${1:-}" = DL ] || [ "${1:-}" = DL1 ]; then
     grep -q '^ADJ_METHOD: 4$' "${X}/ctrl/${o}_c24_dl/adjoint/GCHP.rc" || { echo "${e}: not ADJ_METHOD 4"; exit 1; }
     V="SIGMA_BOUNDS_FIELD=${BOUNDS},OSSE_SUBDIRS=${OSSE_SUBDIRS},NODES=2,WALLTIME_S=432000,FIRST_STEP_SIGMA_B=1.0"
     [ "${o}" = osse2 ] && V="${V},SIGMA_B_FILE=${X}/${e}/sigma_b.npz"
+    if [ "${1}" = DL1BC ]; then
+        [ -f "${BCORR}" ] || { echo "${BCORR} not built (scripts/build_bcorr.pbs)"; exit 1; }
+        V="${V},B_CORR_FILE=${BCORR}"
+    fi
     echo "${e}: qsub -q long -l walltime=${WALL} -v ${V}"
     [ "${2:-}" = SUBMIT=1 ] && { cd "${X}/${e}" && /PBS/bin/qsub -q long -l walltime=${WALL} -v "${V}" "4dvar_optimizer.osse.${e}.run"; }
     exit 0

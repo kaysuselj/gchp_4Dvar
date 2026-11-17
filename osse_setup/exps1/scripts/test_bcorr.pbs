@@ -1,0 +1,11 @@
+#!/bin/bash
+#PBS -S /bin/bash
+#PBS -j oe
+#PBS -W group_list=s1055
+#PBS -q devel
+#PBS -l select=1:ncpus=28:model=bro_ele
+#PBS -l walltime=00:45:00
+PY=/nobackup/ksuselj1/envs/gchp_4dvar/bin/python3
+export OMP_NUM_THREADS=8
+cd /nobackupp27/ksuselj1/gchp_14.8.0_adj/gchp_4Dvar && ${PY} test_b_corr.py
+${PY} -I /nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1/scripts/check_bcorr_c24.py

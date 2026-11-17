@@ -1,0 +1,18 @@
+#!/bin/bash
+#PBS -S /bin/bash
+#PBS -j oe
+#PBS -W group_list=s1055
+#PBS -q devel
+#PBS -l select=1:ncpus=28:model=bro_ele
+#PBS -l walltime=00:30:00
+X=/nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse/exps1
+PY=/nobackup/ksuselj1/envs/gchp_4dvar/bin/python3
+export OMP_NUM_THREADS=28
+mkdir -p ${X}/bcorr
+# grid + masks from the OSSE 1 prior (iteration-1 emissions, 19 months 2015-10 .. 2017-04)
+time ${PY} -I ${X}/scripts/b_corr.py build --grid-file ${X}/obs_c24_1510_1705/truth_emissions_monthly_201510_201705.nc \
+    --prior-file ${X}/OSSE1_C24_DL/4dvar_output_osse/emissions_monthly_iter001.nc4 \
+    --fields EmisCO2_NetTerrExch,EmisCO2_Ocean --length-km 500,1000 --tau-months 1.0 --n-months 19 \
+    --out ${X}/bcorr/b_corr_c24_L500_1000_tau1.npz
+${PY} -I ${X}/scripts/b_corr.py info ${X}/bcorr/b_corr_c24_L500_1000_tau1.npz
+ls -la ${X}/bcorr/
