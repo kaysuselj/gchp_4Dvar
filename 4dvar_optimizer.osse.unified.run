@@ -364,6 +364,12 @@ FIRST_STEP_SIGMA_B="${FIRST_STEP_SIGMA_B:-}"
 # 2026-11-17: correlated background error B = Sigma C Sigma (spatial length per field, tau), operator file of b_corr.py
 # build; the optimizer works in the whitened variable v. Needs FIRST_STEP_SIGMA_B. Empty = diagonal B (as before).
 B_CORR_FILE="${B_CORR_FILE:-}"
+# 2026-11-17: start a FRESH run at the iteration-1 optimizer step, with J_obs and the gradient at the prior taken from the
+# iteration-1 state of another run with the same prior, observations and model (<run>/4dvar_output_osse/
+# 4dvar_state_iter001.npz); the first forward and adjoint are skipped. Used for correlated-B runs (iteration 1 is at the
+# prior, where J and its gradient do not depend on B). The source run's iteration-1 emissions and forcing archives are
+# copied (plots, figure scripts). Empty = normal start.
+GRADIENT_FROM_STATE="${GRADIENT_FROM_STATE:-}"
 MAX_ITER=${MAX_ITER:-20}                 # GLOBAL iteration cap across all chained jobs
 GTOL=${GTOL:-1e-5}
 FTOL=${FTOL:-1e-8}
@@ -415,6 +421,10 @@ if [ -n "${OBS_DIR}" ]; then
     for _sub in ${OBS_SUBDIRS//:/ }; do [ -d "${OBS_DIR}/${_sub}" ] || die "observations ${OBS_DIR}/${_sub} not found"; done
 fi
 [ -z "${SIGMA_B_FILE}" ] || [ -f "${SIGMA_B_FILE}" ] || die "SIGMA_B_FILE not found: ${SIGMA_B_FILE}"
+if [ -n "${GRADIENT_FROM_STATE}" ]; then
+    [ -f "${GRADIENT_FROM_STATE}" ] || die "GRADIENT_FROM_STATE not found: ${GRADIENT_FROM_STATE}"
+    [ "${MODE}" = "monthly" ]       || die "GRADIENT_FROM_STATE needs MODE=monthly"
+fi
 if [ -n "${B_CORR_FILE}" ]; then
     [ -f "${B_CORR_FILE}" ]        || die "B_CORR_FILE not found: ${B_CORR_FILE}"
     [ "${MODE}" = "monthly" ]      || die "B_CORR_FILE needs MODE=monthly"
@@ -475,6 +485,7 @@ VPASS="${VPASS},OBS_TYPE=${OBS_TYPE},OBS_MODE=${OBS_MODE}"
 [ -n "${OSSE_SUBDIRS}" ]        && VPASS="${VPASS},OSSE_SUBDIRS=${OSSE_SUBDIRS}"
 [ -n "${FIRST_STEP_SIGMA_B}" ]  && VPASS="${VPASS},FIRST_STEP_SIGMA_B=${FIRST_STEP_SIGMA_B}"
 [ -n "${B_CORR_FILE}" ]         && VPASS="${VPASS},B_CORR_FILE=${B_CORR_FILE}"
+[ -n "${GRADIENT_FROM_STATE}" ] && VPASS="${VPASS},GRADIENT_FROM_STATE=${GRADIENT_FROM_STATE}"
 [ -n "${SIMPLIFIED_AK_FILE}" ]  && VPASS="${VPASS},SIMPLIFIED_AK_FILE=${SIMPLIFIED_AK_FILE}"
 [ -n "${CTRL_FWD_DIR}" ]        && VPASS="${VPASS},CTRL_FWD_DIR=${CTRL_FWD_DIR}"
 [ -n "${CTRL_ADJ_DIR}" ]        && VPASS="${VPASS},CTRL_ADJ_DIR=${CTRL_ADJ_DIR}"
@@ -869,6 +880,18 @@ plot_ter_comparison() {
 log "========================================================"
 log " 4D-Var OSSE (MODE=${MODE}) — chain job ${CHAIN_N}"
 log " window ${T_START} -> ${T_END}  (${NMON} months)  nlat=${NLAT} nlon=${NLON} sigma_b=${SIGMA_B}"
+if [ -n "${GRADIENT_FROM_STATE}" ] && [ "${RESTART}" != "true" ]; then
+    _src_out="$(dirname "${GRADIENT_FROM_STATE}")"
+    mkdir -p "${OUTPUT_DIR}"
+    for _f in emissions_monthly_iter001.nc4 forcing_iter001.nc4 daily_forcing_iter001.nc4; do
+        [ -f "${_src_out}/${_f}" ] && cp "${_src_out}/${_f}" "${OUTPUT_DIR}/${_f}"
+    done
+    [ -f "${_src_out}/../forcing_files_osse/N_obs.txt" ] && mkdir -p "${FORCING_DIR}" && \
+        cp "${_src_out}/../forcing_files_osse/N_obs.txt" "${FORCING_DIR}/N_obs.txt"
+    CUR_ITER=1; CUR_PHASE=adjoint_done
+    log "GRADIENT_FROM_STATE: iteration 1 forward + adjoint skipped; J and gradient at the prior from ${GRADIENT_FROM_STATE}"
+    save_progress
+fi
 log " starting at iteration ${CUR_ITER}, after phase '${CUR_PHASE}'  (max_iter=${MAX_ITER})"
 log " log → ${LOG_FILE}"
 log "========================================================"
@@ -1090,6 +1113,7 @@ while [ "${CUR_ITER}" -le "${MAX_ITER}" ]; do
                 --sigma-min "${SIGMA_MIN}" --sigma-max "${SIGMA_MAX}" \
                 ${FIRST_STEP_SIGMA_B:+--first-step-sigma-b "${FIRST_STEP_SIGMA_B}"} \
                 ${B_CORR_FILE:+--b-corr-file "${B_CORR_FILE}"} \
+                $( [ -n "${GRADIENT_FROM_STATE}" ] && [ "${CUR_ITER}" -eq 1 ] && echo "--gradient-from-state ${GRADIENT_FROM_STATE}" ) \
                 ${SIGMA_BOUNDS_FIELD:+--sigma-bounds-field "$(echo "${SIGMA_BOUNDS_FIELD}" | sed -E 's/([^:]*:[^:]*):/\1,/g')"} \
                 --t-start "${T_START}" --t-end "${T_END}" \
                 --gtol "${GTOL}" --ftol "${FTOL}" --plateau-n "${PLATEAU_N}" \

@@ -229,6 +229,34 @@ def main():
     e = np.abs(xc - xa).max()
     check(f'c) C = I gives the diagonal-B solution ({it_c} iterations)', e < 2e-3, f'max |x_I - x_diag| {e:.2e}')
 
+    # e) --gradient-from-state: a correlated-B iteration 1 from another run's iteration-1 state (diagonal B, same prior)
+    #    must give the same state as a correlated-B iteration 1 from the forcing / adjoint files
+    def first_iter(wdir, extra, src_state=None):
+        for d in ('forcing', 'adj'):
+            os.makedirs(os.path.join(wdir, d), exist_ok=True)
+        for f in ('state.npz', 'hist.csv', '4dvar_state_best.npz'):
+            if os.path.exists(os.path.join(wdir, f)):
+                os.remove(os.path.join(wdir, f))
+        np.savez(os.path.join(wdir, 'sigma_b.npz'), sigma_b=sig_b)
+        r0 = y - H @ np.ones(n)
+        open(os.path.join(wdir, 'forcing', 'J_value.txt'), 'w').write(f'{0.5 * r0 @ Rinv @ r0:.17e}\n')
+        open(os.path.join(wdir, 'forcing', 'N_obs.txt'), 'w').write(f'{len(y)}\n')
+        if src_state is None:
+            write_adjoint(os.path.join(wdir, 'adj'), -(H.T @ (Rinv @ r0)), NMON, 6 * IM * IM)
+        else:
+            extra = extra + ['--gradient-from-state', src_state]
+        run_step(wdir, ['--sigma-b-file', os.path.join(wdir, 'sigma_b.npz')] + extra)
+        return dict(np.load(os.path.join(wdir, 'state.npz')))
+    wa, wb, wc = (os.path.join(tmp, k) for k in ('e_diag', 'e_bc', 'e_bc_from'))
+    first_iter(wa, [])
+    st_bc = first_iter(wb, ['--b-corr-file', opf])
+    st_fr = first_iter(wc, ['--b-corr-file', opf], src_state=os.path.join(wa, 'state.npz'))
+    num = [k for k in st_bc if np.issubdtype(np.asarray(st_bc[k]).dtype, np.number)]
+    same = all(np.allclose(st_bc[k], st_fr[k], rtol=1e-12, atol=1e-14) for k in num) and \
+        all(str(st_bc[k]) == str(st_fr[k]) for k in st_bc if k not in num and k != 'b_corr')
+    check('e) --gradient-from-state = full iteration 1 (correlated B)', same and set(st_bc) == set(st_fr),
+          f'max |dv| {np.abs(st_bc["v_next"] - st_fr["v_next"]).max():.1e}')
+
     ed = np.sqrt(np.mean((x_ex_d - x_true) ** 2)); ec = np.sqrt(np.mean((x_ex_c - x_true) ** 2))
     e0 = np.sqrt(np.mean((1 - x_true) ** 2))
     check('d) correlated B closer to the smooth truth', ec < ed,

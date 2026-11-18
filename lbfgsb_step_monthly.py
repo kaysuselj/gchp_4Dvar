@@ -589,6 +589,12 @@ def main():
     parser.add_argument('--b-corr-file', default=None,
                         help='2026-11-17: correlated B, operator file of b_corr.py build (horizontal length per field, '
                              'tau); the optimizer works in v with x = 1 + sigma_b L v. Default: diagonal B')
+    parser.add_argument('--gradient-from-state', default=None,
+                        help='2026-11-17: iteration 1 only. Take J_obs and the gradient at the prior (x = 1) from an archived '
+                             'iteration-1 state of another run with the same prior, observations and model '
+                             '(<run>/4dvar_output_osse/4dvar_state_iter001.npz: J_obs_prev, g_anchor) instead of the forcing '
+                             'and adjoint output, e.g. to start a correlated-B run without repeating the first forward and '
+                             'adjoint. N_obs is still read from --forcing-dir (optional)')
     parser.add_argument('--max-backtrack', type=int, default=6,
                         help='Max step halvings along one direction before '
                              'declaring a line-search stall (0 = old unit-step '
@@ -738,7 +744,25 @@ def main():
     # ------------------------------------------------------------------
     # Read current J and gradient
     # ------------------------------------------------------------------
+    if args.gradient_from_state:
+        if it != 1 or os.path.exists(args.state_file):
+            print('ERROR: --gradient-from-state is for iteration 1 (no state file yet)', file=sys.stderr)
+            sys.exit(2)
+        src = np.load(args.gradient_from_state)
+        ok = (int(src['iteration']) == 2 and int(src['m_used']) == 0 and src['g_anchor'].size == n
+              and np.all(src['x_anchor'] == 1.0) and float(src['J_b_prev']) == 0.0)
+        if not ok:
+            print(f'ERROR: {args.gradient_from_state} is not an iteration-1 state at the prior of a {n}-element control',
+                  file=sys.stderr)
+            sys.exit(2)
+        J_obs = float(src['J_obs_prev'])
+        g_obs = src['g_anchor'].astype(np.float64)        # at x = 1 the background gradient is 0: g_anchor = g_obs
+        A_bnd = boundaries = None
+        print(f'  J_obs and gradient at the prior from {args.gradient_from_state}: J_obs={J_obs:.6e} '
+              f'|g|_inf={np.abs(g_obs).max():.4e}')
     try:
+        if args.gradient_from_state:
+            raise StopIteration
         J_obs = read_J_obs(args.forcing_dir)
         parts, A_parts = [], []
         for var in fields:                      # one control field per adjoint flux sensitivity, stacked
@@ -749,6 +773,8 @@ def main():
             parts.append(g_k); A_parts.append(A_k)
         g_obs = np.concatenate(parts)
         A_bnd = A_parts[0]
+    except StopIteration:
+        pass
     except Exception as exc:
         print(f'ERROR reading J / gradient: {exc}', file=sys.stderr)
         sys.exit(2)
@@ -790,7 +816,7 @@ def main():
     n_obs = read_N_obs(args.forcing_dir)
     print_balance_diagnostics(J_obs, J_b, g_obs, g_b, n_obs, n)
 
-    if args.archive_dir:
+    if args.archive_dir and A_bnd is not None:
         save_boundary_diagnostics(A_bnd, g_obs_x[:nmon * args.nlat * args.nlon], boundaries, args.archive_dir,
                                   it, args.nlat, args.nlon)
 
