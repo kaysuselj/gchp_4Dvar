@@ -14,6 +14,10 @@
 #     setup_exps1_c24.sh DL1BC [SUBMIT=1] (2026-11-17) OSSE1_C24_DL_BC: OSSE1_C24_DL with the correlated background error
 #                                        B = Sigma C Sigma (exps1/bcorr/b_corr_c24_L500_1000_tau1.npz: TER 500 km, ocean
 #                                        1000 km, tau 1 month; B_CORR_FILE); bounds monitored, not applied
+#     setup_exps1_c24.sh DLBC [SUBMIT=1]  (2026-11-17) OSSE2_C24_DL_BC: OSSE2_C24_DL with the correlated B (operator with the
+#                                        OSSE 2 prior masks, b_corr_c24_osse2_L500_1000_tau1.npz); iteration 1 reuses the
+#                                        J and gradient at the prior of OSSE2_C24_DL (GRADIENT_FROM_STATE, no first forward
+#                                        and adjoint)
 set -euo pipefail
 B=/nobackupp27/ksuselj1/gchp_14.8.0_adj/4dvar_osse
 X=${B}/exps1
@@ -27,8 +31,10 @@ WALL=120:00:00
 cd "${B}"
 source /nobackup/ksuselj1/envs/gchp_4dvar/bin/activate
 BCORR=${X}/bcorr/b_corr_c24_L500_1000_tau1.npz
-if [ "${1:-}" = DL ] || [ "${1:-}" = DL1 ] || [ "${1:-}" = DL1BC ]; then
+[ "${1:-}" = DLBC ] && BCORR=${X}/bcorr/b_corr_c24_osse2_L500_1000_tau1.npz
+if [ "${1:-}" = DL ] || [ "${1:-}" = DL1 ] || [ "${1:-}" = DL1BC ] || [ "${1:-}" = DLBC ]; then
     if [ "${1}" = DL ]; then o=osse2; e=OSSE2_C24_DL; E0=1.0
+    elif [ "${1}" = DLBC ]; then o=osse2; e=OSSE2_C24_DL_BC; E0=1.0
     elif [ "${1}" = DL1BC ]; then o=osse1; e=OSSE1_C24_DL_BC; E0=1.3
     else o=osse1; e=OSSE1_C24_DL; E0=1.3; fi
     ln -sfn "${OBSROOT}/track_file_lnlgog_201510_201705.nc" "${X}/ctrl/${o}_c24_dl/forward/track_file_osse_2016.nc"
@@ -42,9 +48,15 @@ if [ "${1:-}" = DL ] || [ "${1:-}" = DL1 ] || [ "${1:-}" = DL1BC ]; then
     grep -q '^ADJ_METHOD: 4$' "${X}/ctrl/${o}_c24_dl/adjoint/GCHP.rc" || { echo "${e}: not ADJ_METHOD 4"; exit 1; }
     V="SIGMA_BOUNDS_FIELD=${BOUNDS},OSSE_SUBDIRS=${OSSE_SUBDIRS},NODES=2,WALLTIME_S=432000,FIRST_STEP_SIGMA_B=1.0"
     [ "${o}" = osse2 ] && V="${V},SIGMA_B_FILE=${X}/${e}/sigma_b.npz"
-    if [ "${1}" = DL1BC ]; then
-        [ -f "${BCORR}" ] || { echo "${BCORR} not built (scripts/build_bcorr.pbs)"; exit 1; }
+    if [ "${1}" = DL1BC ] || [ "${1}" = DLBC ]; then
+        [ -f "${BCORR}" ] || { echo "${BCORR} not built (scripts/build_bcorr*.pbs)"; exit 1; }
         V="${V},B_CORR_FILE=${BCORR}"
+    fi
+    if [ "${1}" = DLBC ]; then
+        GS=${X}/OSSE2_C24_DL/4dvar_output_osse/4dvar_state_iter001.npz
+        [ -f "${GS}" ] || { echo "${GS} missing"; exit 1; }
+        cmp -s "${X}/OSSE2_C24_DL/sigma_b.npz" "${X}/${e}/sigma_b.npz" || { echo "${e}: sigma_b differs from OSSE2_C24_DL"; exit 1; }
+        V="${V},GRADIENT_FROM_STATE=${GS}"
     fi
     echo "${e}: qsub -q long -l walltime=${WALL} -v ${V}"
     [ "${2:-}" = SUBMIT=1 ] && { cd "${X}/${e}" && /PBS/bin/qsub -q long -l walltime=${WALL} -v "${V}" "4dvar_optimizer.osse.${e}.run"; }

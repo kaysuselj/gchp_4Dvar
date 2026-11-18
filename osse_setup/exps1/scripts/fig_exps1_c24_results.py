@@ -15,6 +15,7 @@ Figures (in <out>):
   fig_monthly_global.png  monthly global TER and ocean: truth, prior, posterior
   fig_monthly_bias_rmse.png  per month of 2016: global bias and area-weighted cell RMSE, prior and posterior
   fig_maps_ter.png        2016 mean TER, prior and posterior minus truth (maps)
+  fig_rmse_scale.png      RMSE of the 2016 mean error after averaging over a radius R (scale dependence), TER and ocean
   results.txt             all numbers
     fig_exps1_c24_results.py <out dir>
 """
@@ -412,6 +413,50 @@ for row, osse in enumerate(("OSSE 1", "OSSE 2")):
     cb = fig.colorbar(pc, ax=axs[row, :].tolist(), orientation="horizontal", shrink=0.4, pad=0.08, aspect=40)
     cb.set_label(f"{osse}: 2016 mean TER difference [gC m-2 day-1]", fontsize=8, color=INK2); cb.ax.tick_params(labelsize=7)
 fig.savefig(f"{out}/fig_maps_ter.png", dpi=150, bbox_inches="tight"); plt.close(fig)
+
+# ---- RMSE against averaging scale: 2016 mean error averaged (area-weighted) over the cells of the field within R km ----
+RADII = [0, 300, 500, 750, 1000, 1500, 2000, 3000, 4000]
+uc = unit(lons.reshape(-1), lats.reshape(-1))
+dist = 6371.0 * np.arctan2(np.linalg.norm(np.cross(uc[:, None], uc[None]), axis=-1), np.clip(uc @ uc.T, -1, 1))
+a_flat = area.reshape(-1)
+
+
+def rmse_scale(err, m):
+    """err: 2016-mean error per cell (gC m-2 day-1); m: cells of the field. RMSE (area-weighted over m) of the error
+    averaged over all cells of m within R km of each cell, for each R in RADII (R = 0: the cell itself)."""
+    e, w = err.reshape(-1)[m], a_flat[m]
+    D = dist[np.ix_(m, m)]
+    out_ = []
+    for R in RADII:
+        W = (D <= max(R, 1e-6)) * w[None, :]
+        s = W @ e / W.sum(1)
+        out_.append(np.sqrt(np.sum(w * s ** 2) / w.sum()))
+    return np.array(out_)
+
+
+fig, axs = plt.subplots(2, 2, figsize=(12, 7.5))
+rep.append("\nRMSE of the 2016 mean flux error vs averaging radius [gC m-2 day-1], radii " + " ".join(f"{R}" for R in RADII) + " km")
+for c, osse in enumerate(("OSSE 1", "OSSE 2")):
+    rr = [r for r in runs.values() if r["osse"] == osse]
+    for row, k in enumerate(("TER", "ocean")):
+        ax = axs[row, c]
+        m = (np.abs(truth[k]).sum(0) + np.abs(rr[0]["prior"][k]).sum(0)).reshape(-1) > 0
+        e_pr = mean_flux(rr[0]["prior"][k]) - mean_flux(truth[k])
+        s_pr = rmse_scale(e_pr, m)
+        ax.plot(RADII, s_pr, "--o", color=PRIOR, ms=4, lw=1.8, label="prior - truth")
+        rep.append(f"  {osse} {k:5s} prior      " + " ".join(f"{v:.3f}" for v in s_pr))
+        for r in rr:
+            s_po = rmse_scale(mean_flux(r["post"][k]) - mean_flux(truth[k]), m)
+            ax.plot(RADII, s_po, "-o", color=COL[r["adj"]], ms=4, lw=1.8, label=f"posterior - truth, {r['lab']}")
+            rep.append(f"  {osse} {k:5s} {r['adj']:10s} " + " ".join(f"{v:.3f}" for v in s_po)
+                       + "   (ratio to prior " + " ".join(f"{v:.2f}" for v in s_po / s_pr) + ")")
+        ax.set_ylim(bottom=0); ax.set_xlim(-100, RADII[-1] + 100)
+        ax.set_xlabel("averaging radius [km] (0 = single C24 cell, ~400 km)", fontsize=8, color=INK2)
+        ax.set_title(f"{osse} {k}: RMSE of the 2016 mean error vs averaging scale [gC m-2 day-1]", fontsize=9,
+                     color=INK, loc="left")
+        style(ax, "both")
+        ax.legend(fontsize=7, frameon=False)
+fig.tight_layout(); fig.savefig(f"{out}/fig_rmse_scale.png", dpi=150); plt.close(fig)
 
 # ---- numbers ----
 rep.append("\nPer run: 2016 global total minus truth [PgC] and cell RMSE change vs prior, at the posterior")
